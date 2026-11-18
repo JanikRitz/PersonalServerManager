@@ -2,3 +2,4 @@
 **/obj/
 .vs/
 Testing-Credentials.txt
+.playwright-mcp/
