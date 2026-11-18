@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using PersonalServerManager.Security;
 using PersonalServerManager.Stash;
+using PersonalServerManager.Hydrus;
+using PersonalServerManager.Search;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -58,6 +60,11 @@ builder.Services.AddSingleton<IAdminCredentialStore>(services => new JsonAdminCr
     services.GetRequiredService<IDataProtectionProvider>().CreateProtector("OwnerPasswordHash.v1")));
 builder.Services.AddHttpClient<IStashGraphQlClient, StashGraphQlClient>(client =>
     client.Timeout = Timeout.InfiniteTimeSpan);
+builder.Services.AddSingleton<IHydrusClient>(_ => new HydrusClient());
+builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusInstanceStore(
+    Path.Combine(dataDirectory, "hydrus-instances.json"),
+    services.GetRequiredService<IDataProtectionProvider>().CreateProtector("HydrusApiKey.v1")));
+builder.Services.AddTransient<LibrarySearchService>();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;

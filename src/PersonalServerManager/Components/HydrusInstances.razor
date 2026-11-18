@@ -1,0 +1,382 @@
+@using PersonalServerManager.Hydrus
+@using System.Security.Cryptography
+@using System.Text.Json
+@implements IDisposable
+@inject IHydrusInstanceStore Store
+@inject IHydrusClient Client
+@inject IJSRuntime JavaScript
+
+<section class="hydrus-instances" aria-labelledby="@FieldId("heading")">
+    <header class="hydrus-heading">
+        <h2 id="@FieldId("heading")">Hydrus</h2>
+        <button class="icon-button" type="button" title="Add Hydrus instance" aria-label="Add Hydrus instance" disabled="@(_busy || _loading)" @onclick="AddInstance">
+            <MudIcon Icon="@Icons.Material.Filled.Add" aria-hidden="true" />
+        </button>
+    </header>
+    @if (_error is not null)
+    {
+        <p class="error-message" role="alert">@_error</p>
+        <button class="retry-button" type="button" disabled="@(_busy || _loading)" @onclick="ReloadAsync">Retry loading</button>
+    }
+    @if (_loading)
+    {
+        <p class="empty-message" role="status">Loading Hydrus instances...</p>
+    }
+    else if (_instances.Count == 0 && _error is null)
+    {
+        <p class="empty-message">No Hydrus instances configured.</p>
+    }
+    <ul class="hydrus-list" aria-label="Hydrus instances">
+        @foreach (var instance in _instances)
+        {
+            var reachable = _observations.GetValueOrDefault(instance.Id)?.IsReachable == true;
+            <li @key="instance.Id" class="hydrus-row">
+                <span class="status-dot @(reachable ? "online" : "offline")" aria-hidden="true"></span>
+                <div class="instance-copy">
+                    <strong>@instance.Name</strong>
+                    <span class="instance-status" role="status">@StatusText(instance)</span>
+                    <small>@instance.ApiEndpoint.Host</small>
+                </div>
+                <div class="row-actions">
+                    <button class="icon-button" type="button" title="Edit Hydrus instance" aria-label="@($"Edit Hydrus instance {instance.Name}")" disabled="@_busy" @onclick="() => EditInstance(instance)">
+                        <MudIcon Icon="@Icons.Material.Filled.Edit" aria-hidden="true" />
+                    </button>
+                    <button class="icon-button remove-button" type="button" title="Remove Hydrus instance" aria-label="@($"Remove Hydrus instance {instance.Name}")" disabled="@_busy" @onclick="() => RemoveAsync(instance)">
+                        <MudIcon Icon="@Icons.Material.Filled.DeleteOutline" aria-hidden="true" />
+                    </button>
+                </div>
+            </li>
+        }
+    </ul>
+    <p class="permission-note">Client API permissions: search and retrieve files. Manage pages is needed only for the explicit Open in Hydrus action.</p>
+
+    @if (_editing)
+    {
+        <div class="hydrus-backdrop" @onkeydown="HandleEditorKey">
+            <dialog open class="hydrus-dialog" aria-modal="true" aria-labelledby="@FieldId("editor-title")">
+                <header class="editor-heading">
+                    <h3 id="@FieldId("editor-title")">@(_editingId is null ? "Add Hydrus instance" : "Edit Hydrus instance")</h3>
+                    <button class="icon-button" type="button" title="Close Hydrus editor" aria-label="Close Hydrus editor" disabled="@_busy" @onclick="CancelEdit">
+                        <MudIcon Icon="@Icons.Material.Filled.Close" aria-hidden="true" />
+                    </button>
+                </header>
+                @if (_editorError is not null)
+                {
+                    <p class="error-message" role="alert">@_editorError</p>
+                }
+                <form @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
+                    <fieldset disabled="@_busy">
+                        <label for="@FieldId("name")">Hydrus instance name</label>
+                        <input id="@FieldId("name")" @bind="_draftName" @bind:event="oninput" maxlength="60" required autofocus />
+                        <label for="@FieldId("url")">Client API URL</label>
+                        <input id="@FieldId("url")" @bind="_draftUrl" @bind:event="oninput" type="url" required spellcheck="false" aria-describedby="@FieldId("url-help")" />
+                        <small id="@FieldId("url-help")">Use HTTP or HTTPS without credentials, a query, or a fragment.</small>
+                        <label for="@FieldId("key")">Hydrus access key</label>
+                        <input id="@FieldId("key")" @bind="_draftKey" @bind:event="oninput" type="password" required="@(_editingId is null)" maxlength="1024" autocomplete="new-password" spellcheck="false" aria-describedby="@FieldId("key-help")" />
+                        <small id="@FieldId("key-help")">@(_editingId is null ? "Create an access key in Hydrus Client API settings with search and retrieve files permissions." : "Leave blank to keep the current key. Enter a key if this instance has none.")</small>
+                        <div class="editor-actions">
+                            <button class="cancel-button" type="button" @onclick="CancelEdit">Cancel</button>
+                            <button class="save-button" type="submit">@(_busy ? "Saving..." : "Save instance")</button>
+                        </div>
+                    </fieldset>
+                </form>
+            </dialog>
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter] public EventCallback Changed { get; set; }
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly string _id = $"hydrus-{Guid.NewGuid():N}";
+    private readonly Dictionary<Guid, HydrusObservation> _observations = [];
+    private CancellationToken _token;
+    private IReadOnlyList<HydrusInstance> _instances = [];
+    private bool _loading = true;
+    private bool _busy;
+    private bool _editing;
+    private bool _disposed;
+    private Guid? _editingId;
+    private string _draftName = string.Empty;
+    private string _draftUrl = "http://127.0.0.1:45869/";
+    private string _draftKey = string.Empty;
+    private string? _error;
+    private string? _editorError;
+
+    private string FieldId(string suffix) => $"{_id}-{suffix}";
+
+    protected override async Task OnInitializedAsync()
+    {
+        _token = _lifetime.Token;
+        await ReloadAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_disposed)
+        {
+            _ = ObservePeriodicallyAsync();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _instances = await Store.GetAllAsync(_token);
+            _observations.Clear();
+            await RefreshObservationsAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _error = "Could not load Hydrus instances. Check configuration file access and this account's encryption keys, then retry.";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task RefreshObservationsAsync()
+    {
+        var snapshot = _instances;
+        var observations = await Task.WhenAll(snapshot.Select(async instance =>
+        {
+            if (string.IsNullOrWhiteSpace(instance.ApiKey))
+            {
+                return new HydrusObservation(instance.Id, instance.Name, false, DateTimeOffset.UtcNow, string.Empty);
+            }
+
+            try
+            {
+                return await Client.ObserveAsync(instance, _token);
+            }
+            catch (OperationCanceledException) when (_token.IsCancellationRequested) { throw; }
+            catch (Exception exception) when (IsExpectedFailure(exception))
+            {
+                return new HydrusObservation(instance.Id, instance.Name, false, DateTimeOffset.UtcNow, string.Empty);
+            }
+        }));
+
+        if (!_disposed && ReferenceEquals(snapshot, _instances))
+        {
+            foreach (var observation in observations)
+            {
+                _observations[observation.InstanceId] = observation;
+            }
+        }
+    }
+
+    private async Task ObservePeriodicallyAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_token))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (!_disposed && !_busy && !_loading)
+                    {
+                        await RefreshObservationsAsync();
+                        if (!_disposed)
+                        {
+                            StateHasChanged();
+                        }
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (_disposed) { }
+    }
+
+    private string StatusText(HydrusInstance instance)
+    {
+        if (string.IsNullOrWhiteSpace(instance.ApiKey))
+        {
+            return "Access key missing. Edit this instance to add one.";
+        }
+
+        return !_observations.TryGetValue(instance.Id, out var observation)
+            ? "Checking..."
+            : observation.IsReachable ? "Available" : "Unavailable. Check Client API, URL, key, and permissions.";
+    }
+
+    private void AddInstance()
+    {
+        _editingId = null;
+        _draftName = string.Empty;
+        _draftUrl = "http://127.0.0.1:45869/";
+        _draftKey = string.Empty;
+        _editorError = null;
+        _editing = true;
+    }
+
+    private void EditInstance(HydrusInstance instance)
+    {
+        _editingId = instance.Id;
+        _draftName = instance.Name;
+        _draftUrl = instance.ApiEndpoint.AbsoluteUri;
+        _draftKey = string.Empty;
+        _editorError = null;
+        _editing = true;
+    }
+
+    private void CancelEdit()
+    {
+        if (!_busy)
+        {
+            CloseEditor();
+        }
+    }
+
+    private void CloseEditor()
+    {
+        _draftKey = string.Empty;
+        _draftName = string.Empty;
+        _draftUrl = "http://127.0.0.1:45869/";
+        _editingId = null;
+        _editorError = null;
+        _editing = false;
+    }
+
+    private void HandleEditorKey(KeyboardEventArgs args)
+    {
+        if (args.Key == "Escape")
+        {
+            CancelEdit();
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_busy || _disposed)
+        {
+            return;
+        }
+
+        _editorError = null;
+        if (string.IsNullOrWhiteSpace(_draftName) || _draftName.Trim().Length > 60)
+        {
+            _editorError = "Enter a Hydrus instance name of up to 60 characters.";
+            _draftKey = string.Empty;
+            return;
+        }
+
+        if (!Uri.TryCreate(_draftUrl.Trim(), UriKind.Absolute, out var endpoint) ||
+            (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps) ||
+            string.IsNullOrEmpty(endpoint.Host) || !string.IsNullOrEmpty(endpoint.UserInfo) ||
+            !string.IsNullOrEmpty(endpoint.Query) || !string.IsNullOrEmpty(endpoint.Fragment))
+        {
+            _editorError = "Enter an HTTP or HTTPS Client API URL without credentials, a query, or a fragment.";
+            _draftKey = string.Empty;
+            return;
+        }
+
+        var previous = _instances.FirstOrDefault(instance => instance.Id == _editingId);
+        var apiKey = string.IsNullOrWhiteSpace(_draftKey) ? previous?.ApiKey : _draftKey.Trim();
+        if (string.IsNullOrWhiteSpace(apiKey) || apiKey.Length > 1024 || apiKey.Any(character => character < ' ' || character > '~'))
+        {
+            _editorError = "Enter a valid Hydrus access key from Client API settings. The key must contain only printable ASCII characters.";
+            _draftKey = string.Empty;
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var instance = new HydrusInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), endpoint, apiKey);
+            _draftKey = string.Empty;
+            await Store.SaveAsync(instance, _token);
+            CloseEditor();
+            await ReloadAsync();
+            await NotifyChangedAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _editorError = "Could not save this instance. Check configuration file access and this account's encryption keys, then re-enter the access key and retry.";
+        }
+        finally
+        {
+            _draftKey = string.Empty;
+            _busy = false;
+        }
+    }
+
+    private async Task RemoveAsync(HydrusInstance instance)
+    {
+        if (_busy || _disposed)
+        {
+            return;
+        }
+
+        _busy = true;
+        _error = null;
+        try
+        {
+            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, "Remove this Hydrus instance? The Hydrus client and its files will not be changed."))
+            {
+                return;
+            }
+
+            await Store.RemoveAsync(instance.Id, _token);
+            await ReloadAsync();
+            await NotifyChangedAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsExpectedFailure(exception) || exception is JSException)
+        {
+            _error = "Could not remove this instance. Check the browser connection and configuration file access, then retry.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task NotifyChangedAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await Changed.InvokeAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _error = "The instance configuration was saved, but the library could not refresh. Reload the page to retry.";
+        }
+    }
+
+    private static bool IsExpectedFailure(Exception exception) => exception is
+        IOException or InvalidDataException or CryptographicException or ArgumentException or
+        UnauthorizedAccessException or System.Security.SecurityException or JsonException or
+        HttpRequestException or OperationCanceledException or InvalidOperationException or FormatException or KeyNotFoundException;
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _draftKey = string.Empty;
+        _instances = [];
+        _observations.Clear();
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

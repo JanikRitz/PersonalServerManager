@@ -14,7 +14,8 @@ public sealed class StashGraphQlClientTests
         {
             Assert.Equal("Bearer test-key", request.Headers.Authorization?.ToString());
             Assert.Contains("findScenes", body);
-            Assert.Contains("per_page", body);
+            using var payload = System.Text.Json.JsonDocument.Parse(body);
+            Assert.Equal(5, payload.RootElement.GetProperty("variables").GetProperty("filter").GetProperty("per_page").GetInt32());
             return Json("""
                 {"data":{"findScenes":{"count":1,"scenes":[{"id":"42","title":"A scene","paths":{"screenshot":"/scene/42/screenshot"}}]}}}
                 """);

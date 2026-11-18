@@ -26,7 +26,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         using var response = await SendAsync(
             instance,
             document,
-            new { filter = new { q = query, per_page = 40, page = 1 } },
+            new { filter = new { q = query, per_page = 5, page = 1 } },
             cancellationToken);
 
         using var payload = await ReadPayloadAsync(response, cancellationToken);
@@ -53,6 +53,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         }
 
         return items.EnumerateArray()
+            .Take(5)
             .Select(item => MapResult(instance, kind, urlSegment, item))
             .ToArray();
     }

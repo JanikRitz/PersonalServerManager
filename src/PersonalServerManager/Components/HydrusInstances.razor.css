@@ -1,0 +1,55 @@
+.hydrus-instances {
+    --hydrus-ink: #172a2a;
+    --hydrus-muted: #526763;
+    --hydrus-line: #d7dfd9;
+    --hydrus-teal: #176d62;
+    color: var(--hydrus-ink);
+    background: transparent;
+    font: 14px/1.45 "Segoe UI", sans-serif;
+    letter-spacing: 0;
+    min-width: 0;
+}
+
+.hydrus-instances * { box-sizing: border-box; letter-spacing: 0; }
+.hydrus-heading, .editor-heading, .hydrus-row, .row-actions, .editor-actions { display: flex; align-items: center; }
+.hydrus-heading, .editor-heading { justify-content: space-between; gap: 12px; }
+.hydrus-heading { padding: 12px 0; border-bottom: 1px solid var(--hydrus-line); }
+h2, h3 { margin: 0; color: var(--hydrus-ink); font: 21px/1.2 Georgia, serif; overflow-wrap: anywhere; }
+h3 { font-size: 20px; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 36px; width: 36px; height: 36px; padding: 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--hydrus-teal); cursor: pointer; }
+.icon-button ::deep .mud-icon-root { width: 20px; height: 20px; }
+.icon-button:hover { border-color: var(--hydrus-line); background: #edf5f2; }
+.remove-button { color: #a63e32; }
+.hydrus-list { margin: 0; padding: 0; list-style: none; }
+.hydrus-row { gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--hydrus-line); }
+.status-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: #879691; }
+.status-dot.online { background: var(--hydrus-teal); }
+.status-dot.offline { background: #a63e32; }
+.instance-copy { display: grid; flex: 1; min-width: 0; gap: 3px; overflow-wrap: anywhere; }
+.instance-copy strong { font-size: 13px; }
+.instance-status, .instance-copy small { color: var(--hydrus-muted); font-size: 12px; }
+.row-actions { flex: 0 0 auto; gap: 2px; }
+.empty-message, .permission-note { color: var(--hydrus-muted); margin: 14px 0; }
+.permission-note { font-size: 10px; overflow-wrap: anywhere; }
+.error-message { margin: 12px 0; padding: 10px 12px; border-left: 3px solid #a63e32; background: #fff1ee; color: #81392e; font-size: 13px; overflow-wrap: anywhere; }
+.retry-button { padding: 6px 0; border: 0; background: transparent; color: var(--hydrus-teal); font: inherit; text-decoration: underline; cursor: pointer; }
+.hydrus-backdrop { position: fixed; z-index: 1200; inset: 0; display: grid; align-items: safe center; justify-items: center; padding: 20px; overflow-y: auto; background: #10231f88; }
+.hydrus-dialog { position: relative; inset: auto; display: block; width: min(480px, 100%); max-width: 100%; max-height: calc(100dvh - 40px); overflow-y: auto; margin: 0; padding: 24px; border: 1px solid var(--hydrus-line); border-radius: 8px; background: #fff; color: var(--hydrus-ink); box-shadow: 0 16px 48px #10231f33; }
+.editor-heading { margin-bottom: 18px; }
+fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+label { display: block; margin: 16px 0 6px; font-size: 13px; font-weight: 600; }
+input { display: block; width: 100%; min-width: 0; min-height: 42px; padding: 9px 10px; border: 1px solid #9aafa8; border-radius: 4px; background: #fff; color: var(--hydrus-ink); font: inherit; }
+fieldset small { display: block; margin-top: 6px; color: var(--hydrus-muted); font-size: 12px; overflow-wrap: anywhere; }
+.editor-actions { justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+.cancel-button, .save-button { min-height: 40px; padding: 8px 14px; border: 1px solid var(--hydrus-line); border-radius: 4px; background: #fff; color: var(--hydrus-teal); font: inherit; font-weight: 600; cursor: pointer; }
+.save-button { border-color: var(--hydrus-teal); background: var(--hydrus-teal); color: #fff; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--hydrus-teal); outline-offset: 3px; }
+button:disabled, fieldset:disabled button { cursor: wait; opacity: .6; }
+
+@media (max-width: 420px) {
+    .hydrus-backdrop { padding: 12px; }
+    .hydrus-dialog { padding: 18px; max-height: calc(100dvh - 24px); }
+    .hydrus-row { align-items: flex-start; gap: 8px; }
+    .status-dot { margin-top: 6px; }
+    .row-actions { flex-direction: column; }
+}
