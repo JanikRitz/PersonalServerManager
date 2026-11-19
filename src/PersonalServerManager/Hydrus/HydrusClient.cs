@@ -60,20 +60,31 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         }
     }
 
+    public Task<IReadOnlyList<HydrusFile>> SearchAsync(
+        HydrusInstance instance,
+        IReadOnlyList<string> tags,
+        CancellationToken cancellationToken = default) => SearchAsync(instance, tags, 5, cancellationToken);
+
     public async Task<IReadOnlyList<HydrusFile>> SearchAsync(
         HydrusInstance instance,
         IReadOnlyList<string> tags,
+        int limit,
         CancellationToken cancellationToken = default)
     {
+        if (limit is not (5 or 25))
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
         ValidateTags(tags);
         await _searchGate.WaitAsync(cancellationToken);
         try
         {
             using var timeout = CreateTimeout(cancellationToken);
             using var search = await SendAsync(instance, HttpMethod.Get,
-                $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(tags.Append("system:limit=5")))}&return_file_ids=true&return_hashes=false",
+                $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(tags.Append($"system:limit={limit}")))}&return_file_ids=true&return_hashes=false",
                 null, timeout.Token, cancellationToken);
-            var ids = ReadIds(search.RootElement);
+            var ids = ReadIds(search.RootElement, limit);
             if (ids.Length == 0)
             {
                 return [];
@@ -82,7 +93,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             using var metadata = await SendAsync(instance, HttpMethod.Get,
                 $"get_files/file_metadata?file_ids={Uri.EscapeDataString(JsonSerializer.Serialize(ids))}&only_return_basic_information=true&include_services_object=false",
                 null, timeout.Token, cancellationToken);
-            return ReadFiles(metadata.RootElement, ids);
+            return ReadFiles(metadata.RootElement, ids, limit);
         }
         finally
         {
@@ -218,7 +229,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         }
     }
 
-    private static long[] ReadIds(JsonElement root)
+    private static long[] ReadIds(JsonElement root, int limit)
     {
         if (!root.TryGetProperty("file_ids", out var values) || values.ValueKind != JsonValueKind.Array)
         {
@@ -226,7 +237,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         }
 
         var ids = new List<long>();
-        foreach (var value in values.EnumerateArray().Take(5))
+        foreach (var value in values.EnumerateArray().Take(limit))
         {
             if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var id) || id <= 0)
             {
@@ -242,9 +253,9 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         return ids.ToArray();
     }
 
-    private static IReadOnlyList<HydrusFile> ReadFiles(JsonElement root, long[] ids)
+    private static IReadOnlyList<HydrusFile> ReadFiles(JsonElement root, long[] ids, int limit)
     {
-        if (!root.TryGetProperty("metadata", out var values) || values.ValueKind != JsonValueKind.Array || values.GetArrayLength() > 5)
+        if (!root.TryGetProperty("metadata", out var values) || values.ValueKind != JsonValueKind.Array || values.GetArrayLength() > limit)
         {
             throw new InvalidDataException("Hydrus returned invalid file metadata.");
         }

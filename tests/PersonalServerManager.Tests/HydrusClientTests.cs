@@ -10,6 +10,57 @@ namespace PersonalServerManager.Tests;
 
 public sealed class HydrusClientTests
 {
+    [Theory]
+    [InlineData(5)]
+    [InlineData(25)]
+    public async Task SearchAsync_RequestsAndClampsSelectedLimitIncludingMetadata(int limit)
+    {
+        var calls = 0;
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            calls++;
+            var query = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+            {
+                Assert.Equal(new[] { "tag", $"system:limit={limit}" }, JsonSerializer.Deserialize<string[]>(query["tags"].ToString()));
+                return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, 30) }));
+            }
+
+            Assert.Equal(Enumerable.Range(1, limit).Select(index => (long)index), JsonSerializer.Deserialize<long[]>(query["file_ids"].ToString()));
+            return Json(JsonSerializer.Serialize(new { metadata = Enumerable.Range(1, limit).Select(index => new { file_id = index, mime = "image/png" }) }));
+        }));
+
+        var files = await client.SearchAsync(Instance(), ["tag"], limit);
+
+        Assert.Equal(2, calls);
+        Assert.Equal(limit, files.Count);
+        Assert.Equal(limit, files[^1].Id);
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(25)]
+    public async Task SearchAsync_RejectsMetadataBeyondSelectedBound(int limit)
+    {
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+            Json(request.RequestUri!.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal)
+                ? JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, limit) })
+                : JsonSerializer.Serialize(new { metadata = Enumerable.Range(1, limit + 1).Select(index => new { file_id = index, mime = "image/png" }) }))));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchAsync(Instance(), ["tag"], limit));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(6)]
+    [InlineData(26)]
+    public async Task SearchAsync_RejectsUnsupportedLimitsWithoutSending(int limit)
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send.")));
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchAsync(Instance(), ["tag"], limit));
+    }
+
     [Fact]
     public async Task ObserveAsync_VerifiesAccessUsingOnlyTheHeader()
     {

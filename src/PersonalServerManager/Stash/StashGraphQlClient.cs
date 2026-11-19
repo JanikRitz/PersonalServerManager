@@ -8,12 +8,25 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
 
+    public Task<IReadOnlyList<StashSearchResult>> SearchAsync(
+        StashInstance instance,
+        StashSearchKind kind,
+        string query,
+        CancellationToken cancellationToken = default) => SearchAsync(instance, kind, query, 5, cancellationToken);
+
     public async Task<IReadOnlyList<StashSearchResult>> SearchAsync(
         StashInstance instance,
         StashSearchKind kind,
         string query,
+        int limit,
         CancellationToken cancellationToken = default)
     {
+        if (limit is not (5 or 25))
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
         var (field, selection, urlSegment) = kind switch
         {
             StashSearchKind.Scenes => ("findScenes", "scenes { id title paths { screenshot } }", "scenes"),
@@ -26,7 +39,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         using var response = await SendAsync(
             instance,
             document,
-            new { filter = new { q = query, per_page = 5, page = 1 } },
+            new { filter = new { q = query, per_page = limit, page = 1 } },
             cancellationToken);
 
         using var payload = await ReadPayloadAsync(response, cancellationToken);
@@ -53,7 +66,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         }
 
         return items.EnumerateArray()
-            .Take(5)
+            .Take(limit)
             .Select(item => MapResult(instance, kind, urlSegment, item))
             .ToArray();
     }

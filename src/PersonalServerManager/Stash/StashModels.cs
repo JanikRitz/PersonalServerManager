@@ -38,6 +38,13 @@ public interface IStashGraphQlClient
         string query,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<StashSearchResult>> SearchAsync(
+        StashInstance instance,
+        StashSearchKind kind,
+        string query,
+        int limit,
+        CancellationToken cancellationToken = default) => SearchAsync(instance, kind, query, cancellationToken);
+
     Task<StashObservation> ObserveAsync(
         StashInstance instance,
         CancellationToken cancellationToken = default);

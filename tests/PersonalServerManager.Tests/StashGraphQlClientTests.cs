@@ -7,6 +7,45 @@ namespace PersonalServerManager.Tests;
 
 public sealed class StashGraphQlClientTests
 {
+    [Theory]
+    [InlineData(StashSearchKind.Scenes, "findScenes", "scenes", 5)]
+    [InlineData(StashSearchKind.Images, "findImages", "images", 5)]
+    [InlineData(StashSearchKind.Performers, "findPerformers", "performers", 5)]
+    [InlineData(StashSearchKind.Scenes, "findScenes", "scenes", 25)]
+    [InlineData(StashSearchKind.Images, "findImages", "images", 25)]
+    [InlineData(StashSearchKind.Performers, "findPerformers", "performers", 25)]
+    public async Task SearchAsync_RequestsAndClampsSelectedLimit(StashSearchKind kind, string field, string collection, int limit)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            using var payload = System.Text.Json.JsonDocument.Parse(body);
+            var filter = payload.RootElement.GetProperty("variables").GetProperty("filter");
+            Assert.Equal(limit, filter.GetProperty("per_page").GetInt32());
+            Assert.Equal(1, filter.GetProperty("page").GetInt32());
+            var items = Enumerable.Range(1, 30).Select(index => new { id = index.ToString(), title = "Title", name = "Name" });
+            return Json(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                data = new Dictionary<string, object> { [field] = new Dictionary<string, object> { [collection] = items } }
+            }));
+        })));
+
+        var results = await client.SearchAsync(Instance("test-key"), kind, "query", limit);
+
+        Assert.Equal(limit, results.Count);
+        Assert.Equal(limit.ToString(), results[^1].Id);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(6)]
+    [InlineData(26)]
+    public async Task SearchAsync_RejectsUnsupportedLimitsWithoutSending(int limit)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send."))));
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchAsync(Instance(null), StashSearchKind.Images, "query", limit));
+    }
+
     [Fact]
     public async Task SearchAsync_MapsResultsAndUsesInstanceAuthentication()
     {
