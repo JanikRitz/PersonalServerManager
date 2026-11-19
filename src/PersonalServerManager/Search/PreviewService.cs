@@ -97,6 +97,10 @@ public sealed class PreviewService(HttpClient client, IStashInstanceStore stashS
             ("stash", "scenes") => $"scene/{normalizedId}/screenshot",
             ("stash", "images") => $"image/{normalizedId}/thumbnail",
             ("stash", "performers") => $"performer/{normalizedId}/image",
+            ("stash", "studios") => $"studio/{normalizedId}/image",
+            ("stash", "tags") => $"tag/{normalizedId}/image",
+            ("stash", "galleries") => $"gallery/{normalizedId}/cover",
+            ("stash", "groups") => $"group/{normalizedId}/frontimage",
             ("hydrus", "files") => $"get_files/thumbnail?file_id={normalizedId}",
             _ => ""
         };

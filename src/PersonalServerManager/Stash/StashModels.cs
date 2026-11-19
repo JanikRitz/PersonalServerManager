@@ -4,7 +4,12 @@ public enum StashSearchKind
 {
     Scenes,
     Images,
-    Performers
+    Performers,
+    Studios,
+    Tags,
+    Markers,
+    Galleries,
+    Groups
 }
 
 public sealed record StashInstance(

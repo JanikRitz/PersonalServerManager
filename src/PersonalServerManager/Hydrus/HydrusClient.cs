@@ -101,6 +101,50 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         }
     }
 
+    public async Task<IReadOnlyList<HydrusTag>> SearchTagsAsync(
+        HydrusInstance instance,
+        string query,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit is not (5 or 25))
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        if (string.IsNullOrWhiteSpace(query) || query.Length > 1024)
+        {
+            throw new ArgumentException("Hydrus tag searches require 1 to 1024 nonblank characters.", nameof(query));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        using var timeout = CreateTimeout(cancellationToken);
+        using var payload = await SendAsync(instance, HttpMethod.Get,
+            $"add_tags/search_tags?search={Uri.EscapeDataString(query)}&tag_display_type=display",
+            null, timeout.Token, cancellationToken);
+        if (!payload.RootElement.TryGetProperty("tags", out var values) || values.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("Hydrus returned an invalid tag list.");
+        }
+
+        var tags = new List<HydrusTag>();
+        foreach (var value in values.EnumerateArray().Take(limit))
+        {
+            if (value.ValueKind != JsonValueKind.Object ||
+                !value.TryGetProperty("value", out var nameValue) || nameValue.ValueKind != JsonValueKind.String ||
+                nameValue.GetString() is not { Length: > 0 and <= 1024 } name || string.IsNullOrWhiteSpace(name) ||
+                !value.TryGetProperty("count", out var countValue) || countValue.ValueKind != JsonValueKind.Number ||
+                !countValue.TryGetInt64(out var count) || count < 0)
+            {
+                throw new InvalidDataException("Hydrus returned invalid tag data.");
+            }
+
+            tags.Add(new HydrusTag(name, count));
+        }
+
+        return tags;
+    }
+
     public async Task<string> OpenSearchAsync(
         HydrusInstance instance,
         IReadOnlyList<string> tags,

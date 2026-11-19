@@ -13,6 +13,137 @@ public sealed class HydrusClientTests
     [Theory]
     [InlineData(5)]
     [InlineData(25)]
+    public async Task SearchTagsAsync_EncodesReadOnlyQueryAndClampsResults(int limit)
+    {
+        const string queryText = "creator:a & b+#%/\u9752";
+        using var client = new HydrusClient(new StubHandler((request, body) =>
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.Equal("/add_tags/search_tags", request.RequestUri!.AbsolutePath);
+            var query = QueryHelpers.ParseQuery(request.RequestUri.Query);
+            Assert.Equal(queryText, query["search"].ToString());
+            Assert.Equal("display", query["tag_display_type"].ToString());
+            Assert.Equal(2, query.Count);
+            Assert.Equal("test-key", Assert.Single(request.Headers.GetValues("Hydrus-Client-API-Access-Key")));
+            Assert.DoesNotContain("test-key", request.RequestUri.AbsoluteUri);
+            Assert.Empty(body);
+            return Json(JsonSerializer.Serialize(new { tags = Enumerable.Range(1, 30).Select(index => new { value = $"tag:{index}", count = 6000000000L + index }) }));
+        }));
+
+        var tags = await client.SearchTagsAsync(Instance(), queryText, limit);
+
+        Assert.Equal(limit, tags.Count);
+        Assert.Equal(new HydrusTag($"tag:{limit}", 6000000000L + limit), tags[^1]);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"tags\":null}")]
+    [InlineData("{\"tags\":[{\"value\":\"tag\",\"count\":-1}]}")]
+    [InlineData("{\"tags\":[{\"value\":\"tag\",\"count\":1.5}]}")]
+    [InlineData("{\"tags\":[{\"value\":\"tag\",\"count\":\"2\"}]}")]
+    [InlineData("{\"tags\":[{\"value\":null,\"count\":1}]}")]
+    [InlineData("{\"tags\":[{\"value\":\" \",\"count\":1}]}")]
+    [InlineData("{\"tags\":[null]}")]
+    public async Task SearchTagsAsync_RejectsMalformedTagData(string response)
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => Json(response)));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchTagsAsync(Instance(), "tag", 5));
+    }
+
+    [Fact]
+    public async Task SearchTagsAsync_EmptyResultsAndZeroCountsAreValid()
+    {
+        using var empty = new HydrusClient(new StubHandler((_, _) => Json("""{"tags":[]}""")));
+        Assert.Empty(await empty.SearchTagsAsync(Instance(), "tag", 5));
+        using var zero = new HydrusClient(new StubHandler((_, _) => Json("""{"tags":[{"value":"tag","count":0}]}""")));
+        Assert.Equal(new HydrusTag("tag", 0), Assert.Single(await zero.SearchTagsAsync(Instance(), "tag", 5)));
+    }
+
+    [Fact]
+    public async Task SearchTagsAsync_ValidatesInputsAndCancellationBeforeSending()
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send.")));
+        foreach (var limit in new[] { -1, 0, 6, 26 })
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchTagsAsync(Instance(), "tag", limit));
+        foreach (var query in new[] { "", " ", new string('a', 1025) })
+            await Assert.ThrowsAsync<ArgumentException>(() => client.SearchTagsAsync(Instance(), query, 5));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.SearchTagsAsync(Instance(), "tag", 5, cancellation.Token));
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.Redirect)]
+    public async Task SearchTagsAsync_FailureDoesNotEchoSecretsOrFollowRedirects(HttpStatusCode status)
+    {
+        var calls = 0;
+        using var client = new HydrusClient(new StubHandler((_, _) =>
+        {
+            calls++;
+            var response = new HttpResponseMessage(status) { Content = new StringContent("test-key private data") };
+            response.Headers.Location = new Uri("https://other.example/?secret=test-key");
+            return response;
+        }));
+        var failure = await Assert.ThrowsAsync<HttpRequestException>(() => client.SearchTagsAsync(Instance(), "tag", 5));
+        Assert.Equal(status, failure.StatusCode);
+        Assert.DoesNotContain("test-key", failure.ToString());
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task SearchTagsAsync_DoesNotEchoMalformedJsonOrTransportErrors()
+    {
+        using var malformed = new HydrusClient(new StubHandler((_, _) => Json("test-key")));
+        var invalid = await Assert.ThrowsAsync<InvalidDataException>(() => malformed.SearchTagsAsync(Instance(), "tag", 5));
+        Assert.DoesNotContain("test-key", invalid.ToString());
+        using var failing = new HydrusClient(new StubHandler((_, _) => throw new HttpRequestException("test-key")));
+        var failed = await Assert.ThrowsAsync<HttpRequestException>(() => failing.SearchTagsAsync(Instance(), "tag", 5));
+        Assert.DoesNotContain("test-key", failed.ToString());
+    }
+
+    [Fact]
+    public async Task SearchTagsAsync_CancellationCoversResponseBody()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var client = new HydrusClient(new StubHandler((_, _) =>
+        {
+            started.SetResult();
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new WaitingStream()) };
+        }));
+        var search = client.SearchTagsAsync(Instance(), "tag", 5, cancellation.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        cancellation.Cancel();
+        var failure = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(cancellation.Token, failure.CancellationToken);
+    }
+
+    [Fact]
+    public async Task SearchTagsAsync_LegacyImplementationsReturnEmptyResults()
+    {
+        IHydrusClient legacy = new LegacyClient();
+        Assert.Empty(await legacy.SearchTagsAsync(Instance(), "tag", 5));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SearchTagsAsync_RejectsOversizedResponse(bool knownLength)
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(knownLength
+                ? new MemoryStream(new byte[256 * 1024 + 1])
+                : new NonSeekableStream(new byte[256 * 1024 + 1]))
+        }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchTagsAsync(Instance(), "tag", 5));
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(25)]
     public async Task SearchAsync_RequestsAndClampsSelectedLimitIncludingMetadata(int limit)
     {
         var calls = 0;
@@ -313,6 +444,7 @@ public sealed class HydrusClientTests
     [InlineData("search")]
     [InlineData("observe")]
     [InlineData("open")]
+    [InlineData("tags")]
     public async Task DeadlineCoversResponseBody(string operation)
     {
         using var client = new HydrusClient(new StubHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
@@ -326,9 +458,12 @@ public sealed class HydrusClientTests
             return;
         }
 
-        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => (operation == "open"
-            ? (Task)client.OpenSearchAsync(Instance(), ["tag"])
-            : client.SearchAsync(Instance(), ["tag"])).WaitAsync(TimeSpan.FromSeconds(3)));
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => (operation switch
+        {
+            "open" => (Task)client.OpenSearchAsync(Instance(), ["tag"]),
+            "tags" => client.SearchTagsAsync(Instance(), "tag", 5),
+            _ => client.SearchAsync(Instance(), ["tag"])
+        }).WaitAsync(TimeSpan.FromSeconds(3)));
         Assert.Contains("timed out", exception.Message);
     }
 
@@ -553,6 +688,13 @@ public sealed class HydrusClientTests
                 Directory.Delete(directory, true);
             }
         }
+    }
+
+    private sealed class LegacyClient : IHydrusClient
+    {
+        public Task<HydrusObservation> ObserveAsync(HydrusInstance instance, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<HydrusFile>> SearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<string> OpenSearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
     private static HydrusInstance Instance() => new(

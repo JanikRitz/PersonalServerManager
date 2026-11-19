@@ -23,6 +23,10 @@ public sealed class PreviewServiceTests
     [InlineData("stash", "scenes", "scene/42/screenshot")]
     [InlineData("stash", "images", "image/42/thumbnail")]
     [InlineData("stash", "performers", "performer/42/image")]
+    [InlineData("stash", "studios", "studio/42/image")]
+    [InlineData("stash", "tags", "tag/42/image")]
+    [InlineData("stash", "galleries", "gallery/42/cover")]
+    [InlineData("stash", "groups", "group/42/frontimage")]
     [InlineData("hydrus", "files", "get_files/thumbnail?file_id=42")]
     public async Task FetchAsync_UsesConfiguredInstanceAndCredential(string provider, string category, string expectedPath)
     {
@@ -37,6 +41,7 @@ public sealed class PreviewServiceTests
         });
         var service = Service(handler, id);
 
+        Assert.Equal($"/previews/{provider}/{id:D}/{category}/42", PreviewService.CreateLink(provider, id, category, "42")?.OriginalString);
         var result = await service.FetchAsync(provider, id, category, "42", CancellationToken.None);
 
         Assert.Equal("image/png", result!.ContentType);
@@ -47,6 +52,8 @@ public sealed class PreviewServiceTests
     [InlineData("stash", "scenes", "../42")]
     [InlineData("stash", "images", "42?url=https://evil.example")]
     [InlineData("stash", "files", "42")]
+    [InlineData("stash", "markers", "42")]
+    [InlineData("hydrus", "tags", "42")]
     [InlineData("other", "files", "42")]
     [InlineData("hydrus", "files", "0")]
     public async Task FetchAsync_RejectsInvalidRoutesWithoutSending(string provider, string category, string id)

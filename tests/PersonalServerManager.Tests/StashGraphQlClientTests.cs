@@ -14,6 +14,16 @@ public sealed class StashGraphQlClientTests
     [InlineData(StashSearchKind.Scenes, "findScenes", "scenes", 25)]
     [InlineData(StashSearchKind.Images, "findImages", "images", 25)]
     [InlineData(StashSearchKind.Performers, "findPerformers", "performers", 25)]
+    [InlineData(StashSearchKind.Studios, "findStudios", "studios", 5)]
+    [InlineData(StashSearchKind.Tags, "findTags", "tags", 5)]
+    [InlineData(StashSearchKind.Markers, "findSceneMarkers", "scene_markers", 5)]
+    [InlineData(StashSearchKind.Galleries, "findGalleries", "galleries", 5)]
+    [InlineData(StashSearchKind.Groups, "findGroups", "groups", 5)]
+    [InlineData(StashSearchKind.Studios, "findStudios", "studios", 25)]
+    [InlineData(StashSearchKind.Tags, "findTags", "tags", 25)]
+    [InlineData(StashSearchKind.Markers, "findSceneMarkers", "scene_markers", 25)]
+    [InlineData(StashSearchKind.Galleries, "findGalleries", "galleries", 25)]
+    [InlineData(StashSearchKind.Groups, "findGroups", "groups", 25)]
     public async Task SearchAsync_RequestsAndClampsSelectedLimit(StashSearchKind kind, string field, string collection, int limit)
     {
         var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
@@ -22,7 +32,8 @@ public sealed class StashGraphQlClientTests
             var filter = payload.RootElement.GetProperty("variables").GetProperty("filter");
             Assert.Equal(limit, filter.GetProperty("per_page").GetInt32());
             Assert.Equal(1, filter.GetProperty("page").GetInt32());
-            var items = Enumerable.Range(1, 30).Select(index => new { id = index.ToString(), title = "Title", name = "Name" });
+            Assert.Contains($"{field}(filter: $filter)", payload.RootElement.GetProperty("query").GetString());
+            var items = Enumerable.Range(1, 30).Select(index => new { id = index.ToString(), title = "Title", name = "Name", seconds = 12.5, scene = new { id = "99" } });
             return Json(System.Text.Json.JsonSerializer.Serialize(new
             {
                 data = new Dictionary<string, object> { [field] = new Dictionary<string, object> { [collection] = items } }
@@ -105,6 +116,107 @@ public sealed class StashGraphQlClientTests
         Assert.Equal("A performer", performer.Title);
         Assert.Equal(new Uri("https://stash.example/performers/9"), performer.ItemUrl);
         Assert.Equal(instance.Id, performer.InstanceId);
+    }
+
+    [Theory]
+    [InlineData(StashSearchKind.Studios, "findStudios", "studios", "id name image_path", "studio/42/image")]
+    [InlineData(StashSearchKind.Tags, "findTags", "tags", "id name image_path", "tag/42/image")]
+    [InlineData(StashSearchKind.Galleries, "findGalleries", "galleries", "id title paths { cover }", "gallery/42/cover")]
+    [InlineData(StashSearchKind.Groups, "findGroups", "groups", "id name front_image_path", "group/42/frontimage")]
+    public async Task SearchAsync_MapsNewCollectionsAndTrustedPreviewPaths(
+        StashSearchKind kind, string field, string collection, string selection, string previewPath)
+    {
+        var instance = Instance("test-key") with { WebUiUrl = new Uri("https://stash.example/prefix/") };
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            using var request = System.Text.Json.JsonDocument.Parse(body);
+            Assert.Contains($"{collection} {{ {selection} }}", request.RootElement.GetProperty("query").GetString());
+            Assert.Equal(5, request.RootElement.GetProperty("variables").GetProperty("filter").GetProperty("per_page").GetInt32());
+            var thumbnail = new Uri(instance.WebUiUrl, previewPath).AbsoluteUri + "?apikey=private";
+            var item = new { id = "42", name = "A name", title = "A title", image_path = thumbnail, front_image_path = thumbnail, paths = new { cover = thumbnail } };
+            return Json(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                data = new Dictionary<string, object> { [field] = new Dictionary<string, object> { [collection] = new[] { item } } }
+            }));
+        })));
+
+        var result = Assert.Single(await client.SearchAsync(instance, kind, "query"));
+
+        Assert.Equal(kind == StashSearchKind.Galleries ? "A title" : "A name", result.Title);
+        Assert.Equal(new Uri(instance.WebUiUrl, $"{collection}/42"), result.ItemUrl);
+        Assert.Equal(new Uri(instance.WebUiUrl, previewPath), result.ThumbnailUrl);
+        Assert.Equal(instance.Id, result.InstanceId);
+        Assert.Equal(instance.Name, result.InstanceName);
+    }
+
+    [Theory]
+    [InlineData("A marker", "A marker")]
+    [InlineData("", "Primary tag")]
+    public async Task SearchAsync_MarkersLinkToSceneTimestampWithoutInventingPreview(string title, string expectedTitle)
+    {
+        var instance = Instance(null) with { WebUiUrl = new Uri("https://stash.example/prefix/") };
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            Assert.Contains("scene_markers { id title seconds scene { id } primary_tag { name } }", body);
+            return Json(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                data = new { findSceneMarkers = new { scene_markers = new[] { new { id = "42", title, seconds = 123.75, scene = new { id = "9" }, primary_tag = new { name = "Primary tag" }, screenshot = "https://evil.example/thumbnail" } } } }
+            }));
+        })));
+        var previousCulture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("de-DE");
+            var result = Assert.Single(await client.SearchAsync(instance, StashSearchKind.Markers, "query"));
+            Assert.Equal(expectedTitle, result.Title);
+            Assert.Equal(new Uri("https://stash.example/prefix/scenes/9?t=123.75"), result.ItemUrl);
+            Assert.Null(result.ThumbnailUrl);
+            Assert.Equal("42", result.Id);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = previousCulture;
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"id\":\"42\",\"seconds\":-1,\"scene\":{\"id\":\"9\"}}")]
+    [InlineData("{\"id\":\"42\",\"seconds\":\"123\",\"scene\":{\"id\":\"9\"}}")]
+    [InlineData("{\"id\":\"42\",\"seconds\":123,\"scene\":{}}")]
+    public async Task SearchAsync_RejectsInvalidMarkerNavigation(string item)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+            Json("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[" + item + "]}}}"))));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchAsync(Instance(null), StashSearchKind.Markers, "query"));
+    }
+
+    [Theory]
+    [InlineData("https://evil.example/tag/42/image")]
+    [InlineData("//evil.example/tag/42/image")]
+    [InlineData("https://user:secret@stash.example/tag/42/image")]
+    [InlineData("http://stash.example/tag/42/image")]
+    [InlineData("/tag/43/image")]
+    [InlineData("/arbitrary/image")]
+    [InlineData("javascript:alert(1)")]
+    [InlineData(null)]
+    public async Task SearchAsync_DoesNotReturnUntrustedOrMissingThumbnail(string? imagePath)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            data = new { findTags = new { tags = new[] { new { id = "42", name = "A tag", image_path = imagePath } } } }
+        })))));
+        Assert.Null(Assert.Single(await client.SearchAsync(Instance(null), StashSearchKind.Tags, "tag")).ThumbnailUrl);
+    }
+
+    [Fact]
+    public async Task SearchAsync_PreservesEnumValuesAndPreCanceledRequests()
+    {
+        Assert.Equal(new[] { "Scenes", "Images", "Performers", "Studios", "Tags", "Markers", "Galleries", "Groups" }, Enum.GetNames<StashSearchKind>());
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send."))));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        foreach (var kind in Enum.GetValues<StashSearchKind>())
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.SearchAsync(Instance(null), kind, "query", cancellation.Token));
     }
 
     private static StashInstance Instance(string? apiKey) => new(

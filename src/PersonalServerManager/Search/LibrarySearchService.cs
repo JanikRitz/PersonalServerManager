@@ -1,10 +1,11 @@
 using System.Globalization;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Stash;
 
 namespace PersonalServerManager.Search;
 
-public enum LibraryMediaType { Image, Video, Performer, Collection, TextEbook, Comic }
+public enum LibraryMediaType { Image, Video, Performer, Collection, TextEbook, Comic, Studio, Tag, Marker, Note }
 
 public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, Uri? PreviewUrl = null,
     LibraryMediaType MediaType = LibraryMediaType.Image);
@@ -23,7 +24,8 @@ public record LibraryTypeItem(LibraryItem Item, LibraryGroup Source);
 public record LibraryTypeGroup(LibraryMediaType Type, IReadOnlyList<LibraryTypeItem> Items,
     IReadOnlyList<LibraryGroup> Sources);
 
-public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydrusClient hydrusClient)
+public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydrusClient hydrusClient,
+    LocalLibraryClient? localClient = null)
 {
     public static IReadOnlyList<LibraryTypeGroup> GroupByType(IReadOnlyList<LibraryGroup> groups) =>
         groups.SelectMany(source => source.Items.Select(item => new LibraryTypeItem(item, source)))
@@ -39,7 +41,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
         IReadOnlyList<HydrusInstance> hydrusInstances,
         string query,
         CancellationToken cancellationToken = default,
-        int limit = 5)
+        int limit = 5,
+        IReadOnlyList<LocalLibraryInstance>? localLibraries = null)
     {
         if (limit is not (5 or 25))
         {
@@ -57,7 +60,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             foreach (var kind in Enum.GetValues<StashSearchKind>())
             {
                 tasks.Add(SearchGroupAsync(instance.Id, instance.Name, "Stash", kind.ToString(),
-                    new Uri(instance.WebUiUrl, $"{kind.ToString().ToLowerInvariant()}?q={Uri.EscapeDataString(capturedQuery)}"),
+                    new Uri(instance.WebUiUrl, $"{(kind == StashSearchKind.Markers ? "scenes/markers" : kind.ToString().ToLowerInvariant())}?q={Uri.EscapeDataString(capturedQuery)}"),
                     async () => (await stashClient.SearchAsync(instance, kind, capturedQuery, limit, cancellationToken))
                         .Take(limit)
                         .Select(item => new LibraryItem(item.Id, item.Title, kind.ToString(), item.ItemUrl,
@@ -65,6 +68,10 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                             {
                                 StashSearchKind.Scenes => LibraryMediaType.Video,
                                 StashSearchKind.Performers => LibraryMediaType.Performer,
+                                StashSearchKind.Studios => LibraryMediaType.Studio,
+                                StashSearchKind.Tags => LibraryMediaType.Tag,
+                                StashSearchKind.Markers => LibraryMediaType.Marker,
+                                StashSearchKind.Galleries or StashSearchKind.Groups => LibraryMediaType.Collection,
                                 _ => LibraryMediaType.Image
                             }))
                         .ToArray()));
@@ -81,6 +88,28 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                     .Select(entry => new LibraryItem(entry.Item.Id.ToString(CultureInfo.InvariantCulture), entry.Item.Title, entry.Item.Mime, null,
                         PreviewService.CreateLink("hydrus", instance.Id, "files", entry.Item.Id.ToString(CultureInfo.InvariantCulture)), entry.Type!.Value))
                     .ToArray()));
+            tasks.Add(SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Tags", null,
+                async () => (await hydrusClient.SearchTagsAsync(instance, capturedQuery, limit, cancellationToken))
+                    .Take(limit)
+                    .Select(tag => new LibraryItem(tag.Name, tag.Name, tag.Count.ToString(CultureInfo.InvariantCulture),
+                        new Uri($"/?q={Uri.EscapeDataString(tag.Name)}", UriKind.Relative), MediaType: LibraryMediaType.Tag))
+                    .ToArray()));
+        }
+
+        var client = localClient ?? new LocalLibraryClient();
+        foreach (var instance in localLibraries ?? [])
+        {
+            var category = instance.Kind switch
+            {
+                LocalLibraryKind.Notes => "Notes",
+                LocalLibraryKind.CalibreText => "Ebooks",
+                LocalLibraryKind.CalibreComic => "Comics",
+                _ => throw new ArgumentOutOfRangeException(nameof(localLibraries))
+            };
+            tasks.Add(SearchGroupAsync(instance.Id, instance.Name,
+                instance.Kind == LocalLibraryKind.Notes ? "Notes" : "Calibre", category,
+                new Uri($"/libraries/{instance.Id:D}?q={Uri.EscapeDataString(capturedQuery)}", UriKind.Relative),
+                async () => (await client.SearchAsync(instance, capturedQuery, limit, cancellationToken)).Take(limit).ToArray()));
         }
 
         var groups = await Task.WhenAll(tasks);

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -27,15 +28,20 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var (field, selection, urlSegment) = kind switch
+        var (field, collectionName, selection, urlSegment) = kind switch
         {
-            StashSearchKind.Scenes => ("findScenes", "scenes { id title paths { screenshot } }", "scenes"),
-            StashSearchKind.Images => ("findImages", "images { id title paths { thumbnail } }", "images"),
-            StashSearchKind.Performers => ("findPerformers", "performers { id name image_path }", "performers"),
+            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot }", "scenes"),
+            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail }", "images"),
+            StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path", "performers"),
+            StashSearchKind.Studios => ("findStudios", "studios", "id name image_path", "studios"),
+            StashSearchKind.Tags => ("findTags", "tags", "id name image_path", "tags"),
+            StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds scene { id } primary_tag { name }", "scenes"),
+            StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover }", "galleries"),
+            StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path", "groups"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
 
-        var document = $"query Search($filter: FindFilterType) {{ {field}(filter: $filter) {{ count {selection} }} }}";
+        var document = $"query Search($filter: FindFilterType) {{ {field}(filter: $filter) {{ count {collectionName} {{ {selection} }} }} }}";
         using var response = await SendAsync(
             instance,
             document,
@@ -51,12 +57,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             throw new InvalidDataException($"Stash returned no {kind.ToString().ToLowerInvariant()} search data.");
         }
 
-        var items = collection.TryGetProperty(field switch
-        {
-            "findScenes" => "scenes",
-            "findImages" => "images",
-            _ => "performers"
-        }, out var results)
+        var items = collection.TryGetProperty(collectionName, out var results)
             ? results
             : default;
 
@@ -152,22 +153,42 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
     private static StashSearchResult MapResult(StashInstance instance, StashSearchKind kind, string urlSegment, JsonElement item)
     {
         var id = item.GetProperty("id").GetString() ?? throw new InvalidDataException("Stash returned a result without an ID.");
-        var title = item.TryGetProperty(kind == StashSearchKind.Performers ? "name" : "title", out var titleValue)
+        var named = kind is StashSearchKind.Performers or StashSearchKind.Studios or StashSearchKind.Tags or StashSearchKind.Groups;
+        var title = item.TryGetProperty(named ? "name" : "title", out var titleValue)
             ? titleValue.GetString() ?? "(untitled)"
             : "(untitled)";
         var thumbnail = kind switch
         {
-            StashSearchKind.Performers => item.TryGetProperty("image_path", out var image) ? image.GetString() : null,
+            StashSearchKind.Performers or StashSearchKind.Studios or StashSearchKind.Tags => item.TryGetProperty("image_path", out var image) ? image.GetString() : null,
             StashSearchKind.Scenes => GetNestedString(item, "paths", "screenshot"),
-            _ => GetNestedString(item, "paths", "thumbnail")
+            StashSearchKind.Images => GetNestedString(item, "paths", "thumbnail"),
+            StashSearchKind.Galleries => GetNestedString(item, "paths", "cover"),
+            StashSearchKind.Groups => item.TryGetProperty("front_image_path", out var front) ? front.GetString() : null,
+            _ => null
         };
+
+        var itemPath = $"{urlSegment}/{Uri.EscapeDataString(id)}";
+        if (kind == StashSearchKind.Markers)
+        {
+            var sceneId = GetNestedString(item, "scene", "id");
+            if (string.IsNullOrWhiteSpace(sceneId) || !item.TryGetProperty("seconds", out var secondsValue) ||
+                secondsValue.ValueKind != JsonValueKind.Number || !secondsValue.TryGetDouble(out var seconds) ||
+                !double.IsFinite(seconds) || seconds < 0)
+            {
+                throw new InvalidDataException("Stash returned invalid marker navigation data.");
+            }
+
+            itemPath = $"scenes/{Uri.EscapeDataString(sceneId)}?t={seconds.ToString("R", CultureInfo.InvariantCulture)}";
+            if (string.IsNullOrWhiteSpace(title))
+                title = GetNestedString(item, "primary_tag", "name") ?? "(untitled)";
+        }
 
         return new StashSearchResult(
             id,
             title,
             kind,
-            ResolveInstanceUrl(instance.WebUiUrl, thumbnail),
-            new Uri(instance.WebUiUrl, $"{urlSegment}/{Uri.EscapeDataString(id)}"),
+            ResolveThumbnail(instance.WebUiUrl, kind, id, thumbnail),
+            new Uri(instance.WebUiUrl, itemPath),
             instance.Id,
             instance.Name);
     }
@@ -177,8 +198,30 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             ? value.GetString()
             : null;
 
-    private static Uri? ResolveInstanceUrl(Uri baseUri, string? value) =>
-        string.IsNullOrWhiteSpace(value) ? null : new Uri(baseUri, value);
+    private static Uri? ResolveThumbnail(Uri baseUri, StashSearchKind kind, string id, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || !long.TryParse(id, NumberStyles.None, CultureInfo.InvariantCulture, out var numericId) || numericId <= 0)
+            return null;
+
+        var path = kind switch
+        {
+            StashSearchKind.Scenes => $"scene/{id}/screenshot",
+            StashSearchKind.Images => $"image/{id}/thumbnail",
+            StashSearchKind.Performers => $"performer/{id}/image",
+            StashSearchKind.Studios => $"studio/{id}/image",
+            StashSearchKind.Tags => $"tag/{id}/image",
+            StashSearchKind.Galleries => $"gallery/{id}/cover",
+            StashSearchKind.Groups => $"group/{id}/frontimage",
+            _ => null
+        };
+        if (path is null || !Uri.TryCreate(baseUri, value, out var candidate))
+            return null;
+
+        var expected = new Uri(baseUri, path);
+        return candidate.Scheme == expected.Scheme && candidate.Authority == expected.Authority &&
+            candidate.UserInfo.Length == 0 && candidate.AbsolutePath == expected.AbsolutePath
+            ? expected : null;
+    }
 
     private static string SafeMessage(Exception exception) => exception switch
     {

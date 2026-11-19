@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using Microsoft.Data.Sqlite;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Search;
 using PersonalServerManager.Stash;
 using Xunit;
@@ -8,6 +10,22 @@ namespace PersonalServerManager.Tests;
 
 public sealed class LibrarySearchServiceTests
 {
+    [Fact]
+    public async Task SearchAsync_MapsAllEightStashCategories()
+    {
+        var stash = new FakeStashClient((instance, kind, _, _) =>
+            Task.FromResult<IReadOnlyList<StashSearchResult>>([StashResult(instance, kind)]));
+
+        var groups = await new LibrarySearchService(stash, new FakeHydrusClient())
+            .SearchAsync([StashInstance("Stash")], [], "query");
+
+        Assert.Equal(8, groups.Count);
+        LibraryMediaType[] expected = [LibraryMediaType.Video, LibraryMediaType.Image, LibraryMediaType.Performer,
+            LibraryMediaType.Studio, LibraryMediaType.Tag, LibraryMediaType.Marker,
+            LibraryMediaType.Collection, LibraryMediaType.Collection];
+        Assert.Equal(expected, groups.Select(group => Assert.Single(group.Items).MediaType));
+    }
+
     [Fact]
     public void GroupByType_MergesProvidersAndInstancesInEnumOrderAndRetainsSources()
     {
@@ -56,8 +74,8 @@ public sealed class LibrarySearchServiceTests
         var groups = await new LibrarySearchService(stash, hydrus)
             .SearchAsync(stashInstances, hydrusInstances, "  creator:some person, tag  ");
 
-        Assert.Equal(8, groups.Count);
-        Assert.Equal(6, stashCalls.Count);
+        Assert.Equal(20, groups.Count);
+        Assert.Equal(16, stashCalls.Count);
         Assert.Equal(hydrusInstances.Select(instance => instance.Id).Order(), hydrusCalls.Order());
         foreach (var instance in stashInstances)
         {
@@ -68,10 +86,14 @@ public sealed class LibrarySearchServiceTests
                 Assert.Equal(instance.Name, group.InstanceName);
                 Assert.Equal("Stash", group.Provider);
                 Assert.Equal(new LibraryItem("1", "Result 1", kind.ToString(), new Uri("https://stash.example/items/1"),
-                    new Uri($"/previews/stash/{instance.Id}/{kind.ToString().ToLowerInvariant()}/1", UriKind.Relative), kind switch
+                    PreviewService.CreateLink("stash", instance.Id, kind.ToString(), "1"), kind switch
                     {
                         StashSearchKind.Scenes => LibraryMediaType.Video,
                         StashSearchKind.Performers => LibraryMediaType.Performer,
+                        StashSearchKind.Studios => LibraryMediaType.Studio,
+                        StashSearchKind.Tags => LibraryMediaType.Tag,
+                        StashSearchKind.Markers => LibraryMediaType.Marker,
+                        StashSearchKind.Galleries or StashSearchKind.Groups => LibraryMediaType.Collection,
                         _ => LibraryMediaType.Image
                     }), group.Items[0]);
                 Assert.Equal(new[] { "1", "2", "3", "4", "5" }, group.Items.Select(item => item.Id));
@@ -80,7 +102,7 @@ public sealed class LibrarySearchServiceTests
 
         foreach (var instance in hydrusInstances)
         {
-            var group = Assert.Single(groups, group => group.InstanceId == instance.Id);
+            var group = Assert.Single(groups, group => group.InstanceId == instance.Id && group.Category == "Files");
             Assert.Equal(instance.Name, group.InstanceName);
             Assert.Equal("Hydrus", group.Provider);
             Assert.Equal("Files", group.Category);
@@ -92,7 +114,7 @@ public sealed class LibrarySearchServiceTests
 
         Assert.All(groups, group =>
         {
-            Assert.Equal(5, group.Items.Count);
+            Assert.Equal(group.Provider == "Hydrus" && group.Category == "Tags" ? 0 : 5, group.Items.Count);
             Assert.Null(group.Error);
         });
     }
@@ -108,7 +130,13 @@ public sealed class LibrarySearchServiceTests
 
         Assert.All(groups, group =>
         {
-            var link = Assert.Single(group.Items).PreviewUrl!.OriginalString;
+            var item = Assert.Single(group.Items);
+            if (group.Category == "Markers")
+            {
+                Assert.Null(item.PreviewUrl);
+                return;
+            }
+            var link = item.PreviewUrl!.OriginalString;
             Assert.Equal($"/previews/stash/{instance.Id}/{group.Category.ToLowerInvariant()}/1", link);
             Assert.DoesNotContain("private-key", link);
             Assert.DoesNotContain("evil.example", link);
@@ -140,8 +168,8 @@ public sealed class LibrarySearchServiceTests
         var groups = await new LibrarySearchService(stash, hydrus)
             .SearchAsync([failingStash, healthyStash], [failingHydrus, healthyHydrus], "query", limit: limit);
 
-        Assert.Equal(8, groups.Count);
-        Assert.Equal(6, groups.Count(group => group.Error is null));
+        Assert.Equal(20, groups.Count);
+        Assert.Equal(18, groups.Count(group => group.Error is null));
         var failedGroups = groups.Where(group => group.Error is not null).ToArray();
         Assert.Equal(2, failedGroups.Length);
         Assert.Contains(failedGroups, group => group.InstanceId == failingStash.Id && group.Category == "Images" && group.SearchUrl is not null);
@@ -151,7 +179,8 @@ public sealed class LibrarySearchServiceTests
             Assert.Empty(group.Items);
             Assert.Equal("Search failed. Check the instance connection and try again.", group.Error);
         });
-        Assert.All(groups.Where(group => group.Error is null), group => Assert.Single(group.Items));
+        Assert.All(groups.Where(group => group.Error is null && !(group.Provider == "Hydrus" && group.Category == "Tags")),
+            group => Assert.Single(group.Items));
         Assert.All(LibrarySearchService.GroupByType(groups).SelectMany(group => group.Sources), source => Assert.Null(source.Error));
         Assert.Equal(2, groups.Count(group => group.Error is not null));
     }
@@ -170,11 +199,12 @@ public sealed class LibrarySearchServiceTests
 
         var groups = await new LibrarySearchService(stash, new FakeHydrusClient()).SearchAsync([instance], [], query);
 
-        Assert.Equal(3, seenQueries.Count);
+        Assert.Equal(8, seenQueries.Count);
         Assert.All(seenQueries, capturedQuery => Assert.Equal(query.Trim(), capturedQuery));
         foreach (var group in groups)
         {
-            Assert.Equal($"https://stash.example/library/{group.Category.ToLowerInvariant()}?q=name%20%26%20value%2F%23%3F%2B%3D%2C%20non-ascii%20%C3%A9",
+            var route = group.Category == "Markers" ? "scenes/markers" : group.Category.ToLowerInvariant();
+            Assert.Equal($"https://stash.example/library/{route}?q=name%20%26%20value%2F%23%3F%2B%3D%2C%20non-ascii%20%C3%A9",
                 group.SearchUrl!.AbsoluteUri);
             Assert.Empty(group.Items);
             Assert.Null(group.Error);
@@ -198,9 +228,12 @@ public sealed class LibrarySearchServiceTests
         var groups = await new LibrarySearchService(new FakeStashClient(), hydrus)
             .SearchAsync([], [HydrusInstance("Files")], query);
 
-        var group = Assert.Single(groups);
-        Assert.Null(group.Error);
-        Assert.Null(group.SearchUrl);
+        Assert.Equal(new[] { "Files", "Tags" }, groups.Select(group => group.Category));
+        Assert.All(groups, group =>
+        {
+            Assert.Null(group.Error);
+            Assert.Null(group.SearchUrl);
+        });
     }
 
     [Theory]
@@ -248,7 +281,8 @@ public sealed class LibrarySearchServiceTests
         });
         var search = new LibrarySearchService(stash, hydrus).SearchAsync(
             [StashInstance("First"), StashInstance("Second"), StashInstance("Queued")],
-            [HydrusInstance("Queued files")], "query", cancellation.Token, limit);
+            [HydrusInstance("Queued files")], "query", cancellation.Token, limit,
+            [new LocalLibraryInstance(Guid.NewGuid(), "Queued notes", Path.GetTempPath(), LocalLibraryKind.Notes)]);
 
         try
         {
@@ -294,6 +328,12 @@ public sealed class LibrarySearchServiceTests
             Assert.Equal(new[] { "original tag", "second" }, tags);
             await Block();
             return [];
+        }, async (_, capturedQuery, selectedLimit, _) =>
+        {
+            Assert.Equal("original tag, second", capturedQuery);
+            Assert.Equal(limit, selectedLimit);
+            await Block();
+            return [];
         });
         var query = "  original tag, second  ";
         var search = new LibrarySearchService(stash, hydrus).SearchAsync(
@@ -312,8 +352,8 @@ public sealed class LibrarySearchServiceTests
         }
 
         var groups = await search.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(10, calls);
-        Assert.Equal(10, groups.Count);
+        Assert.Equal(22, calls);
+        Assert.Equal(22, groups.Count);
         Assert.All(groups, group => Assert.Null(group.Error));
     }
 
@@ -349,20 +389,22 @@ public sealed class LibrarySearchServiceTests
             : await service.SearchAsync(stashInstances, hydrusInstances, "query", cancellation.Token, limit);
         var typed = LibrarySearchService.GroupByType(groups);
 
-        Assert.Equal(8, groups.Count);
+        Assert.Equal(20, groups.Count);
         Assert.All(groups, group =>
         {
             Assert.Null(group.Error);
-            Assert.Equal(limit, group.Items.Count);
+            Assert.Equal(group.Provider == "Hydrus" && group.Category == "Tags" ? 0 : limit, group.Items.Count);
             Assert.All(group.Items, item => Assert.Equal(
-                $"/previews/{group.Provider.ToLowerInvariant()}/{group.InstanceId}/{group.Category.ToLowerInvariant()}/{item.Id}",
-                item.PreviewUrl!.OriginalString));
+                PreviewService.CreateLink(group.Provider, group.InstanceId, group.Category, item.Id), item.PreviewUrl));
         });
-        Assert.Equal(new[] { LibraryMediaType.Image, LibraryMediaType.Video, LibraryMediaType.Performer, LibraryMediaType.TextEbook, LibraryMediaType.Comic },
+        Assert.Equal(new[] { LibraryMediaType.Image, LibraryMediaType.Video, LibraryMediaType.Performer, LibraryMediaType.Collection,
+            LibraryMediaType.TextEbook, LibraryMediaType.Comic, LibraryMediaType.Studio, LibraryMediaType.Tag, LibraryMediaType.Marker },
             typed.Select(group => group.Type));
         Assert.Equal(4, typed[0].Sources.Count);
         Assert.Equal(4, typed[1].Sources.Count);
-        Assert.All(typed.Skip(2), group => Assert.Equal(2, group.Sources.Count));
+        Assert.Equal(4, typed[3].Sources.Count);
+        Assert.All(typed.Where(group => group.Type is not (LibraryMediaType.Image or LibraryMediaType.Video or LibraryMediaType.Collection)),
+            group => Assert.Equal(2, group.Sources.Count));
         Assert.All(typed.SelectMany(group => group.Items), entry =>
         {
             Assert.Contains(groups, source => ReferenceEquals(source, entry.Source));
@@ -381,11 +423,11 @@ public sealed class LibrarySearchServiceTests
         var groups = await new LibrarySearchService(stash, hydrus)
             .SearchAsync([StashInstance("Legacy Stash")], [HydrusInstance("Legacy Hydrus")], "query", limit: 25);
 
-        Assert.Equal(4, groups.Count);
+        Assert.Equal(10, groups.Count);
         Assert.All(groups, group =>
         {
             Assert.Null(group.Error);
-            Assert.Equal(25, group.Items.Count);
+            Assert.Equal(group.Provider == "Hydrus" && group.Category == "Tags" ? 0 : 25, group.Items.Count);
         });
     }
 
@@ -413,7 +455,7 @@ public sealed class LibrarySearchServiceTests
             Task.FromResult<IReadOnlyList<HydrusFile>>([new HydrusFile(1, "File", mime)]));
 
         var source = Assert.Single(await new LibrarySearchService(new FakeStashClient(), hydrus)
-            .SearchAsync([], [HydrusInstance("Hydrus")], "query"));
+            .SearchAsync([], [HydrusInstance("Hydrus")], "query"), group => group.Category == "Files");
 
         Assert.Null(source.Error);
         if (expected is { } type)
@@ -440,6 +482,219 @@ public sealed class LibrarySearchServiceTests
         var exception = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.SearchAsync([], [], "query", limit: limit));
 
         Assert.Equal("limit", exception.ParamName);
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(25)]
+    public async Task SearchAsync_HydrusTagsPreserveUnicodeCountsAndSafeAppLinks(int limit)
+    {
+        const string name = "creator:\u96ea & caf\u00e9/#?+=,tag";
+        using var cancellation = new CancellationTokenSource();
+        var hydrus = new FakeHydrusClient(searchTags: (_, query, selectedLimit, token) =>
+        {
+            Assert.Equal("original, query", query);
+            Assert.Equal(limit, selectedLimit);
+            Assert.Equal(cancellation.Token, token);
+            return Task.FromResult<IReadOnlyList<HydrusTag>>(Enumerable.Range(0, 30)
+                .Select(index => new HydrusTag(index == 0 ? name : $"tag:{index}", 6000000000L + index)).ToArray());
+        });
+
+        var groups = await new LibrarySearchService(new FakeStashClient(), hydrus)
+            .SearchAsync([], [HydrusInstance("Tags")], "  original, query  ", cancellation.Token, limit);
+
+        var group = Assert.Single(groups, group => group.Category == "Tags");
+        Assert.Null(group.SearchUrl);
+        Assert.Null(group.Error);
+        Assert.Equal(limit, group.Items.Count);
+        Assert.Equal(new LibraryItem(name, name, "6000000000",
+            new Uri($"/?q={Uri.EscapeDataString(name)}", UriKind.Relative), MediaType: LibraryMediaType.Tag), group.Items[0]);
+        Assert.All(group.Items, item => Assert.Null(item.PreviewUrl));
+        Assert.Equal(LibraryMediaType.Tag, Assert.Single(LibrarySearchService.GroupByType(groups)).Type);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task SearchAsync_HydrusFilesAndTagsFailIndependently(bool failTags, bool providerCancellation)
+    {
+        Exception failure = providerCancellation ? new OperationCanceledException("private-key") : new HttpRequestException("private-key");
+        var hydrus = new FakeHydrusClient(
+            (_, _, _) => !failTags ? Task.FromException<IReadOnlyList<HydrusFile>>(failure)
+                : Task.FromResult<IReadOnlyList<HydrusFile>>([new HydrusFile(1, "File", "image/png")]),
+            (_, _, _, _) => failTags ? Task.FromException<IReadOnlyList<HydrusTag>>(failure)
+                : Task.FromResult<IReadOnlyList<HydrusTag>>([new HydrusTag("tag", 42)]));
+
+        var groups = await new LibrarySearchService(new FakeStashClient(), hydrus)
+            .SearchAsync([], [HydrusInstance("Hydrus")], "query");
+
+        var failed = Assert.Single(groups, group => group.Error is not null);
+        Assert.Equal(failTags ? "Tags" : "Files", failed.Category);
+        Assert.Equal("Search failed. Check the instance connection and try again.", failed.Error);
+        Assert.Empty(failed.Items);
+        Assert.Null(failed.SearchUrl);
+        Assert.Single(Assert.Single(groups, group => group.Error is null).Items);
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(25)]
+    public async Task SearchAsync_HydrusTagWorkHonorsCallerCancellation(int limit)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hydrus = new FakeHydrusClient(searchTags: async (_, _, selectedLimit, token) =>
+        {
+            Assert.Equal(limit, selectedLimit);
+            Assert.Equal(cancellation.Token, token);
+            started.SetResult();
+            await Task.Delay(Timeout.Infinite, token);
+            return [];
+        });
+        var search = new LibrarySearchService(new FakeStashClient(), hydrus)
+            .SearchAsync([], [HydrusInstance("Hydrus")], "query", cancellation.Token, limit);
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+            var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(cancellation.Token, exception.CancellationToken);
+        }
+        finally
+        {
+            cancellation.Cancel();
+        }
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(25)]
+    public async Task SearchAsync_AggregatesTemporaryNotesAndCalibreWithLocalQueryRoutes(int limit)
+    {
+        var root = Directory.CreateTempSubdirectory("psm-aggregate-").FullName;
+        try
+        {
+            const string query = "needle & \u96ea";
+            for (var index = 0; index < 30; index++)
+                await File.WriteAllTextAsync(Path.Combine(root, $"note-{index}.md"), query);
+            var bookDirectory = Directory.CreateDirectory(Path.Combine(root, "Book")).FullName;
+            await File.WriteAllTextAsync(Path.Combine(bookDirectory, "book.epub"), "fixture");
+            await File.WriteAllTextAsync(Path.Combine(bookDirectory, "book.cbz"), "fixture");
+            await using (var connection = new SqliteConnection($"Data Source={Path.Combine(root, "metadata.db")};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT);
+                    CREATE TABLE data (book INTEGER, name TEXT, format TEXT);
+                    CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+                    CREATE TABLE books_authors_link (book INTEGER, author INTEGER);
+                    CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+                    CREATE TABLE books_tags_link (book INTEGER, tag INTEGER);
+                    CREATE TABLE comments (book INTEGER, text TEXT);
+                    INSERT INTO books VALUES (1, $query, 'Book');
+                    INSERT INTO data VALUES (1, 'book', 'EPUB'), (1, 'book', 'CBZ');
+                    """;
+                command.Parameters.AddWithValue("$query", query);
+                await command.ExecuteNonQueryAsync();
+            }
+            LocalLibraryInstance[] libraries = [
+                new(Guid.NewGuid(), "Notes fixture", root, LocalLibraryKind.Notes),
+                new(Guid.NewGuid(), "Books fixture", root, LocalLibraryKind.CalibreText),
+                new(Guid.NewGuid(), "Comics fixture", root, LocalLibraryKind.CalibreComic)];
+            var groups = await new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), new LocalLibraryClient())
+                .SearchAsync([], [], $"  {query}  ", limit: limit, localLibraries: libraries);
+
+            Assert.Equal(new[] { "Notes", "Calibre", "Calibre" }, groups.Select(group => group.Provider));
+            Assert.Equal(new[] { "Notes", "Ebooks", "Comics" }, groups.Select(group => group.Category));
+            Assert.Equal(new[] { LibraryMediaType.Note, LibraryMediaType.TextEbook, LibraryMediaType.Comic },
+                groups.Select(group => group.Items[0].MediaType));
+            Assert.Equal(limit, groups[0].Items.Count);
+            Assert.All(groups.Skip(1), group => Assert.Single(group.Items));
+            foreach (var group in groups)
+            {
+                Assert.Null(group.Error);
+                Assert.Equal(libraries.Single(instance => instance.Id == group.InstanceId).Name, group.InstanceName);
+                Assert.Equal($"/libraries/{group.InstanceId:D}?q={Uri.EscapeDataString(query)}", group.SearchUrl!.OriginalString);
+                Assert.All(group.Items, item => Assert.StartsWith($"/libraries/{group.InstanceId:D}/items/", item.ItemUrl!.OriginalString));
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_QueuesLocalWorkBehindTheSharedSixSlotGate()
+    {
+        var root = Directory.CreateTempSubdirectory("psm-aggregate-gate-").FullName;
+        var sixStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        using var cancellation = new CancellationTokenSource();
+        var stash = new FakeStashClient(async (_, _, _, token) =>
+        {
+            if (Interlocked.Increment(ref calls) == 6) sixStarted.SetResult();
+            await release.Task.WaitAsync(token);
+            return [];
+        });
+        var instance = new LocalLibraryInstance(Guid.NewGuid(), "Queued notes", root, LocalLibraryKind.Notes);
+        var search = new LibrarySearchService(stash, new FakeHydrusClient()).SearchAsync(
+            [StashInstance("Stash")], [], "needle", cancellation.Token, localLibraries: [instance]);
+        try
+        {
+            await sixStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(6, Volatile.Read(ref calls));
+            await File.WriteAllTextAsync(Path.Combine(root, "late.md"), "needle");
+            release.SetResult();
+            var groups = await search.WaitAsync(TimeSpan.FromSeconds(5));
+            var local = Assert.Single(groups, group => group.Provider == "Notes");
+            Assert.Null(local.Error);
+            Assert.Equal("late.md", Assert.Single(local.Items).Title);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            release.TrySetResult();
+            try { await search; }
+            catch (OperationCanceledException) { }
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Theory]
+    [InlineData(LocalLibraryKind.Notes)]
+    [InlineData(LocalLibraryKind.CalibreText)]
+    [InlineData(LocalLibraryKind.CalibreComic)]
+    public async Task SearchAsync_LocalLibrariesHonorPreCancellationAndIsolateFailures(LocalLibraryKind kind)
+    {
+        var root = Directory.CreateTempSubdirectory("psm-aggregate-failure-").FullName;
+        try
+        {
+            var instance = new LocalLibraryInstance(Guid.NewGuid(), "Fixture", Path.Combine(root, "missing-private-path"), kind);
+            var service = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient());
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                service.SearchAsync([], [], "query", cancellation.Token, localLibraries: [instance]));
+            Assert.Equal(cancellation.Token, exception.CancellationToken);
+
+            var groups = await service.SearchAsync([], [HydrusInstance("Healthy")], "query", localLibraries: [instance]);
+            var failed = Assert.Single(groups, group => group.Provider != "Hydrus");
+            Assert.Equal("Search failed. Check the instance connection and try again.", failed.Error);
+            Assert.Empty(failed.Items);
+            Assert.NotNull(failed.SearchUrl);
+            Assert.DoesNotContain("private-path", failed.SearchUrl.OriginalString);
+            Assert.All(groups.Where(group => group.Provider == "Hydrus"), group => Assert.Null(group.Error));
+            Assert.Empty(LibrarySearchService.GroupByType(groups));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
     }
 
     private sealed class LimitAwareStashClient(
@@ -491,8 +746,12 @@ public sealed class LibrarySearchServiceTests
     }
 
     private sealed class FakeHydrusClient(
-        Func<HydrusInstance, IReadOnlyList<string>, CancellationToken, Task<IReadOnlyList<HydrusFile>>>? search = null) : IHydrusClient
+        Func<HydrusInstance, IReadOnlyList<string>, CancellationToken, Task<IReadOnlyList<HydrusFile>>>? search = null,
+        Func<HydrusInstance, string, int, CancellationToken, Task<IReadOnlyList<HydrusTag>>>? searchTags = null) : IHydrusClient
     {
+        public Task<IReadOnlyList<HydrusTag>> SearchTagsAsync(HydrusInstance instance, string query, int limit, CancellationToken cancellationToken = default) =>
+            searchTags?.Invoke(instance, query, limit, cancellationToken) ?? Task.FromResult<IReadOnlyList<HydrusTag>>([]);
+
         public Task<IReadOnlyList<HydrusFile>> SearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default) =>
             search?.Invoke(instance, tags, cancellationToken) ?? Task.FromResult<IReadOnlyList<HydrusFile>>([]);
 
