@@ -1,0 +1,115 @@
+@page "/libraries/{InstanceId:guid}"
+@using PersonalServerManager.LocalLibraries
+@using PersonalServerManager.Search
+@using Microsoft.Data.Sqlite
+@implements IDisposable
+@inject ILocalLibraryStore Store
+@inject LocalLibraryClient Client
+@inject NavigationManager Navigation
+
+<PageTitle>@(_instance?.Name ?? "Local library") | Personal Server Manager</PageTitle>
+
+<div class="workspace">
+    <header class="topbar">
+        <a href="/" class="wordmark">Personal Server Manager</a>
+        <nav aria-label="Workspace"><a href="/" title="Library search" aria-label="Library search"><MudIcon Icon="@Icons.Material.Outlined.Search" /></a><a href="/backends" title="Manage backends" aria-label="Manage backends"><MudIcon Icon="@Icons.Material.Outlined.Settings" /></a></nav>
+    </header>
+    <main>
+        <h1>@(_instance?.Name ?? "Local library")</h1>
+        <form class="search-form" role="search" @onsubmit="Search" @onsubmit:preventDefault="true">
+            <label class="visually-hidden" for="library-query">Search this library</label>
+            <input id="library-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search this library" />
+            <button type="submit" title="Search library" aria-label="Search library" disabled="@(_loading || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@Icons.Material.Outlined.Search" /></button>
+        </form>
+        @if (_error is not null)
+        {
+            <p class="error" role="alert">@_error</p>
+        }
+        <div role="status" aria-live="polite">@(_loading ? "Searching..." : _hasSearched ? $"{_items.Count} results on this page" : string.Empty)</div>
+        <ul class="library-grid" aria-busy="@(_loading ? "true" : "false")">
+            @foreach (var item in _items)
+            {
+                <li @key="item.Id"><a class="item-preview" href="@item.ItemUrl" target="_blank" rel="noopener noreferrer" aria-label="@($"Open {item.Title}")">
+                    <MudIcon Icon="@(item.MediaType == LibraryMediaType.Note ? Icons.Material.Outlined.Description : Icons.Material.Outlined.MenuBook)" />
+                    @if (item.PreviewUrl is not null)
+                    {
+                        <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
+                    }
+                </a><strong>@item.Title</strong><small>@item.Detail</small></li>
+            }
+        </ul>
+        @if (_hasSearched && !_loading && _error is null)
+        {
+            <nav class="pagination" aria-label="Library results">
+                @if (Offset > 0)
+                {
+                    <a href="@PageUrl(Math.Max(0, Offset - 25))" title="Previous page" aria-label="Previous page"><MudIcon Icon="@Icons.Material.Outlined.ChevronLeft" /></a>
+                }
+                <span>Page @(Offset / 25 + 1)</span>
+                @if (_items.Count == 25 && Offset < 10000)
+                {
+                    <a href="@PageUrl(Offset + 25)" title="Next page" aria-label="Next page"><MudIcon Icon="@Icons.Material.Outlined.ChevronRight" /></a>
+                }
+            </nav>
+        }
+    </main>
+</div>
+
+@code {
+    [Parameter] public Guid InstanceId { get; set; }
+    [SupplyParameterFromQuery(Name = "q")] public string? Query { get; set; }
+    [SupplyParameterFromQuery(Name = "offset")] public int Offset { get; set; }
+
+    private CancellationTokenSource? _load;
+    private LocalLibraryInstance? _instance;
+    private IReadOnlyList<LibraryItem> _items = [];
+    private string _query = string.Empty;
+    private string? _error;
+    private bool _loading;
+    private bool _hasSearched;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _load?.Cancel();
+        _load?.Dispose();
+        _load = new CancellationTokenSource();
+        var token = _load.Token;
+        _loading = true;
+        _items = [];
+        _error = null;
+        _query = Query ?? string.Empty;
+        _hasSearched = !string.IsNullOrWhiteSpace(Query);
+        try
+        {
+            _instance = (await Store.GetAllAsync(token)).FirstOrDefault(instance => instance.Id == InstanceId);
+            if (_instance is null)
+            {
+                _error = "This library is no longer configured.";
+            }
+            else if (_hasSearched)
+            {
+                var items = await Client.SearchAsync(_instance, _query, 25, token, Offset);
+                token.ThrowIfCancellationRequested();
+                _items = items;
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or ArgumentException or UnauthorizedAccessException or SqliteException)
+        {
+            _error = "This library could not be searched. Check its folder and access permissions.";
+        }
+        finally
+        {
+            if (!token.IsCancellationRequested) _loading = false;
+        }
+    }
+
+    private string PageUrl(int offset) => $"/libraries/{InstanceId:D}?q={Uri.EscapeDataString(_query)}&offset={offset}";
+    private void Search() => Navigation.NavigateTo(PageUrl(0));
+
+    public void Dispose()
+    {
+        _load?.Cancel();
+        _load?.Dispose();
+    }
+}

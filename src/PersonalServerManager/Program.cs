@@ -10,6 +10,7 @@ using PersonalServerManager.Security;
 using PersonalServerManager.Stash;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.Search;
+using PersonalServerManager.LocalLibraries;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -65,6 +66,9 @@ builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusIn
     Path.Combine(dataDirectory, "hydrus-instances.json"),
     services.GetRequiredService<IDataProtectionProvider>().CreateProtector("HydrusApiKey.v1")));
 builder.Services.AddTransient<LibrarySearchService>();
+builder.Services.AddSingleton<ILocalLibraryStore>(_ => new JsonLocalLibraryStore(
+    Path.Combine(dataDirectory, "local-libraries.json")));
+builder.Services.AddSingleton<LocalLibraryClient>();
 builder.Services.AddHttpClient<PreviewService>(client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -134,6 +138,7 @@ app.UseRateLimiter();
 app.UseAntiforgery();
 app.MapAccountEndpoints();
 app.MapPreviewEndpoints();
+app.MapLocalLibraryEndpoints();
 
 app.MapStaticAssets();
 app.MapRazorComponents<App>()

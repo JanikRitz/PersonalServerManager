@@ -1,7 +1,7 @@
 # Personal Server Manager
 
-A Windows-hosted, owner-operated dashboard for multiple Stash and Hydrus
-instances. Search Stash scenes, images, and performers alongside Hydrus files,
+A Windows-hosted, owner-operated dashboard for Stash, Hydrus, Notes, and local
+Calibre libraries. Search media, metadata, notes, ebooks, and comics together,
 and observe each endpoint independently. Process control, GPU policy, and MCP
 management are not implemented. See [REQUIREMENTS.md](REQUIREMENTS.md) for the
 broader target.
@@ -26,9 +26,10 @@ are managed. Use its search link to return to the main page.
 
 Add each Stash instance using its GraphQL endpoint (normally ending in
 `/graphql`), web UI URL, and optional API key. One query searches all categories
-together. Results are combined across backends into Image, Video, and Performer
-grids; supported document and comic MIME types appear as Text/Ebook and Comic.
-Collection is reserved for future integrations. Empty types and sources are hidden.
+together. Results are combined across backends into Image, Video, Performer,
+Studio, Tag, Marker, Collection, Note, Text/Ebook, and Comic grids. Stash searches
+scenes, images, performers, studios, tags, scene markers, galleries, and groups;
+galleries and groups share the Collection type. Empty types and sources are hidden.
 Each type initially shows up to five results. Expand it to fetch up to 25 per
 source and display up to 25 combined results, with an option to show everything
 in each contributing source. Stash thumbnails link to the original item; Hydrus
@@ -64,6 +65,44 @@ than silently falling back to another action.
 
 See the [official Client API documentation](https://hydrusnetwork.github.io/hydrus/developer_api.html)
 and [adapter contract notes](src/PersonalServerManager/Hydrus/README.md).
+
+Hydrus tag autocomplete is searched independently using the read-only
+`GET /add_tags/search_tags` endpoint. Tag results start a search for the selected
+tag; no tag is created or edited. Endpoint permissions and failures are isolated
+from file search. The configured access key must permit tag search as well as
+the file operations you use.
+
+## Notes And Calibre
+
+On **Backends**, add a **Local library**, select its kind, and enter an absolute
+Windows drive path visible to the app's account. Multiple folders are supported.
+Paths are configuration, not hardcoded defaults. Example sources:
+
+- Notes: `C:\ProgrammingProjects\StoryWriting`
+- Calibre ebooks: `M:\CALIBRE\Calibre Text`
+- Calibre comics: `M:\CALIBRE\SFW Comics`
+
+Notes search `.md`, `.markdown`, and `.txt` filenames and UTF-8 text recursively,
+using a literal case-insensitive query. Files larger than 1 MiB, non-UTF-8 files,
+binary content, and symbolic links/junctions are skipped. A search scans at most
+10,000 directory entries and 32 MiB of note content; matches beyond these bounds
+are not returned. Notes open as plain text, never executable HTML.
+
+Calibre libraries must contain `metadata.db`. Search covers titles, authors,
+tags, and comments, not full book contents. Supported on-disk formats are selected
+without conversion; ebooks and comics remain distinct backends. Covers are shown
+when available, and thumbnails download the preferred existing format. SQLite is
+opened read-only with immutable reads; uncheckpointed WAL changes are not visible.
+Keep the library stable while searching; use a read-only snapshot if another
+process is actively editing it. The adapter never changes metadata or book files.
+
+Expanded local groups link to an authenticated, paginated source view. File and
+cover routes also require sign-in, reject path traversal/reparse points, and
+expose opaque item IDs rather than physical paths. Local configuration is stored
+alongside the other backend settings in `local-libraries.json`.
+
+No Calibre service is required for this mode. For browser reading, OPDS, and a
+separately hosted library UI, see [Calibre hosting](docs/calibre-hosting.md).
 
 ## Network Access
 

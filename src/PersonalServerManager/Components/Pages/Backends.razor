@@ -2,10 +2,12 @@
 @using System.Text.Json
 @using PersonalServerManager.Stash
 @using PersonalServerManager.Hydrus
+@using PersonalServerManager.LocalLibraries
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
 @inject IStashGraphQlClient StashClient
 @inject IHydrusInstanceStore HydrusStore
+@inject ILocalLibraryStore LocalStore
 @inject IJSRuntime JavaScript
 
 <PageTitle>Backends | Personal Server Manager</PageTitle>
@@ -24,7 +26,7 @@
         <div class="page-heading">
             <h1>Backends</h1>
             <div class="heading-meta">
-                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count).ToString("00")) <span>INSTANCES</span></span>
+                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count).ToString("00")) <span>INSTANCES</span></span>
                 <span class="last-refresh" role="status">@(_lastRefresh is null ? "Awaiting first Stash check" : $"Stash checked {_lastRefresh.Value.ToLocalTime():HH:mm:ss}")</span>
             </div>
         </div>
@@ -35,6 +37,10 @@
         @if (_hydrusError is not null)
         {
             <div class="notice error-notice" role="alert">@_hydrusError</div>
+        }
+        @if (_localError is not null)
+        {
+            <div class="notice error-notice" role="alert">@_localError</div>
         }
 
         <div class="management-grid">
@@ -86,9 +92,10 @@
 
             <div class="hydrus-section"><HydrusInstances Changed="ReloadHydrusAsync" /></div>
         </div>
+        <LocalLibraries Changed="ReloadLocalAsync" />
     </main>
 
-    <footer><span>PERSONAL SERVER MANAGER</span><span>STASH / HYDRUS</span></footer>
+    <footer><span>PERSONAL SERVER MANAGER</span><span>LIBRARY CONNECTIONS</span></footer>
 
     @if (_isEditing)
     {
@@ -120,6 +127,7 @@
     private CancellationToken _token;
     private IReadOnlyList<StashInstance> _instances = [];
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
+    private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
     private Guid? _selectedInstanceId;
     private DateTimeOffset? _lastRefresh;
     private string _draftName = string.Empty;
@@ -128,6 +136,7 @@
     private string _draftApiKey = string.Empty;
     private string? _pageError;
     private string? _hydrusError;
+    private string? _localError;
     private string? _editorError;
     private Guid? _editingId;
     private bool _isEditing;
@@ -143,6 +152,7 @@
         {
             await LoadInstancesAsync();
             await ReloadHydrusAsync();
+            await ReloadLocalAsync();
             await RefreshObservationsAsync();
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
@@ -323,6 +333,20 @@
         catch (Exception exception) when (IsConfigurationFailure(exception))
         {
             _hydrusError = "Hydrus configuration could not be loaded. Check the data directory and Windows account; existing data was not changed.";
+        }
+    }
+
+    private async Task ReloadLocalAsync()
+    {
+        try
+        {
+            _localLibraries = await LocalStore.GetAllAsync(_token);
+            _localError = null;
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsConfigurationFailure(exception))
+        {
+            _localError = "Local library configuration could not be loaded. Existing data was not changed.";
         }
     }
 

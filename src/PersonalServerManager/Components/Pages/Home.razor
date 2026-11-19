@@ -3,11 +3,13 @@
 @using PersonalServerManager.Stash
 @using PersonalServerManager.Hydrus
 @using PersonalServerManager.Search
+@using PersonalServerManager.LocalLibraries
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
 @inject IHydrusInstanceStore HydrusStore
 @inject IHydrusClient HydrusClient
 @inject LibrarySearchService LibrarySearch
+@inject ILocalLibraryStore LocalStore
 
 <PageTitle>Library search | Personal Server Manager</PageTitle>
 
@@ -22,7 +24,7 @@
     </header>
 
     <main>
-        <section class="search-section" aria-labelledby="search-heading">
+        <section class="search-section" aria-label="Library search">
             @if (_pageError is not null)
             {
                 <div class="notice error-notice" role="alert">@_pageError</div>
@@ -33,7 +35,7 @@
                 <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search all libraries" autocomplete="off" />
                 <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
             </form>
-            @if (_configurationLoaded && _instances.Count + _hydrusInstances.Count == 0 && _pageError is null)
+            @if (_configurationLoaded && _instances.Count + _hydrusInstances.Count + _localLibraries.Count == 0 && _pageError is null)
             {
                 <p class="empty-state">No backends connected. <a href="/backends">Add a backend</a></p>
             }
@@ -105,13 +107,16 @@
             }
         </section>
     </main>
-    <footer><span>PERSONAL SERVER MANAGER</span><span>STASH / HYDRUS</span></footer>
+    <footer><span>PERSONAL SERVER MANAGER</span><span>YOUR LIBRARIES</span></footer>
 </div>
 
 @code {
+    [SupplyParameterFromQuery(Name = "q")] public string? Query { get; set; }
+
     private readonly CancellationTokenSource _lifetime = new();
     private IReadOnlyList<StashInstance> _instances = [];
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
+    private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
     private IReadOnlyList<LibraryGroup> _groups = [];
     private IReadOnlyList<LibraryGroup>? _expandedGroups;
     private IReadOnlyList<LibraryTypeGroup> _typeGroups = [];
@@ -137,6 +142,10 @@
         LibraryMediaType.Collection => Icons.Material.Outlined.Collections,
         LibraryMediaType.TextEbook => Icons.Material.Outlined.MenuBook,
         LibraryMediaType.Comic => Icons.Material.Outlined.AutoStories,
+        LibraryMediaType.Studio => Icons.Material.Outlined.Business,
+        LibraryMediaType.Tag => Icons.Material.Outlined.Label,
+        LibraryMediaType.Marker => Icons.Material.Outlined.Bookmark,
+        LibraryMediaType.Note => Icons.Material.Outlined.Description,
         _ => Icons.Material.Outlined.Image
     };
 
@@ -146,12 +155,22 @@
         {
             _instances = await InstanceStore.GetAllAsync(_lifetime.Token);
             _hydrusInstances = await HydrusStore.GetAllAsync(_lifetime.Token);
+            _localLibraries = await LocalStore.GetAllAsync(_lifetime.Token);
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UriFormatException or System.Security.Cryptography.CryptographicException or UnauthorizedAccessException)
         {
             _pageError = "Backend configuration could not be loaded. Check the data directory and Windows account; existing data was not changed.";
         }
         _configurationLoaded = true;
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_configurationLoaded && !string.IsNullOrWhiteSpace(Query) && Query.Length <= 1024 && Query.Trim() != _submittedQuery)
+        {
+            _query = Query;
+            await SearchAsync();
+        }
     }
 
     private async Task SearchAsync()
@@ -171,7 +190,7 @@
         _submittedQuery = _query.Trim();
         try
         {
-            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token);
+            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries);
             _typeGroups = LibrarySearchService.GroupByType(_groups);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -199,7 +218,7 @@
         {
             if (_expandedGroups is null)
             {
-                var groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, limit: 25);
+                var groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, limit: 25, localLibraries: _localLibraries);
                 _expandedGroups = groups.Select(group => group.Error is null ? group : group with
                 {
                     Items = _groups.FirstOrDefault(original => original.InstanceId == group.InstanceId && original.Category == group.Category)?.Items ?? []
