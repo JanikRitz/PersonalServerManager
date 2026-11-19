@@ -14,6 +14,7 @@
     <header class="topbar">
         <a class="wordmark" href="/" aria-label="Personal Server Manager home"><span class="mark">P</span><span>Personal Server Manager</span></a>
         <nav class="topbar-right" aria-label="Workspace">
+            <button class="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Toggle dark mode"><span class="theme-moon"><MudIcon Icon="@Icons.Material.Outlined.DarkMode" /></span><span class="theme-sun"><MudIcon Icon="@Icons.Material.Outlined.LightMode" /></span></button>
             <a class="nav-link" href="/" aria-label="Library search" title="Library search"><MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" /><span>Search</span></a>
             <form method="post" action="/account/logout"><AntiforgeryToken /><button class="logout" type="submit">Sign out</button></form>
         </nav>
