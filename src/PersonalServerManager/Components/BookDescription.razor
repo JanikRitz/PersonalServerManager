@@ -1,0 +1,18 @@
+<details class="book-description">
+    <summary><span class="description-excerpt">@Excerpt</span><span class="description-command"><span class="collapsed-label">Read description</span><span class="expanded-label">Hide description</span><MudIcon Icon="@Icons.Material.Filled.ExpandMore" Size="Size.Small" /></span></summary>
+    <p>@Description</p>
+</details>
+
+@code {
+    [Parameter, EditorRequired] public string Description { get; set; } = string.Empty;
+
+    private string Excerpt
+    {
+        get
+        {
+            if (Description.Length <= 160) return Description;
+            var length = char.IsHighSurrogate(Description[159]) ? 159 : 160;
+            return Description[..length].TrimEnd() + "...";
+        }
+    }
+}

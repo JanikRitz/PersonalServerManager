@@ -41,7 +41,24 @@
             }
             @if (_searchHasRun)
             {
-                <div class="results-header" role="status" aria-live="polite"><h2>Results <span>@VisibleResultCount</span></h2><span>@(_isSearching ? "Searching all libraries..." : $"for '{_submittedQuery}'")</span></div>
+                @if (_isSearching)
+                {
+                    <div class="search-loading" role="status" aria-live="polite">
+                        <span class="loading-spinner" aria-hidden="true"></span>
+                        <div><h2>Searching your libraries</h2><p>Fetching results for '@_submittedQuery'</p></div>
+                    </div>
+                    <progress class="search-progress" aria-label="Fetching search results"></progress>
+                    <div class="loading-grid" aria-hidden="true">
+                        @for (var index = 0; index < 5; index++)
+                        {
+                            <div class="loading-tile"><span class="loading-thumbnail"></span><span class="loading-line"></span><span class="loading-line short"></span></div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="results-header" role="status" aria-live="polite"><h2>Results <span>@VisibleResultCount</span></h2><span>for '@_submittedQuery'</span></div>
+                }
                 @foreach (var failure in (_expandedGroups ?? _groups).Where(group => group.Error is not null))
                 {
                     <p class="instance-error" role="status">@failure.InstanceName / @failure.Category: @failure.Error</p>
@@ -63,6 +80,11 @@
                                     <MudIcon Icon="@(expanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)" Size="Size.Small" />
                                 </button>
                             </div>
+                            @if (_expandingType == group.Type)
+                            {
+                                <div class="expansion-loading" role="status"><span class="loading-spinner" aria-hidden="true"></span><span>Fetching more @TypeLabel(group.Type) results...</span></div>
+                                <progress class="search-progress" aria-label="@($"Fetching more {TypeLabel(group.Type)} results")"></progress>
+                            }
                             <ul class="media-grid" id="@resultsId">
                                 @foreach (var entry in group.Items.Take(expanded ? 25 : 5))
                                 {
@@ -78,6 +100,10 @@
                                         </a>
                                         <small class="media-source">@entry.Source.Provider / @entry.Source.InstanceName</small>
                                         <span class="media-title" title="@item.Title">@item.Title</span>
+                                        @if (!string.IsNullOrWhiteSpace(item.Description))
+                                        {
+                                            <BookDescription Description="@item.Description" />
+                                        }
                                     </li>
                                 }
                             </ul>

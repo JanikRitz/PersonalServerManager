@@ -35,7 +35,12 @@
                     {
                         <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
                     }
-                </a><strong>@item.Title</strong><small>@item.Detail</small></li>
+                </a><strong>@item.Title</strong><small>@item.Detail</small>
+                @if (!string.IsNullOrWhiteSpace(item.Description))
+                {
+                    <BookDescription Description="@item.Description" />
+                }
+                </li>
             }
         </ul>
         @if (_hasSearched && !_loading && _error is null)

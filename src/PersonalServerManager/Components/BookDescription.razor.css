@@ -1,0 +1,10 @@
+.book-description { margin-top: 8px; color: var(--muted); font: 12px/1.55 "Segoe UI", sans-serif; overflow-wrap: anywhere; }
+summary { list-style: none; cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+summary:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+.description-excerpt { display: block; margin-bottom: 5px; }
+.description-command { display: inline-flex; align-items: center; gap: 4px; color: var(--teal); font-weight: 600; }
+.expanded-label, .book-description[open] .collapsed-label, .book-description[open] .description-excerpt { display: none; }
+.book-description[open] .expanded-label { display: inline; }
+.book-description[open] .description-command ::deep svg { transform: rotate(180deg); }
+p { margin: 6px 0 0; white-space: pre-line; }

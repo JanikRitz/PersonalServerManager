@@ -30,12 +30,16 @@ together. Results are combined across backends into Image, Video, Performer,
 Studio, Tag, Marker, Collection, Note, Text/Ebook, and Comic grids. Stash searches
 scenes, images, performers, studios, tags, scene markers, galleries, and groups;
 galleries and groups share the Collection type. Empty types and sources are hidden.
-Each type initially shows up to five results. Expand it to fetch up to 25 per
+Results are interleaved round-robin across backend instances, preserving each
+source's ranking so one full source cannot crowd out the others. Each type
+initially shows up to five results. Expand it to fetch up to 25 per
 source and display up to 25 combined results, with an option to show everything
 in each contributing source. Stash thumbnails link to the original item; Hydrus
 thumbnails open the preview because its Client API has no browser-based item UI.
 Thumbnails preserve their aspect ratio, with a larger preview on hover or keyboard
 focus. Backend failures are reported separately without hiding healthy results.
+Scene markers use their own screenshot through the authenticated preview proxy.
+Search and expansion show explicit loading indicators while data is being fetched.
 Status refreshes every 15 seconds on the Backends page.
 The integration does not start, stop, or otherwise mutate Stash.
 
@@ -92,7 +96,9 @@ Calibre libraries must contain `metadata.db`. Search covers titles, authors,
 tags, and comments, not full book contents. Supported on-disk formats are selected
 without conversion; ebooks and comics remain distinct backends. Covers are shown
 when available, and thumbnails download the preferred existing format. SQLite is
-opened read-only with immutable reads; uncheckpointed WAL changes are not visible.
+opened read-only. Book descriptions from Calibre comments are shown as bounded,
+plain-text excerpts with an expandable full description when available. SQLite uses
+immutable reads; uncheckpointed WAL changes are not visible.
 Keep the library stable while searching; use a read-only snapshot if another
 process is actively editing it. The adapter never changes metadata or book files.
 
