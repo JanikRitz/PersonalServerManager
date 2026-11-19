@@ -224,6 +224,71 @@ public sealed class LocalLibraryClientTests : IDisposable
         Assert.Equal(filesBefore, Directory.GetFiles(_root, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal));
     }
 
+    [Theory]
+    [InlineData(LocalLibraryKind.CalibreText)]
+    [InlineData(LocalLibraryKind.CalibreComic)]
+    public async Task CalibreDescriptionsNormalizeHtmlAndPreserveAuthors(LocalLibraryKind kind)
+    {
+        await CreateDatabaseAsync();
+        await SetCommentAsync("<p>A &amp; B&nbsp; &#169; &#x1F600;</p><p>Second <b>paragraph</b><br>line</p>"
+            + "<script>private script content</script><STYLE>private style content</STYLE><!--private comment-->"
+            + "<p title=\"private attribute > content\">Last\t  paragraph</p>");
+        var item = Assert.Single(await _client.SearchAsync(Instance(kind), "fixture", 25));
+        Assert.Equal("A & B \u00a9 \U0001F600\n\nSecond paragraph\nline\n\nLast paragraph", item.Description);
+        Assert.Equal("Writer", item.Detail);
+        Assert.Equal(kind == LocalLibraryKind.CalibreComic ? LibraryMediaType.Comic : LibraryMediaType.TextEbook, item.MediaType);
+    }
+
+    [Theory]
+    [InlineData(LocalLibraryKind.CalibreText)]
+    [InlineData(LocalLibraryKind.CalibreComic)]
+    public async Task CalibreDescriptionsAllowMissingNullAndEmptyComments(LocalLibraryKind kind)
+    {
+        await CreateDatabaseAsync();
+        foreach (var comment in new string?[] { null, "", " \t<p>&nbsp;</p><script>private</script><style>private</style>" })
+        {
+            await SetCommentAsync(comment);
+            var item = Assert.Single(await _client.SearchAsync(Instance(kind), "fixture", 25));
+            Assert.Null(item.Description);
+            Assert.Equal("Writer", item.Detail);
+        }
+        await ExecuteAsync("DELETE FROM comments");
+        Assert.Null(Assert.Single(await _client.SearchAsync(Instance(kind), "fixture", 25)).Description);
+    }
+
+    [Theory]
+    [InlineData(LocalLibraryKind.CalibreText)]
+    [InlineData(LocalLibraryKind.CalibreComic)]
+    public async Task CalibreDescriptionsBoundOutputAndInputIncludingTruncatedUnsafeBlocks(LocalLibraryKind kind)
+    {
+        await CreateDatabaseAsync();
+        var instance = Instance(kind);
+        await SetCommentAsync(new string('a', 5000));
+        Assert.Equal(new string('a', 4000), Assert.Single(await _client.SearchAsync(instance, "fixture", 25)).Description);
+        await SetCommentAsync(new string(' ', 32768) + "outside query bound");
+        Assert.Null(Assert.Single(await _client.SearchAsync(instance, "fixture", 25)).Description);
+        foreach (var tag in new[] { "script", "style" })
+        {
+            await SetCommentAsync($"<p>Visible</p><{tag}>" + new string('x', 40000) + $"</{tag}>hidden tail");
+            Assert.Equal("Visible", Assert.Single(await _client.SearchAsync(instance, "fixture", 25)).Description);
+        }
+        await SetCommentAsync(new string('a', 3999) + "\U0001F600tail");
+        Assert.Equal(new string('a', 3999), Assert.Single(await _client.SearchAsync(instance, "fixture", 25)).Description);
+    }
+
+    private async Task SetCommentAsync(string? text)
+    {
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(_root, "metadata.db"), Pooling = false
+        }.ToString());
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE comments SET text = $text WHERE book = 1";
+        command.Parameters.AddWithValue("$text", (object?)text ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
     private async Task CreateDatabaseAsync()
     {
         var directory = Directory.CreateDirectory(Path.Combine(_root, "Writer", "Fixture (1)")).FullName;

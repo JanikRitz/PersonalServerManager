@@ -8,7 +8,7 @@ namespace PersonalServerManager.Search;
 public enum LibraryMediaType { Image, Video, Performer, Collection, TextEbook, Comic, Studio, Tag, Marker, Note }
 
 public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, Uri? PreviewUrl = null,
-    LibraryMediaType MediaType = LibraryMediaType.Image);
+    LibraryMediaType MediaType = LibraryMediaType.Image, string? Description = null);
 
 public record LibraryGroup(
     Guid InstanceId,
@@ -31,9 +31,16 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
         groups.SelectMany(source => source.Items.Select(item => new LibraryTypeItem(item, source)))
             .GroupBy(entry => entry.Item.MediaType)
             .OrderBy(group => group.Key)
-            .Select(group => new LibraryTypeGroup(group.Key, group.ToArray(),
+            .Select(group => new LibraryTypeGroup(group.Key, InterleaveSources(group),
                 group.Select(entry => entry.Source)
                     .DistinctBy(source => (source.InstanceId, source.Provider, source.Category)).ToArray()))
+            .ToArray();
+
+    private static IReadOnlyList<LibraryTypeItem> InterleaveSources(IEnumerable<LibraryTypeItem> items) =>
+        items.GroupBy(entry => (entry.Source.InstanceId, entry.Source.Provider))
+            .SelectMany(source => source.Select((entry, index) => (Entry: entry, Index: index)))
+            .OrderBy(entry => entry.Index)
+            .Select(entry => entry.Entry)
             .ToArray();
 
     public async Task<IReadOnlyList<LibraryGroup>> SearchAsync(

@@ -9,6 +9,37 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
 
+    public async Task<string?> GetMarkerSceneIdAsync(StashInstance instance, string markerId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!long.TryParse(markerId, NumberStyles.None, CultureInfo.InvariantCulture, out var numericId) || numericId <= 0)
+            throw new ArgumentException("Invalid marker ID.", nameof(markerId));
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(RequestTimeout);
+        using var response = await SendAsync(instance,
+            "query MarkerScene($id: ID!) { findSceneMarkers(ids: [$id], filter: { per_page: 1, page: 1 }) { scene_markers { id scene { id } } } }",
+            new { id = numericId.ToString(CultureInfo.InvariantCulture) }, timeout.Token);
+        await response.Content.LoadIntoBufferAsync(64 * 1024, timeout.Token);
+        using var payload = await ReadPayloadAsync(response, timeout.Token);
+        ThrowForGraphQlErrors(payload.RootElement);
+        if (!payload.RootElement.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("findSceneMarkers", out var result) ||
+            result.ValueKind != JsonValueKind.Object || !result.TryGetProperty("scene_markers", out var markers) ||
+            markers.ValueKind != JsonValueKind.Array || markers.GetArrayLength() > 1)
+            throw new InvalidDataException("Stash returned no marker data.");
+        if (markers.GetArrayLength() == 0) return null;
+        var marker = markers[0];
+        if (marker.ValueKind != JsonValueKind.Object || !marker.TryGetProperty("id", out var returnedId) ||
+            returnedId.ValueKind != JsonValueKind.String || returnedId.GetString() != numericId.ToString(CultureInfo.InvariantCulture) ||
+            !marker.TryGetProperty("scene", out var scene) ||
+            scene.ValueKind != JsonValueKind.Object || !scene.TryGetProperty("id", out var sceneId) ||
+            sceneId.ValueKind != JsonValueKind.String ||
+            !long.TryParse(sceneId.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out var numericSceneId) || numericSceneId <= 0)
+            throw new InvalidDataException("Stash returned an invalid marker scene ID.");
+        return numericSceneId.ToString(CultureInfo.InvariantCulture);
+    }
+
     public Task<IReadOnlyList<StashSearchResult>> SearchAsync(
         StashInstance instance,
         StashSearchKind kind,
@@ -35,7 +66,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path", "performers"),
             StashSearchKind.Studios => ("findStudios", "studios", "id name image_path", "studios"),
             StashSearchKind.Tags => ("findTags", "tags", "id name image_path", "tags"),
-            StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds scene { id } primary_tag { name }", "scenes"),
+            StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds scene { id } primary_tag { name } screenshot", "scenes"),
             StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover }", "galleries"),
             StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path", "groups"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
@@ -164,6 +195,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             StashSearchKind.Images => GetNestedString(item, "paths", "thumbnail"),
             StashSearchKind.Galleries => GetNestedString(item, "paths", "cover"),
             StashSearchKind.Groups => item.TryGetProperty("front_image_path", out var front) ? front.GetString() : null,
+            StashSearchKind.Markers => item.TryGetProperty("screenshot", out var screenshot) ? screenshot.GetString() : null,
             _ => null
         };
 
@@ -187,7 +219,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             id,
             title,
             kind,
-            ResolveThumbnail(instance.WebUiUrl, kind, id, thumbnail),
+            ResolveThumbnail(instance.WebUiUrl, kind, id, thumbnail, kind == StashSearchKind.Markers ? GetNestedString(item, "scene", "id") : null),
             new Uri(instance.WebUiUrl, itemPath),
             instance.Id,
             instance.Name);
@@ -198,7 +230,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             ? value.GetString()
             : null;
 
-    private static Uri? ResolveThumbnail(Uri baseUri, StashSearchKind kind, string id, string? value)
+    private static Uri? ResolveThumbnail(Uri baseUri, StashSearchKind kind, string id, string? value, string? sceneId = null)
     {
         if (string.IsNullOrWhiteSpace(value) || !long.TryParse(id, NumberStyles.None, CultureInfo.InvariantCulture, out var numericId) || numericId <= 0)
             return null;
@@ -212,6 +244,8 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             StashSearchKind.Tags => $"tag/{id}/image",
             StashSearchKind.Galleries => $"gallery/{id}/cover",
             StashSearchKind.Groups => $"group/{id}/frontimage",
+            StashSearchKind.Markers when long.TryParse(sceneId, NumberStyles.None, CultureInfo.InvariantCulture, out var numericSceneId) && numericSceneId > 0
+                => $"scene/{numericSceneId.ToString(CultureInfo.InvariantCulture)}/scene_marker/{id}/screenshot",
             _ => null
         };
         if (path is null || !Uri.TryCreate(baseUri, value, out var candidate))

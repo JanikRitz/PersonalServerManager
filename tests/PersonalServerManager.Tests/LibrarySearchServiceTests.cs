@@ -51,6 +51,42 @@ public sealed class LibrarySearchServiceTests
     }
 
     [Fact]
+    public void GroupByType_InterleavesSourcesBeforeBothPreviewLimitsAndPreservesSourceRanking()
+    {
+        LibraryGroup Source(string name, string provider, int count) => new(Guid.NewGuid(), name, provider, "Images",
+            Enumerable.Range(1, count).Select(index => new LibraryItem($"{name}-{index}", name, "", null)).ToArray(), null, null);
+        var first = Source("First", "Stash", 25);
+        var second = Source("Second", "Stash", 25);
+        var third = Source("Third", "Hydrus", 2);
+
+        var group = Assert.Single(LibrarySearchService.GroupByType([first, second, third]));
+
+        Assert.Equal(new[] { "First-1", "Second-1", "Third-1", "First-2", "Second-2" },
+            group.Items.Take(5).Select(entry => entry.Item.Id));
+        Assert.Equal(new[] { "First-3", "Second-3" }, group.Items.Skip(6).Take(2).Select(entry => entry.Item.Id));
+        Assert.Equal(12, group.Items.Take(25).Count(entry => entry.Source == first));
+        Assert.Equal(11, group.Items.Take(25).Count(entry => entry.Source == second));
+        Assert.Equal(2, group.Items.Take(25).Count(entry => entry.Source == third));
+        Assert.Equal(first.Items, group.Items.Where(entry => entry.Source == first).Select(entry => entry.Item));
+        Assert.Equal(52, group.Items.Count);
+    }
+
+    [Fact]
+    public void GroupByType_MixesInstancesRatherThanWeightingOneInstanceByItsCategoryCount()
+    {
+        var firstId = Guid.NewGuid();
+        var first = new LibraryGroup(firstId, "First", "Stash", "Galleries",
+            [new("gallery", "Gallery", "", null, MediaType: LibraryMediaType.Collection)], null, null);
+        var sameInstance = first with { Category = "Groups", Items = [new("group", "Group", "", null, MediaType: LibraryMediaType.Collection)] };
+        var second = first with { InstanceId = Guid.NewGuid(), InstanceName = "Second", Items = [new("second", "Second", "", null, MediaType: LibraryMediaType.Collection)] };
+
+        var group = Assert.Single(LibrarySearchService.GroupByType([first, sameInstance, second]));
+
+        Assert.Equal(new[] { "gallery", "second", "group" }, group.Items.Select(entry => entry.Item.Id));
+        Assert.Equal(3, group.Sources.Count);
+    }
+
+    [Fact]
     public async Task SearchAsync_SearchesEveryKindAndSourceAndClampsEachGroup()
     {
         StashInstance[] stashInstances = [StashInstance("First"), StashInstance("Second")];
@@ -131,11 +167,6 @@ public sealed class LibrarySearchServiceTests
         Assert.All(groups, group =>
         {
             var item = Assert.Single(group.Items);
-            if (group.Category == "Markers")
-            {
-                Assert.Null(item.PreviewUrl);
-                return;
-            }
             var link = item.PreviewUrl!.OriginalString;
             Assert.Equal($"/previews/stash/{instance.Id}/{group.Category.ToLowerInvariant()}/1", link);
             Assert.DoesNotContain("private-key", link);

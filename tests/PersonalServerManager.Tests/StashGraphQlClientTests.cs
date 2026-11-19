@@ -157,7 +157,7 @@ public sealed class StashGraphQlClientTests
         var instance = Instance(null) with { WebUiUrl = new Uri("https://stash.example/prefix/") };
         var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
         {
-            Assert.Contains("scene_markers { id title seconds scene { id } primary_tag { name } }", body);
+            Assert.Contains("scene_markers { id title seconds scene { id } primary_tag { name } screenshot }", body);
             return Json(System.Text.Json.JsonSerializer.Serialize(new
             {
                 data = new { findSceneMarkers = new { scene_markers = new[] { new { id = "42", title, seconds = 123.75, scene = new { id = "9" }, primary_tag = new { name = "Primary tag" }, screenshot = "https://evil.example/thumbnail" } } } }
@@ -177,6 +177,74 @@ public sealed class StashGraphQlClientTests
         {
             System.Globalization.CultureInfo.CurrentCulture = previousCulture;
         }
+    }
+
+    [Theory]
+    [InlineData("https://stash.example/prefix/scene/9/scene_marker/42/screenshot?apikey=private", true)]
+    [InlineData("/prefix/scene/9/scene_marker/42/screenshot", true)]
+    [InlineData("https://evil.example/prefix/scene/9/scene_marker/42/screenshot", false)]
+    [InlineData("https://user:secret@stash.example/prefix/scene/9/scene_marker/42/screenshot", false)]
+    [InlineData("/prefix/scene/9/screenshot", false)]
+    [InlineData("/prefix/scene/9/scene_marker/43/screenshot", false)]
+    [InlineData("/prefix/scene/8/scene_marker/42/screenshot", false)]
+    [InlineData(null, false)]
+    public async Task SearchAsync_MarkersOnlyAcceptCanonicalScreenshot(string? screenshot, bool trusted)
+    {
+        var instance = Instance(null) with { WebUiUrl = new Uri("https://stash.example/prefix/") };
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((request, body) =>
+        {
+            Assert.Null(request.Headers.Authorization);
+            Assert.Contains("primary_tag { name } screenshot", body);
+            return Json(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                data = new { findSceneMarkers = new { scene_markers = new[] { new { id = "42", title = "Marker", seconds = 12.5, scene = new { id = "9" }, screenshot } } } }
+            }));
+        })));
+        var marker = Assert.Single(await client.SearchAsync(instance, StashSearchKind.Markers, "query"));
+        Assert.Equal(trusted ? new Uri(instance.WebUiUrl, "scene/9/scene_marker/42/screenshot") : null, marker.ThumbnailUrl);
+        Assert.Equal("42", marker.Id);
+    }
+
+    [Theory]
+    [InlineData("[]", null)]
+    [InlineData("[{\"id\":\"42\",\"scene\":{\"id\":\"9\"}}]", "9")]
+    public async Task GetMarkerSceneIdAsync_UsesBoundedSchemaAndConfiguredCredential(string markers, string? expected)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((request, body) =>
+        {
+            Assert.Equal(Instance("test-key").GraphQlEndpoint, request.RequestUri);
+            Assert.Equal("Bearer test-key", request.Headers.Authorization?.ToString());
+            using var payload = System.Text.Json.JsonDocument.Parse(body);
+            Assert.Equal("42", payload.RootElement.GetProperty("variables").GetProperty("id").GetString());
+            Assert.Equal("query MarkerScene($id: ID!) { findSceneMarkers(ids: [$id], filter: { per_page: 1, page: 1 }) { scene_markers { id scene { id } } } }", payload.RootElement.GetProperty("query").GetString());
+            return Json("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":" + markers + "}}}");
+        })));
+        Assert.Equal(expected, await client.GetMarkerSceneIdAsync(Instance("test-key"), "42"));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"data\":null}")]
+    [InlineData("{\"errors\":[{\"message\":\"Failed\"}]}")]
+    [InlineData("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[{\"id\":\"43\",\"scene\":{\"id\":\"9\"}}]}}}")]
+    [InlineData("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[{\"id\":\"42\",\"scene\":{\"id\":\"../9\"}}]}}}")]
+    [InlineData("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[{\"id\":\"42\",\"scene\":null}]}}}")]
+    [InlineData("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[{},{}]}}}")]
+    public async Task GetMarkerSceneIdAsync_RejectsInvalidOrMismatchedResolution(string response)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(response))));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.GetMarkerSceneIdAsync(Instance(null), "42"));
+    }
+
+    [Fact]
+    public async Task GetMarkerSceneIdAsync_RejectsOversizedResponseAndPreCanceledRequests()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(new string(' ', 65537)))));
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetMarkerSceneIdAsync(Instance(null), "42"));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetMarkerSceneIdAsync(Instance(null), "42", cancellation.Token));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.GetMarkerSceneIdAsync(Instance(null), "../42"));
     }
 
     [Theory]

@@ -52,7 +52,7 @@ public sealed class PreviewServiceTests
     [InlineData("stash", "scenes", "../42")]
     [InlineData("stash", "images", "42?url=https://evil.example")]
     [InlineData("stash", "files", "42")]
-    [InlineData("stash", "markers", "42")]
+    [InlineData("stash", "markers", "42/9")]
     [InlineData("hydrus", "tags", "42")]
     [InlineData("other", "files", "42")]
     [InlineData("hydrus", "files", "0")]
@@ -62,6 +62,36 @@ public sealed class PreviewServiceTests
         var service = Service(new StubHandler(_ => throw new Exception("Unexpected request")), instanceId);
         Assert.Null(PreviewService.CreateLink(provider, instanceId, category, id));
         Assert.Null(await service.FetchAsync(provider, instanceId, category, id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FetchAsync_MarkersResolveSceneAndFetchOnlyCanonicalScreenshot()
+    {
+        var id = Guid.NewGuid();
+        var requests = 0;
+        var service = Service(new StubHandler(request =>
+        {
+            Assert.Equal("Bearer secret", request.Headers.Authorization?.ToString());
+            requests++;
+            if (request.Method == HttpMethod.Post)
+            {
+                Assert.Equal("https://configured.example/prefix/graphql", request.RequestUri!.AbsoluteUri);
+                var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                Assert.Contains("findSceneMarkers(ids: [$id], filter: { per_page: 1, page: 1 }) { scene_markers { id scene { id } } }", body);
+                Assert.Contains("\"id\":\"42\"", body);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[{\"id\":\"42\",\"scene\":{\"id\":\"9\"}}]}}}", System.Text.Encoding.UTF8, "application/json")
+                };
+            }
+            Assert.Equal("https://configured.example/prefix/scene/9/scene_marker/42/screenshot", request.RequestUri!.AbsoluteUri);
+            return Image();
+        }), id);
+
+        Assert.Equal($"/previews/stash/{id:D}/markers/42", PreviewService.CreateLink("stash", id, "Markers", "42")?.OriginalString);
+        var image = await service.FetchAsync("stash", id, "markers", "42", CancellationToken.None);
+        Assert.Equal(new byte[] { 1, 2, 3 }, image!.Content);
+        Assert.Equal(2, requests);
     }
 
     [Theory]
@@ -80,6 +110,97 @@ public sealed class PreviewServiceTests
         }), id);
         await Assert.ThrowsAsync<InvalidDataException>(() => service.FetchAsync("stash", id, "images", "42", CancellationToken.None));
     }
+
+    [Theory]
+    [InlineData("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[]}}}", false)]
+    [InlineData("{\"errors\":[{\"message\":\"Failed\"}]}", true)]
+    [InlineData("not json", true)]
+    [InlineData("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[{\"id\":\"42\",\"scene\":{\"id\":\"https://evil.example\"}}]}}}", true)]
+    public async Task FetchAsync_MissingOrInvalidMarkerNeverFallsBackToSceneCover(string payload, bool throws)
+    {
+        var id = Guid.NewGuid();
+        var requests = 0;
+        var service = Service(new StubHandler(request =>
+        {
+            requests++;
+            Assert.Equal(HttpMethod.Post, request.Method);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json") };
+        }), id);
+        if (throws)
+            await Assert.ThrowsAsync<InvalidDataException>(() => service.FetchAsync("stash", id, "markers", "42", CancellationToken.None));
+        else
+            Assert.Null(await service.FetchAsync("stash", id, "markers", "42", CancellationToken.None));
+        Assert.Equal(1, requests);
+    }
+
+    [Theory]
+    [InlineData("image/jpeg")]
+    [InlineData("image/png")]
+    [InlineData("image/gif")]
+    [InlineData("image/webp")]
+    [InlineData("image/avif")]
+    public async Task FetchAsync_MarkerSupportsImageMimeTypesWithoutApiKey(string contentType)
+    {
+        var id = Guid.NewGuid();
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            Assert.Null(request.Headers.Authorization);
+            if (request.Method == HttpMethod.Post) return MarkerResolution();
+            var response = Image();
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+            return response;
+        }));
+        var instance = new StashInstance(id, "Stash", new Uri("https://configured.example/graphql"), new Uri("https://configured.example/"), null);
+        var service = new PreviewService(client, new FixedStashStore(instance), new HydrusStore(id));
+        var image = await service.FetchAsync("stash", id, "markers", "42", CancellationToken.None);
+        Assert.Equal(contentType, image!.ContentType);
+        Assert.Equal(new byte[] { 1, 2, 3 }, image.Content);
+    }
+
+    [Theory]
+    [InlineData("text/html", 3, 200)]
+    [InlineData("image/svg+xml", 3, 200)]
+    [InlineData("image/jpeg", 5242881, 200)]
+    [InlineData("image/jpeg", 3, 404)]
+    [InlineData("image/jpeg", 3, 302)]
+    public async Task FetchAsync_MarkerRejectsUnsafeOrFailedImage(string contentType, int length, int status)
+    {
+        var id = Guid.NewGuid();
+        var service = Service(new StubHandler(request =>
+        {
+            if (request.Method == HttpMethod.Post) return MarkerResolution();
+            var response = Image();
+            response.StatusCode = (HttpStatusCode)status;
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+            response.Content.Headers.ContentLength = length;
+            return response;
+        }), id);
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.FetchAsync("stash", id, "markers", "42", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FetchAsync_MarkerPropagatesCancellationDuringBodyRead()
+    {
+        var id = Guid.NewGuid();
+        using var cancellation = new CancellationTokenSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = Service(new StubHandler(request => request.Method == HttpMethod.Post ? MarkerResolution() : new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new BlockingStream(started))
+            {
+                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg") }
+            }
+        }), id);
+        var fetch = service.FetchAsync("stash", id, "markers", "42", cancellation.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);
+    }
+
+    private static HttpResponseMessage MarkerResolution() => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent("{\"data\":{\"findSceneMarkers\":{\"scene_markers\":[{\"id\":\"42\",\"scene\":{\"id\":\"9\"}}]}}}", System.Text.Encoding.UTF8, "application/json")
+    };
 
     [Fact]
     public async Task FetchAsync_RejectsOversizedStreamingResponseWithoutContentLength()
@@ -171,13 +292,16 @@ public sealed class PreviewServiceTests
         Assert.Equal(1, requests);
     }
 
-    [Fact]
-    public async Task FetchAsync_DoesNotFollowRedirectsOrForwardCredentials()
+    [Theory]
+    [InlineData("images")]
+    [InlineData("markers")]
+    public async Task FetchAsync_DoesNotFollowRedirectsOrForwardCredentials(string category)
     {
         var redirectsFollowed = 0;
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseKestrel().UseUrls("http://127.0.0.1:0");
         await using var app = builder.Build();
+        app.MapPost("/graphql", () => Results.Redirect("/capture"));
         app.MapGet("/image/42/thumbnail", () => Results.Redirect("/capture"));
         app.MapGet("/capture", () => { Interlocked.Increment(ref redirectsFollowed); return Results.Ok(); });
         await app.StartAsync();
@@ -187,7 +311,8 @@ public sealed class PreviewServiceTests
         using var client = new HttpClient(PreviewService.CreateHttpHandler());
         var service = new PreviewService(client, stash, new HydrusStore(id));
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => service.FetchAsync("stash", id, "images", "42", CancellationToken.None));
+        var exception = await Record.ExceptionAsync(() => service.FetchAsync("stash", id, category, "42", CancellationToken.None));
+        Assert.True(exception is InvalidDataException or HttpRequestException);
         Assert.Equal(0, redirectsFollowed);
     }
 

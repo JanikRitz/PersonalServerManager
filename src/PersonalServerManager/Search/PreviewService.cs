@@ -41,6 +41,23 @@ public sealed class PreviewService(HttpClient client, IStashInstanceStore stashS
             if (instance is null) return null;
             endpoint = instance.WebUiUrl;
             apiKey = instance.ApiKey;
+            if (category.Equals("markers", StringComparison.OrdinalIgnoreCase))
+            {
+                string? sceneId;
+                try
+                {
+                    sceneId = await new StashGraphQlClient(client)
+                        .GetMarkerSceneIdAsync(instance, long.Parse(itemId, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture), timeout.Token);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    throw new InvalidDataException("Stash returned invalid marker data.");
+                }
+                if (sceneId is null) return null;
+                if (!long.TryParse(sceneId, NumberStyles.None, CultureInfo.InvariantCulture, out var numericSceneId) || numericSceneId <= 0)
+                    throw new InvalidDataException("Stash returned an invalid marker scene ID.");
+                path = $"scene/{numericSceneId.ToString(CultureInfo.InvariantCulture)}/{path}";
+            }
         }
         else
         {
@@ -95,6 +112,7 @@ public sealed class PreviewService(HttpClient client, IStashInstanceStore stashS
         path = (provider.ToLowerInvariant(), category.ToLowerInvariant()) switch
         {
             ("stash", "scenes") => $"scene/{normalizedId}/screenshot",
+            ("stash", "markers") => $"scene_marker/{normalizedId}/screenshot",
             ("stash", "images") => $"image/{normalizedId}/thumbnail",
             ("stash", "performers") => $"performer/{normalizedId}/image",
             ("stash", "studios") => $"studio/{normalizedId}/image",

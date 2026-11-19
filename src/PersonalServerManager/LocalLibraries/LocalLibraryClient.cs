@@ -1,6 +1,8 @@
 using System.Globalization;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using PersonalServerManager.Search;
 
@@ -16,6 +18,8 @@ public sealed class LocalLibraryClient
     private const int MaximumNoteBytes = 1024 * 1024;
     private const int MaximumScanBytes = 32 * 1024 * 1024;
     private const int MaximumEntries = 10000;
+    private const int MaximumDescriptionLength = 4000;
+    private const int MaximumCommentLength = 32768;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly HashSet<string> NoteExtensions = new(StringComparer.OrdinalIgnoreCase) { ".md", ".markdown", ".txt" };
     private static readonly string[] TextFormats = ["EPUB", "PDF", "AZW3", "MOBI", "AZW", "FB2", "TXT", "RTF", "DOCX", "ODT", "DJVU"];
@@ -205,7 +209,8 @@ public sealed class LocalLibraryClient
         command.CommandText = """
             SELECT b.id, b.title, b.path,
                 COALESCE((SELECT group_concat(a.name, ', ') FROM authors a
-                    JOIN books_authors_link ba ON ba.author = a.id WHERE ba.book = b.id), '')
+                    JOIN books_authors_link ba ON ba.author = a.id WHERE ba.book = b.id), ''),
+                (SELECT substr(c.text, 1, $maximumCommentLength) FROM comments c WHERE c.book = b.id LIMIT 1)
             FROM books b
             WHERE b.title LIKE $query ESCAPE '\'
                 OR EXISTS (SELECT 1 FROM authors a JOIN books_authors_link ba ON ba.author = a.id
@@ -217,6 +222,7 @@ public sealed class LocalLibraryClient
             LIMIT $maximumEntries
             """;
         command.Parameters.AddWithValue("$maximumEntries", MaximumEntries);
+        command.Parameters.AddWithValue("$maximumCommentLength", MaximumCommentLength);
         command.Parameters.AddWithValue("$query", "%" + query.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_") + "%");
         using var cancellation = cancellationToken.Register(command.Cancel);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -247,12 +253,49 @@ public sealed class LocalLibraryClient
             }
 
             items.Add(new LibraryItem(id, reader.GetString(1), reader.GetString(3), ItemUrl(instance.Id, id), coverUrl,
-                instance.Kind == LocalLibraryKind.CalibreComic ? LibraryMediaType.Comic : LibraryMediaType.TextEbook));
+                instance.Kind == LocalLibraryKind.CalibreComic ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
+                Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4))));
             if (items.Count == limit) break;
         }
 
         cancellationToken.ThrowIfCancellationRequested();
         return items;
+    }
+
+    private static string? NormalizeDescription(string comment)
+    {
+        const RegexOptions options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline;
+        var timeout = TimeSpan.FromMilliseconds(100);
+        try
+        {
+            var text = Regex.Replace(comment, @"<!--.*?(?:-->|\z)", "", options, timeout);
+            foreach (var tag in new[] { "script", "style" })
+                text = Regex.Replace(text, $@"<\s*{tag}\b[^>]*>.*?(?:</\s*{tag}\s*>|\z)", "", options, timeout);
+            text = Regex.Replace(text, @"<(?:""[^""]*""|'[^']*'|[^'""<>])*>", match =>
+                Regex.IsMatch(match.Value, @"^<\s*/?\s*(?:p|div|li|ul|ol|blockquote|h[1-6]|tr|section)\b", options, timeout)
+                    ? "\n\n"
+                    : Regex.IsMatch(match.Value, @"^<\s*br\b", options, timeout) ? "\n" : "",
+                options, timeout);
+            text = WebUtility.HtmlDecode(text);
+            var clean = new StringBuilder(text.Length);
+            foreach (var character in text)
+                if (!char.IsControl(character) || character is '\r' or '\n' or '\t') clean.Append(character);
+            text = Regex.Replace(clean.ToString(), @"\r\n?", "\n", options, timeout);
+            text = Regex.Replace(text, @"[^\S\n]+", " ", options, timeout);
+            text = Regex.Replace(text, @" *\n *", "\n", options, timeout);
+            text = Regex.Replace(text, @"\n{3,}", "\n\n", options, timeout).Trim();
+            if (text.Length > MaximumDescriptionLength)
+            {
+                var length = char.IsHighSurrogate(text[MaximumDescriptionLength - 1])
+                    ? MaximumDescriptionLength - 1 : MaximumDescriptionLength;
+                text = text[..length].TrimEnd();
+            }
+            return text.Length == 0 ? null : text;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return null;
+        }
     }
 
     private static async Task<DatabaseRead> OpenDatabaseAsync(string root, CancellationToken cancellationToken)
