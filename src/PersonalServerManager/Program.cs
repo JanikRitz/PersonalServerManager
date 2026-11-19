@@ -65,6 +65,8 @@ builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusIn
     Path.Combine(dataDirectory, "hydrus-instances.json"),
     services.GetRequiredService<IDataProtectionProvider>().CreateProtector("HydrusApiKey.v1")));
 builder.Services.AddTransient<LibrarySearchService>();
+builder.Services.AddHttpClient<PreviewService>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
@@ -131,6 +133,7 @@ app.UseRateLimiter();
 
 app.UseAntiforgery();
 app.MapAccountEndpoints();
+app.MapPreviewEndpoints();
 
 app.MapStaticAssets();
 app.MapRazorComponents<App>()

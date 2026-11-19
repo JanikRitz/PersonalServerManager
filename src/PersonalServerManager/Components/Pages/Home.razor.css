@@ -136,11 +136,15 @@ h2 { margin: 0; font: 21px/1.2 Georgia, serif; }
 .group-heading .text-action { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; text-align: right; }
 .group-heading button:disabled { opacity: .5; cursor: wait; }
 .group-results { list-style: none; margin: 0; padding: 0; }
-.group-results li { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 0; border-bottom: 1px solid #e6e9e4; }
-.group-results li > a { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--ink); text-decoration: none; }
-.group-results li > a:hover { color: var(--teal); text-decoration: underline; }
-.group-results li span { overflow-wrap: anywhere; }
-.group-results li small { flex-shrink: 0; color: var(--muted); font-size: 11px; }
+.group-results li { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 14px; padding: 10px 0; border-bottom: 1px solid #e6e9e4; }
+.result-preview { position: relative; display: grid; place-items: center; width: 96px; height: 68px; overflow: hidden; background: #e8ede8; color: #8a9b91; }
+.result-preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.result-preview img[hidden] { display: none; }
+.result-copy { display: grid; justify-items: start; gap: 5px; min-width: 0; }
+.result-copy a { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--ink); text-decoration: none; }
+.result-copy a:hover { color: var(--teal); text-decoration: underline; }
+.result-copy span { overflow-wrap: anywhere; }
+.result-copy small { color: var(--muted); font-size: 11px; }
 .group-empty { margin: 5px 0; color: var(--muted); font-size: 12px; }
 .detail-strip { flex-wrap: wrap; }
 .detail-name { min-width: 0; }
@@ -180,6 +184,7 @@ footer { justify-content: space-between; max-width: 1440px; margin: 0 auto; padd
     .editor-panel { padding: 22px; }
     .group-heading { align-items: flex-start; }
     .group-heading .text-action { max-width: 145px; font-size: 11px; }
-    .group-results li { flex-wrap: wrap; gap: 3px; }
+    .group-results li { grid-template-columns: 76px minmax(0, 1fr); gap: 10px; }
+    .result-preview { width: 76px; height: 58px; }
     footer { align-items: flex-start; flex-direction: column; gap: 5px; }
 }

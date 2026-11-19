@@ -43,7 +43,8 @@ public sealed class LibrarySearchServiceTests
                 var group = Assert.Single(groups, group => group.InstanceId == instance.Id && group.Category == kind.ToString());
                 Assert.Equal(instance.Name, group.InstanceName);
                 Assert.Equal("Stash", group.Provider);
-                Assert.Equal(new LibraryItem("1", "Result 1", kind.ToString(), new Uri("https://stash.example/items/1")), group.Items[0]);
+                Assert.Equal(new LibraryItem("1", "Result 1", kind.ToString(), new Uri("https://stash.example/items/1"),
+                    new Uri($"/previews/stash/{instance.Id}/{kind.ToString().ToLowerInvariant()}/1", UriKind.Relative)), group.Items[0]);
                 Assert.Equal(new[] { "1", "2", "3", "4", "5" }, group.Items.Select(item => item.Id));
             }
         }
@@ -55,7 +56,8 @@ public sealed class LibrarySearchServiceTests
             Assert.Equal("Hydrus", group.Provider);
             Assert.Equal("Files", group.Category);
             Assert.Null(group.SearchUrl);
-            Assert.Equal(new LibraryItem("6000000001", "File 1", "image/png", null), group.Items[0]);
+            Assert.Equal(new LibraryItem("6000000001", "File 1", "image/png", null,
+                new Uri($"/previews/hydrus/{instance.Id}/files/6000000001", UriKind.Relative)), group.Items[0]);
             Assert.Equal(new[] { "6000000001", "6000000002", "6000000003", "6000000004", "6000000005" }, group.Items.Select(item => item.Id));
         }
 
@@ -63,6 +65,24 @@ public sealed class LibrarySearchServiceTests
         {
             Assert.Equal(5, group.Items.Count);
             Assert.Null(group.Error);
+        });
+    }
+
+    [Fact]
+    public async Task SearchAsync_UsesLocalPreviewLinksEvenWhenStashReturnsAnUntrustedThumbnail()
+    {
+        var instance = StashInstance("Stash") with { ApiKey = "private-key" };
+        var stash = new FakeStashClient((source, kind, _, _) => Task.FromResult<IReadOnlyList<StashSearchResult>>(
+            [StashResult(source, kind) with { ThumbnailUrl = new Uri("https://evil.example/thumbnail?apikey=private-key") }]));
+
+        var groups = await new LibrarySearchService(stash, new FakeHydrusClient()).SearchAsync([instance], [], "query");
+
+        Assert.All(groups, group =>
+        {
+            var link = Assert.Single(group.Items).PreviewUrl!.OriginalString;
+            Assert.Equal($"/previews/stash/{instance.Id}/{group.Category.ToLowerInvariant()}/1", link);
+            Assert.DoesNotContain("private-key", link);
+            Assert.DoesNotContain("evil.example", link);
         });
     }
 

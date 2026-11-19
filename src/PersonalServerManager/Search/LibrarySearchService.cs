@@ -4,7 +4,7 @@ using PersonalServerManager.Stash;
 
 namespace PersonalServerManager.Search;
 
-public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl);
+public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, Uri? PreviewUrl = null);
 
 public record LibraryGroup(
     Guid InstanceId,
@@ -37,7 +37,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                     new Uri(instance.WebUiUrl, $"{kind.ToString().ToLowerInvariant()}?q={Uri.EscapeDataString(capturedQuery)}"),
                     async () => (await stashClient.SearchAsync(instance, kind, capturedQuery, cancellationToken))
                         .Take(5)
-                        .Select(item => new LibraryItem(item.Id, item.Title, kind.ToString(), item.ItemUrl))
+                        .Select(item => new LibraryItem(item.Id, item.Title, kind.ToString(), item.ItemUrl,
+                            PreviewService.CreateLink("stash", instance.Id, kind.ToString(), item.Id)))
                         .ToArray()));
             }
         }
@@ -47,7 +48,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             tasks.Add(SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Files", null,
                 async () => (await hydrusClient.SearchAsync(instance, tags, cancellationToken))
                     .Take(5)
-                    .Select(item => new LibraryItem(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Mime, null))
+                    .Select(item => new LibraryItem(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Mime, null,
+                        PreviewService.CreateLink("hydrus", instance.Id, "files", item.Id.ToString(CultureInfo.InvariantCulture))))
                     .ToArray()));
         }
 

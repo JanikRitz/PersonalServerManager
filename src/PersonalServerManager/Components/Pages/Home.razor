@@ -95,15 +95,24 @@
                                         @foreach (var item in group.Items)
                                         {
                                             <li>
-                                                @if (item.ItemUrl is not null)
-                                                {
-                                                    <a href="@item.ItemUrl" target="_blank" rel="noopener noreferrer"><span>@item.Title</span><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
-                                                }
-                                                else
-                                                {
-                                                    <span>@item.Title</span>
-                                                }
-                                                <small>@item.Detail</small>
+                                                <div class="result-preview" aria-hidden="true">
+                                                    <MudIcon Icon="@Icons.Material.Outlined.Image" />
+                                                    @if (item.PreviewUrl is not null)
+                                                    {
+                                                        <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
+                                                    }
+                                                </div>
+                                                <div class="result-copy">
+                                                    @if (item.ItemUrl is not null)
+                                                    {
+                                                        <a href="@item.ItemUrl" target="_blank" rel="noopener noreferrer"><span>@item.Title</span><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span>@item.Title</span>
+                                                    }
+                                                    <small>@item.Detail</small>
+                                                </div>
                                             </li>
                                         }
                                     </ul>
