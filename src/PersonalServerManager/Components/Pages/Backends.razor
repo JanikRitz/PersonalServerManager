@@ -1,0 +1,375 @@
+@page "/backends"
+@using System.Text.Json
+@using PersonalServerManager.Stash
+@using PersonalServerManager.Hydrus
+@implements IDisposable
+@inject IStashInstanceStore InstanceStore
+@inject IStashGraphQlClient StashClient
+@inject IHydrusInstanceStore HydrusStore
+@inject IJSRuntime JavaScript
+
+<PageTitle>Backends | Personal Server Manager</PageTitle>
+
+<div class="workspace">
+    <header class="topbar">
+        <a class="wordmark" href="/" aria-label="Personal Server Manager home"><span class="mark">P</span><span>Personal Server Manager</span></a>
+        <nav class="topbar-right" aria-label="Workspace">
+            <a class="nav-link" href="/" aria-label="Library search" title="Library search"><MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" /><span>Search</span></a>
+            <form method="post" action="/account/logout"><AntiforgeryToken /><button class="logout" type="submit">Sign out</button></form>
+        </nav>
+    </header>
+
+    <main>
+        <div class="page-heading">
+            <h1>Backends</h1>
+            <div class="heading-meta">
+                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count).ToString("00")) <span>INSTANCES</span></span>
+                <span class="last-refresh" role="status">@(_lastRefresh is null ? "Awaiting first Stash check" : $"Stash checked {_lastRefresh.Value.ToLocalTime():HH:mm:ss}")</span>
+            </div>
+        </div>
+        @if (_pageError is not null)
+        {
+            <div class="notice error-notice" role="alert">@_pageError</div>
+        }
+        @if (_hydrusError is not null)
+        {
+            <div class="notice error-notice" role="alert">@_hydrusError</div>
+        }
+
+        <div class="management-grid">
+            <section class="stash-section" aria-labelledby="stash-heading">
+                <div class="section-heading">
+                    <h2 id="stash-heading">Stash</h2>
+                    <button class="icon-action" type="button" title="Add Stash instance" aria-label="Add Stash instance" disabled="@_isSaving" @onclick="StartNewInstance"><MudIcon Icon="@Icons.Material.Filled.Add" /></button>
+                </div>
+                @if (_instances.Count == 0)
+                {
+                    <div class="empty-inventory"><p>No Stash instances configured.</p><button class="text-action" type="button" @onclick="StartNewInstance"><MudIcon Icon="@Icons.Material.Filled.Add" Size="Size.Small" />Add instance</button></div>
+                }
+                else
+                {
+                    <ul class="instance-list" aria-label="Stash instances">
+                        @foreach (var instance in _instances)
+                        {
+                            var observation = _observations.GetValueOrDefault(instance.Id);
+                            <li @key="instance.Id">
+                                <button class="instance-row @(instance.Id == _selectedInstanceId ? "selected" : string.Empty)" type="button" aria-pressed="@(instance.Id == _selectedInstanceId)" @onclick="() => SelectInstance(instance.Id)">
+                                    <span class="status-indicator @(observation is null ? "unknown" : observation.IsReachable ? "online" : "offline")" aria-hidden="true"></span>
+                                    <span class="instance-copy"><strong>@instance.Name</strong><small>@instance.GraphQlEndpoint.Host</small></span>
+                                    <span class="row-status">@(observation is null ? "Checking..." : observation.IsReachable ? "Available" : "Unavailable")</span>
+                                    <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" />
+                                </button>
+                            </li>
+                        }
+                    </ul>
+                }
+
+                @if (_selectedInstance is not null)
+                {
+                    var observation = _observations.GetValueOrDefault(_selectedInstance.Id);
+                    <section class="instance-details" aria-labelledby="details-heading">
+                        <div class="details-heading"><h3 id="details-heading">@_selectedInstance.Name</h3><span class="state @(observation is null ? "state-unknown" : observation.IsReachable ? "state-online" : "state-offline")">@(observation is null ? "Checking" : observation.IsReachable ? "Available" : "Unavailable")</span></div>
+                        <dl>
+                            <dt>GraphQL endpoint</dt><dd>@_selectedInstance.GraphQlEndpoint.AbsoluteUri</dd>
+                            <dt>Stash interface</dt><dd>@_selectedInstance.WebUiUrl.AbsoluteUri</dd>
+                            <dt>Observation</dt><dd role="status">@(observation?.Message ?? "First check pending")</dd>
+                        </dl>
+                        <div class="detail-actions">
+                            <a class="outline-action" href="@_selectedInstance.WebUiUrl" target="_blank" rel="noopener noreferrer">Open Stash<MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
+                            <button class="text-action" type="button" disabled="@_isSaving" @onclick="() => EditInstance(_selectedInstance)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" />Edit</button>
+                            <button class="text-action danger-action" type="button" disabled="@_isSaving" @onclick="() => RemoveInstanceAsync(_selectedInstance)"><MudIcon Icon="@Icons.Material.Filled.DeleteOutline" Size="Size.Small" />Remove</button>
+                        </div>
+                    </section>
+                }
+            </section>
+
+            <div class="hydrus-section"><HydrusInstances Changed="ReloadHydrusAsync" /></div>
+        </div>
+    </main>
+
+    <footer><span>PERSONAL SERVER MANAGER</span><span>STASH / HYDRUS</span></footer>
+
+    @if (_isEditing)
+    {
+        <div class="editor-backdrop" role="presentation" @onclick="CancelEdit" @onkeydown="HandleEditorKey">
+            <section class="editor-panel" role="dialog" aria-modal="true" aria-labelledby="editor-title" @onclick:stopPropagation="true">
+                <div class="editor-heading"><h2 id="editor-title">@(_editingId is null ? "Connect Stash" : "Edit instance")</h2><button class="icon-action" aria-label="Close Stash editor" title="Close Stash editor" type="button" disabled="@_isSaving" @onclick="CancelEdit"><MudIcon Icon="@Icons.Material.Filled.Close" /></button></div>
+                @if (_editorError is not null)
+                {
+                    <div class="notice error-notice" role="alert">@_editorError</div>
+                }
+                <form class="editor-form" @onsubmit="SaveInstanceAsync" @onsubmit:preventDefault="true">
+                    <fieldset disabled="@_isSaving">
+                        <label>Instance name<input @bind="_draftName" maxlength="60" required placeholder="e.g. Main library" /></label>
+                        <label>GraphQL endpoint<input @bind="_draftGraphQlUrl" type="url" required placeholder="http://localhost:9999/graphql" /></label>
+                        <label>Stash interface URL<input @bind="_draftWebUrl" type="url" required placeholder="http://localhost:9999/" /></label>
+                        <label>API key <span class="field-note">@(_editingId is null ? "Optional" : "Leave blank to keep the current key")</span><input @bind="_draftApiKey" type="password" autocomplete="new-password" /></label>
+                        <p class="security-note">API keys are encrypted on this Windows account. Use HTTPS for Stash endpoints that cross an untrusted network.</p>
+                        <div class="editor-actions"><button class="cancel-button" type="button" @onclick="CancelEdit">Cancel</button><button class="save-button" type="submit">@(_isSaving ? "Saving..." : "Save instance")</button></div>
+                    </fieldset>
+                </form>
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly Dictionary<Guid, StashObservation> _observations = [];
+    private CancellationToken _token;
+    private IReadOnlyList<StashInstance> _instances = [];
+    private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
+    private Guid? _selectedInstanceId;
+    private DateTimeOffset? _lastRefresh;
+    private string _draftName = string.Empty;
+    private string _draftGraphQlUrl = string.Empty;
+    private string _draftWebUrl = string.Empty;
+    private string _draftApiKey = string.Empty;
+    private string? _pageError;
+    private string? _hydrusError;
+    private string? _editorError;
+    private Guid? _editingId;
+    private bool _isEditing;
+    private bool _isSaving;
+    private bool _disposed;
+
+    private StashInstance? _selectedInstance => _instances.FirstOrDefault(instance => instance.Id == _selectedInstanceId);
+
+    protected override async Task OnInitializedAsync()
+    {
+        _token = _lifetime.Token;
+        try
+        {
+            await LoadInstancesAsync();
+            await ReloadHydrusAsync();
+            await RefreshObservationsAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_disposed)
+        {
+            _ = ObservePeriodicallyAsync();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadInstancesAsync()
+    {
+        try
+        {
+            _instances = await InstanceStore.GetAllAsync(_token);
+            if (_selectedInstanceId is null || _instances.All(instance => instance.Id != _selectedInstanceId))
+            {
+                _selectedInstanceId = _instances.FirstOrDefault()?.Id;
+            }
+            _pageError = null;
+        }
+        catch (Exception exception) when (IsConfigurationFailure(exception))
+        {
+            _pageError = $"Stash configuration could not be loaded: {exception.Message}";
+        }
+    }
+
+    private async Task RefreshObservationsAsync()
+    {
+        var snapshot = _instances;
+        var observations = await Task.WhenAll(snapshot.Select(async instance =>
+        {
+            try
+            {
+                return await StashClient.ObserveAsync(instance, _token);
+            }
+            catch (OperationCanceledException) when (_token.IsCancellationRequested) { throw; }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidDataException or JsonException)
+            {
+                return new StashObservation(instance.Id, instance.Name, false, DateTimeOffset.UtcNow, SafeError(exception));
+            }
+        }));
+        if (!_disposed && ReferenceEquals(snapshot, _instances))
+        {
+            foreach (var observation in observations)
+            {
+                _observations[observation.InstanceId] = observation;
+            }
+            _lastRefresh = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private async Task ObservePeriodicallyAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_token))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (!_disposed && !_isSaving)
+                    {
+                        await RefreshObservationsAsync();
+                        if (!_disposed)
+                        {
+                            StateHasChanged();
+                        }
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (_disposed) { }
+    }
+
+    private void StartNewInstance()
+    {
+        _editingId = null;
+        _draftName = string.Empty;
+        _draftGraphQlUrl = "http://localhost:9999/graphql";
+        _draftWebUrl = "http://localhost:9999/";
+        _draftApiKey = string.Empty;
+        _editorError = null;
+        _isEditing = true;
+    }
+
+    private void EditInstance(StashInstance instance)
+    {
+        _editingId = instance.Id;
+        _draftName = instance.Name;
+        _draftGraphQlUrl = instance.GraphQlEndpoint.AbsoluteUri;
+        _draftWebUrl = instance.WebUiUrl.AbsoluteUri;
+        _draftApiKey = string.Empty;
+        _editorError = null;
+        _isEditing = true;
+    }
+
+    private async Task SaveInstanceAsync()
+    {
+        if (_isSaving || _disposed)
+        {
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_draftName) || _draftName.Trim().Length > 60 ||
+            !TryParseEndpoint(_draftGraphQlUrl, out var graphQlUrl) || !TryParseEndpoint(_draftWebUrl, out var webUrl))
+        {
+            _editorError = "Enter a name (up to 60 characters) and valid HTTP or HTTPS URLs without embedded credentials.";
+            return;
+        }
+
+        _isSaving = true;
+        _editorError = null;
+        try
+        {
+            var instance = new StashInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), graphQlUrl!, webUrl!, _draftApiKey);
+            await InstanceStore.SaveAsync(instance, _token);
+            _draftApiKey = string.Empty;
+            await LoadInstancesAsync();
+            _selectedInstanceId = instance.Id;
+            _isEditing = false;
+            await RefreshObservationsAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsConfigurationFailure(exception))
+        {
+            _editorError = $"Configuration was not saved: {exception.Message}";
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private async Task RemoveInstanceAsync(StashInstance instance)
+    {
+        if (_isSaving || _disposed)
+        {
+            return;
+        }
+        _isSaving = true;
+        try
+        {
+            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, $"Remove {instance.Name} from this manager? The Stash instance will not be changed."))
+            {
+                return;
+            }
+            await InstanceStore.RemoveAsync(instance.Id, _token);
+            _observations.Remove(instance.Id);
+            await LoadInstancesAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsConfigurationFailure(exception) || exception is JSException)
+        {
+            _pageError = $"Configuration was not removed: {exception.Message}";
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private void SelectInstance(Guid id) => _selectedInstanceId = id;
+
+    private async Task ReloadHydrusAsync()
+    {
+        try
+        {
+            _hydrusInstances = await HydrusStore.GetAllAsync(_token);
+            _hydrusError = null;
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsConfigurationFailure(exception))
+        {
+            _hydrusError = "Hydrus configuration could not be loaded. Check the data directory and Windows account; existing data was not changed.";
+        }
+    }
+
+    private void CancelEdit()
+    {
+        if (!_isSaving)
+        {
+            _isEditing = false;
+            _editorError = null;
+            _draftApiKey = string.Empty;
+        }
+    }
+
+    private void HandleEditorKey(KeyboardEventArgs args)
+    {
+        if (args.Key == "Escape")
+        {
+            CancelEdit();
+        }
+    }
+
+    private static bool TryParseEndpoint(string value, out Uri? uri) =>
+        Uri.TryCreate(value.Trim(), UriKind.Absolute, out uri) &&
+        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) &&
+        string.IsNullOrEmpty(uri.UserInfo) &&
+        string.IsNullOrEmpty(uri.Fragment);
+
+    private static bool IsConfigurationFailure(Exception exception) => exception is
+        IOException or InvalidDataException or UriFormatException or UnauthorizedAccessException or
+        System.Security.Cryptography.CryptographicException or JsonException;
+
+    private static string SafeError(Exception exception) => exception switch
+    {
+        TaskCanceledException => "Request timed out.",
+        HttpRequestException => exception.Message,
+        InvalidDataException => exception.Message,
+        _ => "Stash returned an invalid response."
+    };
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+        _draftApiKey = string.Empty;
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

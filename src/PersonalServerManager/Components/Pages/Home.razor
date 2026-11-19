@@ -5,265 +5,129 @@
 @using PersonalServerManager.Search
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
-@inject IStashGraphQlClient StashClient
 @inject IHydrusInstanceStore HydrusStore
 @inject IHydrusClient HydrusClient
 @inject LibrarySearchService LibrarySearch
-@inject IJSRuntime JavaScript
 
 <PageTitle>Library search | Personal Server Manager</PageTitle>
 
-<div class="workspace">
+<div class="workspace @(_searchHasRun ? "has-results" : string.Empty)">
     <header class="topbar">
         <a class="wordmark" href="/" aria-label="Personal Server Manager home"><span class="mark">P</span><span>Personal Server Manager</span></a>
-        <div class="topbar-right"><span class="local-label"><span class="local-dot"></span>LOCAL WORKSPACE</span>
+        <nav class="topbar-right" aria-label="Workspace">
+            <a class="icon-action" href="/backends" aria-label="Manage backends" title="Manage backends"><MudIcon Icon="@Icons.Material.Outlined.Settings" /></a>
             <form method="post" action="/account/logout"><AntiforgeryToken /><button class="logout" type="submit">Sign out</button></form>
-        </div>
+        </nav>
     </header>
 
     <main>
-        <div class="page-heading">
-            <div><h1>Library search</h1></div>
-            <div class="heading-meta"><span class="instance-count">@((_instances.Count + _hydrusInstances.Count).ToString("00")) <span>INSTANCES</span></span>
-                <span class="last-refresh">@(_lastRefresh is null ? "Awaiting first check" : $"Checked {_lastRefresh.Value.ToLocalTime():HH:mm:ss}")</span></div>
-        </div>
-        @if (_pageError is not null)
-        {
-            <div class="notice error-notice" role="alert">@_pageError</div>
-        }
-
-        <div class="dashboard-grid">
-            <aside class="inventory-pane" aria-label="Stash instances">
-                <div class="section-heading"><div><span class="section-index">01</span><h2>Instances</h2></div><button class="icon-action" type="button" title="Add instance" aria-label="Add instance" @onclick="StartNewInstance">+</button></div>
-                @if (_instances.Count == 0)
-                {
-                    <div class="empty-inventory"><span class="empty-symbol">/</span><p>No Stash instances yet.</p><button class="text-action" type="button" @onclick="StartNewInstance">Add the first instance <span aria-hidden="true">↗</span></button></div>
-                }
-                else
-                {
-                    <ul class="instance-list">
-                        @foreach (var instance in _instances)
-                        {
-                            var status = _observations.GetValueOrDefault(instance.Id);
-                            <li><button class="instance-row @(instance.Id == _selectedInstanceId ? "selected" : string.Empty)" @onclick="() => SelectInstance(instance.Id)">
-                                <span class="status-indicator @(status is null ? "unknown" : status.IsReachable ? "online" : "offline")" aria-hidden="true"></span>
-                                <span class="instance-copy"><strong>@instance.Name</strong><small>@instance.GraphQlEndpoint.Host</small></span><span class="row-chevron" aria-hidden="true">›</span>
-                            </button></li>
-                        }
-                    </ul>
-                }
-                <HydrusInstances Changed="ReloadHydrusAsync" />
-                <div class="inventory-footer"><span class="legend-dot online"></span> Connected <span class="legend-dot offline"></span> Unavailable</div>
-            </aside>
-
-            <section class="main-pane" aria-label="Search and instance details">
-                <section class="search-section">
-                    <div class="section-heading"><div><h2>All libraries</h2></div><span class="search-scope">Top 5 per category and instance</span></div>
-                    <form class="search-form" @onsubmit="SearchAsync" @onsubmit:preventDefault="true">
-                        <label class="visually-hidden" for="search-query">Search all libraries</label>
-                        <span class="search-glyph" aria-hidden="true">⌕</span>
-                        <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search across every instance" autocomplete="off" />
-                        <button class="search-button" type="submit" disabled="@(_isSearching || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))">@(_isSearching ? "Searching…" : "Search") <span aria-hidden="true">↗</span></button>
-                    </form>
-                    @if (_searchHasRun)
+        <section class="search-section" aria-labelledby="search-heading">
+            @if (_pageError is not null)
+            {
+                <div class="notice error-notice" role="alert">@_pageError</div>
+            }
+            <form class="search-form" role="search" @onsubmit="SearchAsync" @onsubmit:preventDefault="true">
+                <label class="visually-hidden" for="search-query">Search all libraries</label>
+                <span class="search-glyph" aria-hidden="true"><MudIcon Icon="@Icons.Material.Outlined.Search" /></span>
+                <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search all libraries" autocomplete="off" />
+                <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
+            </form>
+            @if (_configurationLoaded && _instances.Count + _hydrusInstances.Count == 0 && _pageError is null)
+            {
+                <p class="empty-state">No backends connected. <a href="/backends">Add a backend</a></p>
+            }
+            @if (_searchHasRun)
+            {
+                <div class="results-header" role="status" aria-live="polite"><h2>Results <span>@_groups.Sum(group => group.Items.Count)</span></h2><span>@(_isSearching ? "Searching all libraries..." : $"for '{_submittedQuery}'")</span></div>
+                <div class="results" aria-busy="@_isSearching.ToString().ToLowerInvariant()">
+                    @foreach (var group in _groups)
                     {
-                        <div class="results-header" role="status"><h3>Results <span>@_groups.Sum(group => group.Items.Count)</span></h3><span>@(_isSearching ? "Searching all libraries..." : $"for ‘{_submittedQuery}’")</span></div>
-                        @foreach (var group in _groups)
-                        {
-                            <section class="result-group" aria-label="@(group.InstanceName + " " + group.Category)">
-                                <div class="group-heading"><h3>@group.Category <small>@group.Provider / @group.InstanceName</small></h3>
-                                    @if (group.SearchUrl is not null)
-                                    {
-                                        <a class="text-action" href="@group.SearchUrl" target="_blank" rel="noopener noreferrer">Open full query in Stash <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
-                                    }
-                                    else
-                                    {
-                                        <button class="text-action" type="button" disabled="@(_openingHydrus is not null)" title="Create and focus a search page in the Hydrus desktop client" @onclick="() => OpenHydrusAsync(group.InstanceId)">@(_openingHydrus == group.InstanceId ? "Opening Hydrus..." : "Open query in Hydrus") <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></button>
-                                    }
-                                </div>
-                                @if (group.Error is not null)
+                        <section class="result-group" aria-label="@(group.InstanceName + " " + group.Category)">
+                            <div class="group-heading"><h3>@group.Category <small>@group.Provider / @group.InstanceName</small></h3>
+                                @if (group.SearchUrl is not null)
                                 {
-                                    <div class="instance-error" role="status">@group.Error</div>
-                                }
-                                else if (group.Items.Count == 0)
-                                {
-                                    <p class="group-empty">No matches</p>
+                                    <a class="text-action" href="@group.SearchUrl" target="_blank" rel="noopener noreferrer">Open full query in Stash <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
                                 }
                                 else
                                 {
-                                    <ul class="group-results">
-                                        @foreach (var item in group.Items)
-                                        {
-                                            <li>
-                                                <div class="result-preview" aria-hidden="true">
-                                                    <MudIcon Icon="@Icons.Material.Outlined.Image" />
-                                                    @if (item.PreviewUrl is not null)
-                                                    {
-                                                        <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
-                                                    }
-                                                </div>
-                                                <div class="result-copy">
-                                                    @if (item.ItemUrl is not null)
-                                                    {
-                                                        <a href="@item.ItemUrl" target="_blank" rel="noopener noreferrer"><span>@item.Title</span><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
-                                                    }
-                                                    else
-                                                    {
-                                                        <span>@item.Title</span>
-                                                    }
-                                                    <small>@item.Detail</small>
-                                                </div>
-                                            </li>
-                                        }
-                                    </ul>
+                                    <button class="text-action" type="button" disabled="@(_openingHydrus is not null)" title="Create and focus a search page in the Hydrus desktop client" @onclick="() => OpenHydrusAsync(group.InstanceId)">@(_openingHydrus == group.InstanceId ? "Opening Hydrus..." : "Open query in Hydrus") <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></button>
                                 }
-                            </section>
-                        }
+                            </div>
+                            @if (group.Error is not null)
+                            {
+                                <div class="instance-error" role="status">@group.Error</div>
+                            }
+                            else if (group.Items.Count == 0)
+                            {
+                                <p class="group-empty">No matches</p>
+                            }
+                            else
+                            {
+                                <ul class="group-results">
+                                    @foreach (var item in group.Items)
+                                    {
+                                        <li>
+                                            <div class="result-preview" aria-hidden="true">
+                                                <MudIcon Icon="@Icons.Material.Outlined.Image" />
+                                                @if (item.PreviewUrl is not null)
+                                                {
+                                                    <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
+                                                }
+                                            </div>
+                                            <div class="result-copy">
+                                                @if (item.ItemUrl is not null)
+                                                {
+                                                    <a href="@item.ItemUrl" target="_blank" rel="noopener noreferrer"><span>@item.Title</span><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
+                                                }
+                                                else
+                                                {
+                                                    <span>@item.Title</span>
+                                                }
+                                                <small>@item.Detail</small>
+                                            </div>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+                        </section>
                     }
-                    else
-                    {
-                        <div class="search-placeholder"><span class="placeholder-line"></span><span>No search yet</span></div>
-                    }
-                    @if (_hydrusActionMessage is not null)
-                    {
-                        <p role="status" class="notice">@_hydrusActionMessage</p>
-                    }
-                </section>
-
-                <section class="details-section">
-                    <div class="section-heading"><div><span class="section-index">03</span><h2>Instance details</h2></div><button class="text-action" type="button" @onclick="StartNewInstance">+ Add instance</button></div>
-                    @if (_selectedInstance is not null)
-                    {
-                        var observation = _observations.GetValueOrDefault(_selectedInstance.Id);
-                        <div class="detail-strip">
-                            <div class="detail-name"><span class="status-indicator @(observation is null ? "unknown" : observation.IsReachable ? "online" : "offline")"></span><div><h3>@_selectedInstance.Name</h3><span>@_selectedInstance.GraphQlEndpoint.AbsoluteUri</span></div></div>
-                            <div class="detail-status"><small>OBSERVATION</small><strong class="@(observation is null ? "state-unknown" : observation.IsReachable ? "state-online" : "state-offline")">@(observation is null ? "Checking" : observation.IsReachable ? "Available" : "Unavailable")</strong><span>@(observation?.Message ?? "First check pending")</span></div>
-                            <div class="detail-actions"><a class="outline-action" href="@_selectedInstance.WebUiUrl" target="_blank" rel="noopener noreferrer">Open Stash <span aria-hidden="true">↗</span></a>
-                                <button class="plain-action" type="button" @onclick="() => EditInstance(_selectedInstance)">Edit</button><button class="plain-action danger-action" type="button" @onclick="() => RemoveInstanceAsync(_selectedInstance)">Remove</button></div>
-                        </div>
-                    }
-                    else
-                    {
-                        <p class="no-selection">Add an instance to begin searching.</p>
-                    }
-                </section>
-            </section>
-        </div>
-
-        @if (_isEditing)
-        {
-            <div class="editor-backdrop" role="presentation" @onclick="CancelEdit">
-                <section class="editor-panel" role="dialog" aria-modal="true" aria-labelledby="editor-title" @onclick:stopPropagation="true">
-                    <div class="editor-heading"><div><p class="eyebrow">INSTANCE CONFIGURATION</p><h2 id="editor-title">@(_editingId is null ? "Connect Stash" : "Edit instance")</h2></div><button class="icon-action close-action" aria-label="Close" type="button" @onclick="CancelEdit">×</button></div>
-                    @if (_editorError is not null)
-                    {
-                        <div class="notice error-notice" role="alert">@_editorError</div>
-                    }
-                    <form class="editor-form" @onsubmit="SaveInstanceAsync" @onsubmit:preventDefault="true">
-                        <label>Instance name<input @bind="_draftName" maxlength="60" required placeholder="e.g. Main library" /></label>
-                        <label>GraphQL endpoint<input @bind="_draftGraphQlUrl" type="url" required placeholder="http://localhost:9999/graphql" /></label>
-                        <label>Stash interface URL<input @bind="_draftWebUrl" type="url" required placeholder="http://localhost:9999/" /></label>
-                        <label>API key <span class="field-note">@(_editingId is null ? "Optional" : "Leave blank to keep the current key")</span><input @bind="_draftApiKey" type="password" autocomplete="new-password" /></label>
-                        <p class="security-note">API keys are encrypted on this Windows account. Use HTTPS for Stash endpoints that cross an untrusted network.</p>
-                        <div class="editor-actions"><button class="cancel-button" type="button" @onclick="CancelEdit">Cancel</button><button class="save-button" type="submit" disabled="@_isSaving">@(_isSaving ? "Saving…" : "Save instance")</button></div>
-                    </form>
-                </section>
-            </div>
-        }
+                </div>
+            }
+            @if (_hydrusActionMessage is not null)
+            {
+                <p role="status" class="notice">@_hydrusActionMessage</p>
+            }
+        </section>
     </main>
     <footer><span>PERSONAL SERVER MANAGER</span><span>STASH / HYDRUS</span></footer>
 </div>
 
 @code {
     private readonly CancellationTokenSource _lifetime = new();
-    private readonly Dictionary<Guid, StashObservation> _observations = [];
     private IReadOnlyList<StashInstance> _instances = [];
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<LibraryGroup> _groups = [];
+    private string _query = string.Empty;
     private string _submittedQuery = string.Empty;
+    private string? _pageError;
     private string? _hydrusActionMessage;
     private Guid? _openingHydrus;
-    private long _searchRevision;
-    private Guid? _selectedInstanceId;
-    private DateTimeOffset? _lastRefresh;
-    private string _query = string.Empty;
-    private string _draftName = string.Empty;
-    private string _draftGraphQlUrl = string.Empty;
-    private string _draftWebUrl = string.Empty;
-    private string _draftApiKey = string.Empty;
-    private string? _pageError;
-    private string? _editorError;
-    private Guid? _editingId;
+    private bool _configurationLoaded;
     private bool _searchHasRun;
     private bool _isSearching;
-    private bool _isEditing;
-    private bool _isSaving;
-
-    private StashInstance? _selectedInstance => _instances.FirstOrDefault(instance => instance.Id == _selectedInstanceId);
 
     protected override async Task OnInitializedAsync()
-    {
-        await LoadInstancesAsync();
-        await ReloadHydrusAsync();
-        await RefreshObservationsAsync();
-        _ = ObservePeriodicallyAsync(_lifetime.Token);
-    }
-
-    private async Task LoadInstancesAsync()
     {
         try
         {
             _instances = await InstanceStore.GetAllAsync(_lifetime.Token);
-            if (_selectedInstanceId is null || _instances.All(instance => instance.Id != _selectedInstanceId))
-            {
-                _selectedInstanceId = _instances.FirstOrDefault()?.Id;
-            }
+            _hydrusInstances = await HydrusStore.GetAllAsync(_lifetime.Token);
         }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or UriFormatException)
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UriFormatException or System.Security.Cryptography.CryptographicException or UnauthorizedAccessException)
         {
-            _pageError = exception.Message;
+            _pageError = "Backend configuration could not be loaded. Check the data directory and Windows account; existing data was not changed.";
         }
-    }
-
-    private async Task RefreshObservationsAsync()
-    {
-        var tasks = _instances.Select(async instance =>
-        {
-            try
-            {
-                return await StashClient.ObserveAsync(instance, _lifetime.Token);
-            }
-            catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidDataException or JsonException)
-            {
-                return new StashObservation(instance.Id, instance.Name, false, DateTimeOffset.UtcNow, SafeError(exception));
-            }
-        });
-        foreach (var observation in await Task.WhenAll(tasks))
-        {
-            _observations[observation.InstanceId] = observation;
-        }
-
-        _lastRefresh = DateTimeOffset.UtcNow;
-    }
-
-    private async Task ObservePeriodicallyAsync(CancellationToken cancellationToken)
-    {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
-        try
-        {
-            while (await timer.WaitForNextTickAsync(cancellationToken))
-            {
-                await RefreshObservationsAsync();
-                await InvokeAsync(StateHasChanged);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
+        _configurationLoaded = true;
     }
 
     private async Task SearchAsync()
@@ -278,14 +142,9 @@
         _groups = [];
         _hydrusActionMessage = null;
         _submittedQuery = _query.Trim();
-        var revision = ++_searchRevision;
         try
         {
-            var groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token);
-            if (revision == _searchRevision)
-            {
-                _groups = groups;
-            }
+            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -293,101 +152,6 @@
         finally
         {
             _isSearching = false;
-        }
-    }
-
-    private void StartNewInstance()
-    {
-        _editingId = null;
-        _draftName = string.Empty;
-        _draftGraphQlUrl = "http://localhost:9999/graphql";
-        _draftWebUrl = "http://localhost:9999/";
-        _draftApiKey = string.Empty;
-        _editorError = null;
-        _isEditing = true;
-    }
-
-    private void EditInstance(StashInstance instance)
-    {
-        _editingId = instance.Id;
-        _draftName = instance.Name;
-        _draftGraphQlUrl = instance.GraphQlEndpoint.AbsoluteUri;
-        _draftWebUrl = instance.WebUiUrl.AbsoluteUri;
-        _draftApiKey = string.Empty;
-        _editorError = null;
-        _isEditing = true;
-    }
-
-    private async Task SaveInstanceAsync()
-    {
-        if (_isSaving)
-        {
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(_draftName) || _draftName.Trim().Length > 60 ||
-            !TryParseEndpoint(_draftGraphQlUrl, out var graphQlUrl) || !TryParseEndpoint(_draftWebUrl, out var webUrl))
-        {
-            _editorError = "Enter a name (up to 60 characters) and valid HTTP or HTTPS URLs without embedded credentials.";
-            return;
-        }
-
-        _isSaving = true;
-        try
-        {
-            var instance = new StashInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), graphQlUrl!, webUrl!, _draftApiKey);
-            await InstanceStore.SaveAsync(instance, _lifetime.Token);
-            InvalidateResults();
-            await LoadInstancesAsync();
-            _selectedInstanceId = instance.Id;
-            _isEditing = false;
-            _pageError = null;
-            await RefreshObservationsAsync();
-        }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException)
-        {
-            _editorError = $"Configuration was not saved: {exception.Message}";
-        }
-        finally
-        {
-            _isSaving = false;
-        }
-    }
-
-    private async Task RemoveInstanceAsync(StashInstance instance)
-    {
-        if (!await JavaScript.InvokeAsync<bool>("confirm", $"Remove {instance.Name} from this manager? The Stash instance will not be changed."))
-        {
-            return;
-        }
-
-        try
-        {
-            await InstanceStore.RemoveAsync(instance.Id, _lifetime.Token);
-            InvalidateResults();
-            _observations.Remove(instance.Id);
-            await LoadInstancesAsync();
-            _searchHasRun = false;
-            _pageError = null;
-        }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException)
-        {
-            _pageError = $"Configuration was not removed: {exception.Message}";
-        }
-    }
-
-    private void SelectInstance(Guid id) => _selectedInstanceId = id;
-
-    private async Task ReloadHydrusAsync()
-    {
-        try
-        {
-            _hydrusInstances = await HydrusStore.GetAllAsync(_lifetime.Token);
-            InvalidateResults();
-        }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or System.Security.Cryptography.CryptographicException or UnauthorizedAccessException)
-        {
-            _pageError = "Hydrus configuration could not be loaded. Check the data directory and Windows account; existing data was not changed.";
         }
     }
 
@@ -405,22 +169,14 @@
         }
 
         _openingHydrus = instanceId;
-        var revision = _searchRevision;
-        var query = _submittedQuery;
         try
         {
-            await HydrusClient.OpenSearchAsync(instance, LibrarySearchService.ParseHydrusTags(query), _lifetime.Token);
-            if (revision == _searchRevision)
-            {
-                _hydrusActionMessage = $"Opened the full query in {instance.Name}'s Hydrus desktop client.";
-            }
+            await HydrusClient.OpenSearchAsync(instance, LibrarySearchService.ParseHydrusTags(_submittedQuery), _lifetime.Token);
+            _hydrusActionMessage = $"Opened the full query in {instance.Name}'s Hydrus desktop client.";
         }
         catch (Exception exception) when (exception is HttpRequestException or InvalidDataException or JsonException or ArgumentException)
         {
-            if (revision == _searchRevision)
-            {
-                _hydrusActionMessage = "Could not open the Hydrus search page. Check connectivity and the access key's manage-pages permission.";
-            }
+            _hydrusActionMessage = "Could not open the Hydrus search page. Check connectivity and the access key's manage-pages permission.";
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -430,34 +186,6 @@
             _openingHydrus = null;
         }
     }
-
-    private void CancelEdit()
-    {
-        _isEditing = false;
-        _editorError = null;
-    }
-
-    private void InvalidateResults()
-    {
-        _searchRevision++;
-        _groups = [];
-        _searchHasRun = false;
-        _hydrusActionMessage = null;
-    }
-
-    private static bool TryParseEndpoint(string value, out Uri? uri) =>
-        Uri.TryCreate(value.Trim(), UriKind.Absolute, out uri) &&
-        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) &&
-        string.IsNullOrEmpty(uri.UserInfo) &&
-        string.IsNullOrEmpty(uri.Fragment);
-
-    private static string SafeError(Exception exception) => exception switch
-    {
-        TaskCanceledException => "Request timed out.",
-        HttpRequestException => exception.Message,
-        InvalidDataException => exception.Message,
-        _ => "Stash returned an invalid response."
-    };
 
     public void Dispose()
     {

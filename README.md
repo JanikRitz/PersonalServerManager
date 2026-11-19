@@ -20,6 +20,10 @@ characters. Enrollment is accepted only from a loopback connection; no password
 is shipped or stored in the repository. Sign in uses an HTTP-only, same-site
 cookie, antiforgery protection, and a per-IP request limit.
 
+The main page is a focused library search. Use the gear icon to open **Backends**
+(`/backends`), where Stash and Hydrus connections, credentials, and health details
+are managed. Use its search link to return to the main page.
+
 Add each Stash instance using its GraphQL endpoint (normally ending in
 `/graphql`), web UI URL, and optional API key. One query searches all categories
 together, showing at most five results per category and instance. Each Stash
