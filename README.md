@@ -26,9 +26,16 @@ are managed. Use its search link to return to the main page.
 
 Add each Stash instance using its GraphQL endpoint (normally ending in
 `/graphql`), web UI URL, and optional API key. One query searches all categories
-together, showing at most five results per category and instance. Each Stash
-group links to the full query in that instance's UI. Failures are isolated per
-group and do not suppress other results. Status refreshes every 15 seconds.
+together. Results are combined across backends into Image, Video, and Performer
+grids; supported document and comic MIME types appear as Text/Ebook and Comic.
+Collection is reserved for future integrations. Empty types and sources are hidden.
+Each type initially shows up to five results. Expand it to fetch up to 25 per
+source and display up to 25 combined results, with an option to show everything
+in each contributing source. Stash thumbnails link to the original item; Hydrus
+thumbnails open the preview because its Client API has no browser-based item UI.
+Thumbnails preserve their aspect ratio, with a larger preview on hover or keyboard
+focus. Backend failures are reported separately without hiding healthy results.
+Status refreshes every 15 seconds on the Backends page.
 The integration does not start, stop, or otherwise mutate Stash.
 
 ## Hydrus
@@ -43,7 +50,7 @@ mechanism as Stash keys, in a separate configuration file and protection scope.
 Hydrus searches use comma-separated tags/predicates, preserving spaces within
 each tag. For example, `blue sky, landscape` searches for both tags. Stash uses
 the whole query as free text. Preview search is read-only and fetches at most
-five files and their basic metadata. Hydrus files are labeled by file ID and
+five files initially, or 25 on expansion, and their basic metadata. Hydrus files are labeled by file ID and
 MIME type; the Client API is not a browser-based library UI.
 
 **Open query in Hydrus** explicitly creates and focuses a search page in the

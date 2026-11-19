@@ -31,7 +31,7 @@
                 <label class="visually-hidden" for="search-query">Search all libraries</label>
                 <span class="search-glyph" aria-hidden="true"><MudIcon Icon="@Icons.Material.Outlined.Search" /></span>
                 <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search all libraries" autocomplete="off" />
-                <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
+                <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
             </form>
             @if (_configurationLoaded && _instances.Count + _hydrusInstances.Count == 0 && _pageError is null)
             {
@@ -39,56 +39,61 @@
             }
             @if (_searchHasRun)
             {
-                <div class="results-header" role="status" aria-live="polite"><h2>Results <span>@_groups.Sum(group => group.Items.Count)</span></h2><span>@(_isSearching ? "Searching all libraries..." : $"for '{_submittedQuery}'")</span></div>
-                <div class="results" aria-busy="@_isSearching.ToString().ToLowerInvariant()">
-                    @foreach (var group in _groups)
+                <div class="results-header" role="status" aria-live="polite"><h2>Results <span>@VisibleResultCount</span></h2><span>@(_isSearching ? "Searching all libraries..." : $"for '{_submittedQuery}'")</span></div>
+                @foreach (var failure in (_expandedGroups ?? _groups).Where(group => group.Error is not null))
+                {
+                    <p class="instance-error" role="status">@failure.InstanceName / @failure.Category: @failure.Error</p>
+                }
+                @if (!_isSearching && _typeGroups.Count == 0)
+                {
+                    <p class="empty-state">@(_groups.Any(group => group.Error is not null) ? "No results available from the remaining backends." : "No results found.")</p>
+                }
+                <div class="results" aria-busy="@(_isSearching || _expandingType is not null ? "true" : "false")">
+                    @foreach (var group in _typeGroups)
                     {
-                        <section class="result-group" aria-label="@(group.InstanceName + " " + group.Category)">
-                            <div class="group-heading"><h3>@group.Category <small>@group.Provider / @group.InstanceName</small></h3>
-                                @if (group.SearchUrl is not null)
-                                {
-                                    <a class="text-action" href="@group.SearchUrl" target="_blank" rel="noopener noreferrer">Open full query in Stash <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
-                                }
-                                else
-                                {
-                                    <button class="text-action" type="button" disabled="@(_openingHydrus is not null)" title="Create and focus a search page in the Hydrus desktop client" @onclick="() => OpenHydrusAsync(group.InstanceId)">@(_openingHydrus == group.InstanceId ? "Opening Hydrus..." : "Open query in Hydrus") <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></button>
-                                }
+                        var expanded = _expandedTypes.Contains(group.Type);
+                        var resultsId = $"results-{group.Type}";
+                        <section class="result-group" aria-label="@TypeLabel(group.Type)" @key="group.Type">
+                            <div class="group-heading">
+                                <h3>@TypeLabel(group.Type)</h3>
+                                <button class="text-action expand-action" type="button" aria-expanded="@(expanded ? "true" : "false")" aria-controls="@resultsId" disabled="@(_expandingType is not null || _openingHydrus is not null)" @onclick="() => ToggleExpandedAsync(group.Type)">
+                                    @(_expandingType == group.Type ? "Loading..." : expanded ? "Show less" : "Show up to 25")
+                                    <MudIcon Icon="@(expanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)" Size="Size.Small" />
+                                </button>
                             </div>
-                            @if (group.Error is not null)
+                            <ul class="media-grid" id="@resultsId">
+                                @foreach (var entry in group.Items.Take(expanded ? 25 : 5))
+                                {
+                                    var item = entry.Item;
+                                    <li class="media-tile" @key="(entry.Source.InstanceId, entry.Source.Category, item.Id)">
+                                        <a class="thumbnail-link" href="@(item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")">
+                                            <span class="thumbnail-placeholder" aria-hidden="true"><MudIcon Icon="@TypeIcon(group.Type)" /></span>
+                                            @if (item.PreviewUrl is not null)
+                                            {
+                                                <img class="thumbnail" src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
+                                                <span class="thumbnail-zoom" aria-hidden="true"><img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.parentElement.hidden=true" /></span>
+                                            }
+                                        </a>
+                                        <small class="media-source">@entry.Source.Provider / @entry.Source.InstanceName</small>
+                                        <span class="media-title" title="@item.Title">@item.Title</span>
+                                    </li>
+                                }
+                            </ul>
+                            @if (expanded)
                             {
-                                <div class="instance-error" role="status">@group.Error</div>
-                            }
-                            else if (group.Items.Count == 0)
-                            {
-                                <p class="group-empty">No matches</p>
-                            }
-                            else
-                            {
-                                <ul class="group-results">
-                                    @foreach (var item in group.Items)
+                                <div class="source-actions" aria-label="@($"{TypeLabel(group.Type)} sources")">
+                                    @foreach (var source in group.Sources)
                                     {
-                                        <li>
-                                            <div class="result-preview" aria-hidden="true">
-                                                <MudIcon Icon="@Icons.Material.Outlined.Image" />
-                                                @if (item.PreviewUrl is not null)
-                                                {
-                                                    <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
-                                                }
-                                            </div>
-                                            <div class="result-copy">
-                                                @if (item.ItemUrl is not null)
-                                                {
-                                                    <a href="@item.ItemUrl" target="_blank" rel="noopener noreferrer"><span>@item.Title</span><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
-                                                }
-                                                else
-                                                {
-                                                    <span>@item.Title</span>
-                                                }
-                                                <small>@item.Detail</small>
-                                            </div>
-                                        </li>
+                                        @if (source.SearchUrl is not null)
+                                        {
+                                            <a class="text-action" href="@source.SearchUrl" target="_blank" rel="noopener noreferrer">Show everything in @source.InstanceName <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
+                                        }
+                                        else
+                                        {
+                                            <button class="text-action" type="button" disabled="@(_openingHydrus is not null)" title="Create and focus the full query in the Hydrus desktop client" @onclick="() => OpenHydrusAsync(source.InstanceId)">@(_openingHydrus == source.InstanceId ? "Opening..." : $"Show everything in {source.InstanceName}") <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></button>
+                                        }
                                     }
-                                </ul>
+                                </div>
                             }
                         </section>
                     }
@@ -108,6 +113,10 @@
     private IReadOnlyList<StashInstance> _instances = [];
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<LibraryGroup> _groups = [];
+    private IReadOnlyList<LibraryGroup>? _expandedGroups;
+    private IReadOnlyList<LibraryTypeGroup> _typeGroups = [];
+    private readonly HashSet<LibraryMediaType> _expandedTypes = [];
+    private LibraryMediaType? _expandingType;
     private string _query = string.Empty;
     private string _submittedQuery = string.Empty;
     private string? _pageError;
@@ -116,6 +125,20 @@
     private bool _configurationLoaded;
     private bool _searchHasRun;
     private bool _isSearching;
+
+    private int VisibleResultCount => _typeGroups.Sum(group => Math.Min(group.Items.Count, _expandedTypes.Contains(group.Type) ? 25 : 5));
+
+    private static string TypeLabel(LibraryMediaType type) => type == LibraryMediaType.TextEbook ? "Text/Ebook" : type.ToString();
+
+    private static string TypeIcon(LibraryMediaType type) => type switch
+    {
+        LibraryMediaType.Video => Icons.Material.Outlined.Movie,
+        LibraryMediaType.Performer => Icons.Material.Outlined.Person,
+        LibraryMediaType.Collection => Icons.Material.Outlined.Collections,
+        LibraryMediaType.TextEbook => Icons.Material.Outlined.MenuBook,
+        LibraryMediaType.Comic => Icons.Material.Outlined.AutoStories,
+        _ => Icons.Material.Outlined.Image
+    };
 
     protected override async Task OnInitializedAsync()
     {
@@ -133,7 +156,7 @@
 
     private async Task SearchAsync()
     {
-        if (_isSearching || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))
+        if (_isSearching || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))
         {
             return;
         }
@@ -141,11 +164,15 @@
         _isSearching = true;
         _searchHasRun = true;
         _groups = [];
+        _expandedGroups = null;
+        _typeGroups = [];
+        _expandedTypes.Clear();
         _hydrusActionMessage = null;
         _submittedQuery = _query.Trim();
         try
         {
             _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token);
+            _typeGroups = LibrarySearchService.GroupByType(_groups);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -156,9 +183,43 @@
         }
     }
 
+    private async Task ToggleExpandedAsync(LibraryMediaType type)
+    {
+        if (_isSearching || _expandingType is not null || _openingHydrus is not null)
+        {
+            return;
+        }
+        if (_expandedTypes.Remove(type))
+        {
+            return;
+        }
+
+        _expandingType = type;
+        try
+        {
+            if (_expandedGroups is null)
+            {
+                var groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, limit: 25);
+                _expandedGroups = groups.Select(group => group.Error is null ? group : group with
+                {
+                    Items = _groups.FirstOrDefault(original => original.InstanceId == group.InstanceId && original.Category == group.Category)?.Items ?? []
+                }).ToArray();
+                _typeGroups = LibrarySearchService.GroupByType(_expandedGroups);
+            }
+            _expandedTypes.Add(type);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            _expandingType = null;
+        }
+    }
+
     private async Task OpenHydrusAsync(Guid instanceId)
     {
-        if (_openingHydrus is not null || _isSearching)
+        if (_openingHydrus is not null || _isSearching || _expandingType is not null)
         {
             return;
         }
