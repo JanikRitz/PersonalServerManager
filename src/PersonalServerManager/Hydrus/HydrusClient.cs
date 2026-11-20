@@ -7,6 +7,7 @@ namespace PersonalServerManager.Hydrus;
 public sealed class HydrusClient : IHydrusClient, IDisposable
 {
     private const int MaximumResponseBytes = 256 * 1024;
+    private const string ResponseTooLarge = "Hydrus response exceeded the size limit.";
     private static readonly TimeSpan MaximumTimeout = TimeSpan.FromSeconds(8);
     private readonly HttpClient _httpClient;
     private readonly TimeSpan _requestTimeout;
@@ -90,10 +91,21 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 return [];
             }
 
-            using var metadata = await SendAsync(instance, HttpMethod.Get,
-                $"get_files/file_metadata?file_ids={Uri.EscapeDataString(JsonSerializer.Serialize(ids))}&only_return_basic_information=true&include_services_object=false",
-                null, timeout.Token, cancellationToken);
-            return ReadFiles(metadata.RootElement, ids, limit);
+            var metadataPath = $"get_files/file_metadata?file_ids={Uri.EscapeDataString(JsonSerializer.Serialize(ids))}";
+            try
+            {
+                using var metadata = await SendAsync(instance, HttpMethod.Get,
+                    $"{metadataPath}&only_return_basic_information=false&include_services_object=false",
+                    null, timeout.Token, cancellationToken);
+                return ReadFiles(metadata.RootElement, ids, limit);
+            }
+            catch (InvalidDataException exception) when (exception.Message == ResponseTooLarge)
+            {
+                using var metadata = await SendAsync(instance, HttpMethod.Get,
+                    $"{metadataPath}&only_return_basic_information=true&include_services_object=false",
+                    null, timeout.Token, cancellationToken);
+                return ReadFiles(metadata.RootElement, ids, limit);
+            }
         }
         finally
         {
@@ -205,7 +217,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
 
             if (response.Content.Headers.ContentLength > MaximumResponseBytes)
             {
-                throw new InvalidDataException("Hydrus response exceeded the size limit.");
+                throw new InvalidDataException(ResponseTooLarge);
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(timeoutToken);
@@ -222,7 +234,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 buffer.Write(chunk, 0, read);
                 if (buffer.Length > MaximumResponseBytes)
                 {
-                    throw new InvalidDataException("Hydrus response exceeded the size limit.");
+                    throw new InvalidDataException(ResponseTooLarge);
                 }
             }
 
@@ -316,9 +328,31 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 throw new InvalidDataException("Hydrus returned invalid file metadata.");
             }
 
-            files.Add(id, new HydrusFile(id, $"File {id.ToString(CultureInfo.InvariantCulture)}", mime));
+            DateTimeOffset? createdAt = null;
+            if (value.TryGetProperty("file_services", out var services) && services.ValueKind == JsonValueKind.Object &&
+                services.TryGetProperty("current", out var current) && current.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var service in current.EnumerateObject())
+                {
+                    var imported = ReadTimestamp(service.Value, "time_imported");
+                    if (imported.HasValue && (!createdAt.HasValue || imported < createdAt)) createdAt = imported;
+                }
+            }
+            files.Add(id, new HydrusFile(id, $"File {id.ToString(CultureInfo.InvariantCulture)}", mime)
+            {
+                CreatedAt = createdAt,
+                UpdatedAt = ReadTimestamp(value, "time_modified")
+            });
         }
 
         return ids.Where(files.ContainsKey).Select(id => files[id]).ToArray();
+    }
+
+    private static DateTimeOffset? ReadTimestamp(JsonElement item, string property)
+    {
+        if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty(property, out var value) ||
+            value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var seconds)) return null;
+        try { return DateTimeOffset.FromUnixTimeSeconds(seconds); }
+        catch (ArgumentOutOfRangeException) { return null; }
     }
 }

@@ -14,6 +14,21 @@ public sealed class LocalLibraryClientTests : IDisposable
     private LocalLibraryInstance Instance(LocalLibraryKind kind = LocalLibraryKind.Notes) => new(Guid.NewGuid(), "Fixture", _root, kind);
 
     [Fact]
+    public async Task NotesExposeFileDatesAndRelativePath()
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(_root, "nested"));
+        var path = Path.Combine(directory.FullName, "match.txt");
+        await File.WriteAllTextAsync(path, "match");
+        File.SetLastWriteTimeUtc(path, new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc));
+
+        var item = Assert.Single(await _client.SearchAsync(Instance(), "match", 5));
+
+        Assert.Equal(new DateTimeOffset(File.GetCreationTimeUtc(path)), item.CreatedAt);
+        Assert.Equal(new DateTimeOffset(File.GetLastWriteTimeUtc(path)), item.UpdatedAt);
+        Assert.Equal(Path.Combine("nested", "match.txt"), item.Path);
+    }
+
+    [Fact]
     public async Task NotesSearchesNamesAndContentsRecursivelyAndServesPlainText()
     {
         Directory.CreateDirectory(Path.Combine(_root, "nested"));
@@ -66,6 +81,29 @@ public sealed class LocalLibraryClientTests : IDisposable
     }
 
     [Fact]
+    public async Task CalibreReadsOptionalDatesAndFallsBackToPathForMissingTitle()
+    {
+        await CreateDatabaseAsync();
+        await ExecuteAsync("""
+            ALTER TABLE books ADD COLUMN timestamp TEXT;
+            ALTER TABLE books ADD COLUMN last_modified TEXT;
+            UPDATE books SET title = '', timestamp = '2020-01-02T03:04:05+00:00',
+                last_modified = '2022-05-06T07:08:09+00:00' WHERE id = 1;
+            """);
+        var instance = Instance(LocalLibraryKind.CalibreText);
+        var item = Assert.Single(await _client.SearchAsync(instance, "writer", 5));
+        Assert.Equal("Writer/Fixture (1)", item.Title);
+        Assert.Equal("Writer/Fixture (1)", item.Path);
+        Assert.Equal(DateTimeOffset.Parse("2020-01-02T03:04:05Z"), item.CreatedAt);
+        Assert.Equal(DateTimeOffset.Parse("2022-05-06T07:08:09Z"), item.UpdatedAt);
+
+        await ExecuteAsync("UPDATE books SET timestamp = 'bad', last_modified = '2021-01-01T00:00:00Z' WHERE id = 1");
+        item = Assert.Single(await _client.SearchAsync(instance, "writer", 5));
+        Assert.Null(item.CreatedAt);
+        Assert.Equal(DateTimeOffset.Parse("2021-01-01T00:00:00Z"), item.UpdatedAt);
+    }
+
+    [Fact]
     public async Task CalibreSearchesMetadataEscapesSqlAndPrefersPrimaryFormatReadOnly()
     {
         await CreateDatabaseAsync();
@@ -79,6 +117,9 @@ public sealed class LocalLibraryClientTests : IDisposable
         Assert.Empty(await _client.SearchAsync(instance, "not-present", 25));
         var item = Assert.Single(await _client.SearchAsync(instance, "fixture", 25));
         Assert.Equal(LibraryMediaType.TextEbook, item.MediaType);
+        Assert.Null(item.CreatedAt);
+        Assert.Null(item.UpdatedAt);
+        Assert.Equal("Writer/Fixture (1)", item.Path);
         Assert.Equal($"/libraries/{instance.Id:D}/covers/1", item.PreviewUrl!.ToString());
         await using (var file = await _client.OpenItemAsync(instance, item.Id))
         {

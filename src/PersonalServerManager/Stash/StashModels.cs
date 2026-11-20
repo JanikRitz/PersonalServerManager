@@ -26,7 +26,12 @@ public sealed record StashSearchResult(
     Uri? ThumbnailUrl,
     Uri ItemUrl,
     Guid InstanceId,
-    string InstanceName);
+    string InstanceName)
+{
+    public DateTimeOffset? CreatedAt { get; init; }
+    public DateTimeOffset? UpdatedAt { get; init; }
+    public string? Path { get; init; }
+}
 
 public sealed record StashObservation(
     Guid InstanceId,

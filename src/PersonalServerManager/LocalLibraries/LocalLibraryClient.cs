@@ -110,7 +110,8 @@ public sealed class LocalLibraryClient
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var length = new FileInfo(path).Length;
+                var fileInfo = new FileInfo(path);
+                var length = fileInfo.Length;
                 if (length > MaximumNoteBytes) continue;
                 scannedBytes += length;
                 if (scannedBytes > MaximumScanBytes) break;
@@ -124,7 +125,8 @@ public sealed class LocalLibraryClient
                 }
                 var id = NoteId(root, path);
                 items.Add(new LibraryItem(id, Path.GetFileName(path), "Note", ItemUrl(instance.Id, id),
-                    MediaType: LibraryMediaType.Note));
+                    MediaType: LibraryMediaType.Note, CreatedAt: fileInfo.CreationTimeUtc,
+                    UpdatedAt: fileInfo.LastWriteTimeUtc, Path: Path.GetRelativePath(root, path)));
                 if (items.Count == limit) break;
             }
             catch (Exception exception) when (IsFileFailure(exception))
@@ -205,12 +207,21 @@ public sealed class LocalLibraryClient
     {
         await using var database = await OpenDatabaseAsync(root, cancellationToken);
         var connection = database.Connection;
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText = "PRAGMA table_info(books)";
+            await using var schemaReader = await schema.ExecuteReaderAsync(cancellationToken);
+            while (await schemaReader.ReadAsync(cancellationToken)) columns.Add(schemaReader.GetString(1));
+        }
         using var command = connection.CreateCommand();
-        command.CommandText = """
+        command.CommandText = $$"""
             SELECT b.id, b.title, b.path,
                 COALESCE((SELECT group_concat(a.name, ', ') FROM authors a
                     JOIN books_authors_link ba ON ba.author = a.id WHERE ba.book = b.id), ''),
-                (SELECT substr(c.text, 1, $maximumCommentLength) FROM comments c WHERE c.book = b.id LIMIT 1)
+                (SELECT substr(c.text, 1, $maximumCommentLength) FROM comments c WHERE c.book = b.id LIMIT 1),
+                {{(columns.Contains("timestamp") ? "b.timestamp" : "NULL")}},
+                {{(columns.Contains("last_modified") ? "b.last_modified" : "NULL")}}
             FROM books b
             WHERE b.title LIKE $query ESCAPE '\'
                 OR EXISTS (SELECT 1 FROM authors a JOIN books_authors_link ba ON ba.author = a.id
@@ -252,15 +263,21 @@ public sealed class LocalLibraryClient
             {
             }
 
-            items.Add(new LibraryItem(id, reader.GetString(1), reader.GetString(3), ItemUrl(instance.Id, id), coverUrl,
+            var title = reader.IsDBNull(1) ? null : reader.GetString(1);
+            items.Add(new LibraryItem(id, string.IsNullOrWhiteSpace(title) ? bookPath : title, reader.GetString(3), ItemUrl(instance.Id, id), coverUrl,
                 instance.Kind == LocalLibraryKind.CalibreComic ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
-                Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4))));
+                Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4)),
+                CreatedAt: ReadCalibreDate(reader, 5), UpdatedAt: ReadCalibreDate(reader, 6), Path: bookPath));
             if (items.Count == limit) break;
         }
 
         cancellationToken.ThrowIfCancellationRequested();
         return items;
     }
+
+    private static DateTimeOffset? ReadCalibreDate(SqliteDataReader reader, int ordinal) =>
+        !reader.IsDBNull(ordinal) && DateTimeOffset.TryParse(Convert.ToString(reader.GetValue(ordinal), CultureInfo.InvariantCulture),
+            CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date) ? date : null;
 
     private static string? NormalizeDescription(string comment)
     {

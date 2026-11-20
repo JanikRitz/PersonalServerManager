@@ -61,18 +61,18 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         cancellationToken.ThrowIfCancellationRequested();
         var (field, collectionName, selection, urlSegment) = kind switch
         {
-            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot }", "scenes"),
-            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail }", "images"),
+            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot } files { path }", "scenes"),
+            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail } files { path }", "images"),
             StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path", "performers"),
             StashSearchKind.Studios => ("findStudios", "studios", "id name image_path", "studios"),
             StashSearchKind.Tags => ("findTags", "tags", "id name image_path", "tags"),
             StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds scene { id } primary_tag { name } screenshot", "scenes"),
-            StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover }", "galleries"),
+            StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover } files { path }", "galleries"),
             StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path", "groups"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
 
-        var document = $"query Search($filter: FindFilterType) {{ {field}(filter: $filter) {{ count {collectionName} {{ {selection} }} }} }}";
+        var document = $"query Search($filter: FindFilterType) {{ {field}(filter: $filter) {{ count {collectionName} {{ {selection} created_at updated_at }} }} }}";
         using var response = await SendAsync(
             instance,
             document,
@@ -185,9 +185,14 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
     {
         var id = item.GetProperty("id").GetString() ?? throw new InvalidDataException("Stash returned a result without an ID.");
         var named = kind is StashSearchKind.Performers or StashSearchKind.Studios or StashSearchKind.Tags or StashSearchKind.Groups;
+        var path = item.TryGetProperty("files", out var files) && files.ValueKind == JsonValueKind.Array
+            ? files.EnumerateArray().Where(file => file.ValueKind == JsonValueKind.Object)
+                .Select(file => file.TryGetProperty("path", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null)
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+            : null;
         var title = item.TryGetProperty(named ? "name" : "title", out var titleValue)
-            ? titleValue.GetString() ?? "(untitled)"
-            : "(untitled)";
+            && titleValue.ValueKind == JsonValueKind.String ? titleValue.GetString() : null;
+        if (string.IsNullOrWhiteSpace(title)) title = kind == StashSearchKind.Markers ? "" : path ?? "(untitled)";
         var thumbnail = kind switch
         {
             StashSearchKind.Performers or StashSearchKind.Studios or StashSearchKind.Tags => item.TryGetProperty("image_path", out var image) ? image.GetString() : null,
@@ -222,8 +227,18 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             ResolveThumbnail(instance.WebUiUrl, kind, id, thumbnail, kind == StashSearchKind.Markers ? GetNestedString(item, "scene", "id") : null),
             new Uri(instance.WebUiUrl, itemPath),
             instance.Id,
-            instance.Name);
+            instance.Name)
+        {
+            CreatedAt = ReadDate(item, "created_at"),
+            UpdatedAt = ReadDate(item, "updated_at"),
+            Path = path
+        };
     }
+
+    private static DateTimeOffset? ReadDate(JsonElement item, string property) =>
+        item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String &&
+        DateTimeOffset.TryParse(value.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date)
+            ? date : null;
 
     private static string? GetNestedString(JsonElement element, string objectName, string propertyName) =>
         element.TryGetProperty(objectName, out var nested) && nested.TryGetProperty(propertyName, out var value)

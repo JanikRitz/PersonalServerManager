@@ -57,7 +57,27 @@
                 }
                 else
                 {
-                    <div class="results-header" role="status" aria-live="polite"><h2>Results <span>@VisibleResultCount</span></h2><span>for '@_submittedQuery'</span></div>
+                    <div class="results-header">
+                        <div role="status" aria-live="polite"><h2>Results <span>@VisibleResultCount</span></h2><span>for '@_submittedQuery'</span></div>
+                        @if (_typeGroups.Count > 0)
+                        {
+                            <div class="sort-controls">
+                                <label for="result-sort">Sort loaded results</label>
+                                <select id="result-sort" @bind="_sort" @bind:after="ApplySort" disabled="@(_expandingType is not null)">
+                                    <option value="@LibrarySort.Default">Default</option>
+                                    <option value="@LibrarySort.TitleAscending">A-Z</option>
+                                    <option value="@LibrarySort.TitleDescending">Z-A</option>
+                                    <option value="@LibrarySort.DateNewest">Date newest</option>
+                                    <option value="@LibrarySort.DateOldest">Date oldest</option>
+                                    <option value="@LibrarySort.Random">Random</option>
+                                </select>
+                                @if (_sort == LibrarySort.Random)
+                                {
+                                    <button type="button" class="shuffle-action" title="Shuffle again" aria-label="Shuffle again" disabled="@(_expandingType is not null)" @onclick="ApplySort"><MudIcon Icon="@Icons.Material.Outlined.Shuffle" Size="Size.Small" /></button>
+                                }
+                            </div>
+                        }
+                    </div>
                 }
                 @foreach (var failure in (_expandedGroups ?? _groups).Where(group => group.Error is not null))
                 {
@@ -146,6 +166,7 @@
     private IReadOnlyList<LibraryGroup> _groups = [];
     private IReadOnlyList<LibraryGroup>? _expandedGroups;
     private IReadOnlyList<LibraryTypeGroup> _typeGroups = [];
+    private LibrarySort _sort;
     private readonly HashSet<LibraryMediaType> _expandedTypes = [];
     private LibraryMediaType? _expandingType;
     private string _query = string.Empty;
@@ -217,7 +238,7 @@
         try
         {
             _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries);
-            _typeGroups = LibrarySearchService.GroupByType(_groups);
+            ApplySort();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -249,7 +270,7 @@
                 {
                     Items = _groups.FirstOrDefault(original => original.InstanceId == group.InstanceId && original.Category == group.Category)?.Items ?? []
                 }).ToArray();
-                _typeGroups = LibrarySearchService.GroupByType(_expandedGroups);
+                ApplySort();
             }
             _expandedTypes.Add(type);
         }
@@ -260,6 +281,12 @@
         {
             _expandingType = null;
         }
+    }
+
+    private void ApplySort()
+    {
+        _typeGroups = LibrarySearchService.GroupByType(_expandedGroups ?? _groups)
+            .Select(group => group with { Items = LibrarySearchService.SortItems(group.Items, _sort) }).ToArray();
     }
 
     private async Task OpenHydrusAsync(Guid instanceId)

@@ -33,6 +33,7 @@ public sealed class StashGraphQlClientTests
             Assert.Equal(limit, filter.GetProperty("per_page").GetInt32());
             Assert.Equal(1, filter.GetProperty("page").GetInt32());
             Assert.Contains($"{field}(filter: $filter)", payload.RootElement.GetProperty("query").GetString());
+            Assert.Contains("created_at updated_at", payload.RootElement.GetProperty("query").GetString());
             var items = Enumerable.Range(1, 30).Select(index => new { id = index.ToString(), title = "Title", name = "Name", seconds = 12.5, scene = new { id = "99" } });
             return Json(System.Text.Json.JsonSerializer.Serialize(new
             {
@@ -55,6 +56,26 @@ public sealed class StashGraphQlClientTests
         var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send."))));
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchAsync(Instance(null), StashSearchKind.Images, "query", limit));
+    }
+
+    [Fact]
+    public async Task SearchAsync_MapsDatesAndFilePathWithMissingTitleFallback()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            Assert.Contains("files { path } created_at updated_at", body);
+            return Json("""{"data":{"findScenes":{"scenes":[{"id":"42","title":null,"files":[{"path":"/library/scene.mp4"}],"created_at":"2020-01-02T03:04:05Z","updated_at":"2022-05-06T07:08:09Z"},{"id":"43","title":"Other","created_at":"invalid","updated_at":null}]}}}""");
+        })));
+
+        var results = await client.SearchAsync(Instance(null), StashSearchKind.Scenes, "query");
+
+        Assert.Equal("/library/scene.mp4", results[0].Title);
+        Assert.Equal("/library/scene.mp4", results[0].Path);
+        Assert.Equal(DateTimeOffset.Parse("2020-01-02T03:04:05Z"), results[0].CreatedAt);
+        Assert.Equal(DateTimeOffset.Parse("2022-05-06T07:08:09Z"), results[0].UpdatedAt);
+        Assert.Null(results[1].CreatedAt);
+        Assert.Null(results[1].UpdatedAt);
+        Assert.Null(results[1].Path);
     }
 
     [Fact]
@@ -121,7 +142,7 @@ public sealed class StashGraphQlClientTests
     [Theory]
     [InlineData(StashSearchKind.Studios, "findStudios", "studios", "id name image_path", "studio/42/image")]
     [InlineData(StashSearchKind.Tags, "findTags", "tags", "id name image_path", "tag/42/image")]
-    [InlineData(StashSearchKind.Galleries, "findGalleries", "galleries", "id title paths { cover }", "gallery/42/cover")]
+    [InlineData(StashSearchKind.Galleries, "findGalleries", "galleries", "id title paths { cover } files { path }", "gallery/42/cover")]
     [InlineData(StashSearchKind.Groups, "findGroups", "groups", "id name front_image_path", "group/42/frontimage")]
     public async Task SearchAsync_MapsNewCollectionsAndTrustedPreviewPaths(
         StashSearchKind kind, string field, string collection, string selection, string previewPath)
@@ -130,7 +151,7 @@ public sealed class StashGraphQlClientTests
         var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
         {
             using var request = System.Text.Json.JsonDocument.Parse(body);
-            Assert.Contains($"{collection} {{ {selection} }}", request.RootElement.GetProperty("query").GetString());
+            Assert.Contains($"{collection} {{ {selection} created_at updated_at }}", request.RootElement.GetProperty("query").GetString());
             Assert.Equal(5, request.RootElement.GetProperty("variables").GetProperty("filter").GetProperty("per_page").GetInt32());
             var thumbnail = new Uri(instance.WebUiUrl, previewPath).AbsoluteUri + "?apikey=private";
             var item = new { id = "42", name = "A name", title = "A title", image_path = thumbnail, front_image_path = thumbnail, paths = new { cover = thumbnail } };
@@ -157,7 +178,7 @@ public sealed class StashGraphQlClientTests
         var instance = Instance(null) with { WebUiUrl = new Uri("https://stash.example/prefix/") };
         var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
         {
-            Assert.Contains("scene_markers { id title seconds scene { id } primary_tag { name } screenshot }", body);
+            Assert.Contains("scene_markers { id title seconds scene { id } primary_tag { name } screenshot created_at updated_at }", body);
             return Json(System.Text.Json.JsonSerializer.Serialize(new
             {
                 data = new { findSceneMarkers = new { scene_markers = new[] { new { id = "42", title, seconds = 123.75, scene = new { id = "9" }, primary_tag = new { name = "Primary tag" }, screenshot = "https://evil.example/thumbnail" } } } }

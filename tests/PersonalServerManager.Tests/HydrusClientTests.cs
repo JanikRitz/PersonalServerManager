@@ -213,7 +213,48 @@ public sealed class HydrusClientTests
     }
 
     [Fact]
-    public async Task SearchAsync_UsesServerSideLimitAndBoundedBasicMetadataWithoutOpeningAPage()
+    public async Task SearchAsync_FallsBackToBasicMetadataWhenFullResponseIsTooLarge()
+    {
+        var calls = 0;
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            calls++;
+            if (calls == 1) return Json("""{"file_ids":[1]}""");
+            var query = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (calls == 2)
+            {
+                Assert.Equal("false", query["only_return_basic_information"].ToString());
+                return Json(new string(' ', 256 * 1024 + 1));
+            }
+            Assert.Equal("true", query["only_return_basic_information"].ToString());
+            return Json("""{"metadata":[{"file_id":1,"mime":"image/png"}]}""");
+        }));
+
+        var file = Assert.Single(await client.SearchAsync(Instance(), ["tag"]));
+        Assert.Equal(3, calls);
+        Assert.Null(file.CreatedAt);
+        Assert.Null(file.UpdatedAt);
+    }
+
+    [Fact]
+    public async Task SearchAsync_MapsImportAndModificationDatesAndIgnoresInvalidValues()
+    {
+        var calls = 0;
+        using var client = new HydrusClient(new StubHandler((_, _) => ++calls == 1
+            ? Json("""{"file_ids":[1,2]}""")
+            : Json("""{"metadata":[{"file_id":1,"mime":"image/png","time_modified":1609459200,"file_services":{"current":{"first":{"time_imported":1577836800},"second":{"time_imported":1600000000}}}},{"file_id":2,"mime":"image/png","time_modified":999999999999999,"file_services":{"current":{"first":{"time_imported":"bad"}}}}]}""")));
+
+        var files = await client.SearchAsync(Instance(), ["tag"]);
+
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1577836800), files[0].CreatedAt);
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1609459200), files[0].UpdatedAt);
+        Assert.Null(files[0].Path);
+        Assert.Null(files[1].CreatedAt);
+        Assert.Null(files[1].UpdatedAt);
+    }
+
+    [Fact]
+    public async Task SearchAsync_UsesServerSideLimitAndBoundedMetadataWithoutOpeningAPage()
     {
         var calls = 0;
         using var client = new HydrusClient(new StubHandler((request, body) =>
@@ -235,7 +276,7 @@ public sealed class HydrusClientTests
 
             Assert.Equal("/get_files/file_metadata", request.RequestUri.AbsolutePath);
             Assert.Equal(new long[] { 6000000001, 2, 3, 4, 5 }, JsonSerializer.Deserialize<long[]>(query["file_ids"].ToString()));
-            Assert.Equal("true", query["only_return_basic_information"].ToString());
+            Assert.Equal("false", query["only_return_basic_information"].ToString());
             Assert.Equal("false", query["include_services_object"].ToString());
             return Json("""{"metadata":[{"file_id":2,"mime":"video/webm"},{"file_id":6000000001,"mime":"image/jpeg"}]}""");
         }));

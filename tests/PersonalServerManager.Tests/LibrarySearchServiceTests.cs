@@ -11,6 +11,48 @@ namespace PersonalServerManager.Tests;
 public sealed class LibrarySearchServiceTests
 {
     [Fact]
+    public void SortItems_UsesTitleOrPathAndCreationBeforeUpdateWithMissingDatesLast()
+    {
+        var old = new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var recent = old.AddYears(2);
+        var source = new LibraryGroup(Guid.NewGuid(), "Source", "Notes", "Notes", [], null, null);
+        LibraryTypeItem[] items = [
+            new(new LibraryItem("1", "Zulu", "", null, CreatedAt: old, UpdatedAt: recent), source),
+            new(new LibraryItem("2", "", "", null, UpdatedAt: recent, Path: "alpha.txt"), source),
+            new(new LibraryItem("3", "Beta", "", null), source)
+        ];
+
+        Assert.Equal(new[] { "2", "3", "1" }, LibrarySearchService.SortItems(items, LibrarySort.TitleAscending).Select(entry => entry.Item.Id));
+        Assert.Equal(new[] { "1", "3", "2" }, LibrarySearchService.SortItems(items, LibrarySort.TitleDescending).Select(entry => entry.Item.Id));
+        Assert.Equal(new[] { "2", "1", "3" }, LibrarySearchService.SortItems(items, LibrarySort.DateNewest).Select(entry => entry.Item.Id));
+        Assert.Equal(new[] { "1", "2", "3" }, LibrarySearchService.SortItems(items, LibrarySort.DateOldest).Select(entry => entry.Item.Id));
+        Assert.Equal(items.Select(entry => entry.Item.Id).Order(), LibrarySearchService.SortItems(items, LibrarySort.Random).Select(entry => entry.Item.Id).Order());
+    }
+
+    [Fact]
+    public async Task SearchAsync_PreservesProviderDatesAndPaths()
+    {
+        var created = DateTimeOffset.Parse("2020-01-02T03:04:05Z");
+        var updated = DateTimeOffset.Parse("2022-05-06T07:08:09Z");
+        var stash = new FakeStashClient((instance, kind, _, _) =>
+            Task.FromResult<IReadOnlyList<StashSearchResult>>([StashResult(instance, kind) with
+                { CreatedAt = created, UpdatedAt = updated, Path = "stash/path" }]));
+        var hydrus = new FakeHydrusClient((_, _, _) => Task.FromResult<IReadOnlyList<HydrusFile>>(
+            [new HydrusFile(1, "File", "image/png") { CreatedAt = created, UpdatedAt = updated, Path = "hydrus/path" }]));
+
+        var groups = await new LibrarySearchService(stash, hydrus)
+            .SearchAsync([StashInstance("Stash")], [HydrusInstance("Hydrus")], "query");
+
+        foreach (var group in groups.Where(group => group.Provider == "Stash" || group.Category == "Files"))
+        {
+            var item = Assert.Single(group.Items);
+            Assert.Equal(created, item.CreatedAt);
+            Assert.Equal(updated, item.UpdatedAt);
+            Assert.Equal(group.Provider == "Stash" ? "stash/path" : "hydrus/path", item.Path);
+        }
+    }
+
+    [Fact]
     public async Task SearchAsync_MapsAllEightStashCategories()
     {
         var stash = new FakeStashClient((instance, kind, _, _) =>

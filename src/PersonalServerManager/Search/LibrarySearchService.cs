@@ -7,8 +7,11 @@ namespace PersonalServerManager.Search;
 
 public enum LibraryMediaType { Image, Video, Performer, Collection, TextEbook, Comic, Studio, Tag, Marker, Note }
 
+public enum LibrarySort { Default, TitleAscending, TitleDescending, DateNewest, DateOldest, Random }
+
 public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, Uri? PreviewUrl = null,
-    LibraryMediaType MediaType = LibraryMediaType.Image, string? Description = null);
+    LibraryMediaType MediaType = LibraryMediaType.Image, string? Description = null,
+    DateTimeOffset? CreatedAt = null, DateTimeOffset? UpdatedAt = null, string? Path = null);
 
 public record LibraryGroup(
     Guid InstanceId,
@@ -27,6 +30,23 @@ public record LibraryTypeGroup(LibraryMediaType Type, IReadOnlyList<LibraryTypeI
 public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydrusClient hydrusClient,
     LocalLibraryClient? localClient = null)
 {
+    public static IReadOnlyList<LibraryTypeItem> SortItems(IReadOnlyList<LibraryTypeItem> items, LibrarySort sort)
+    {
+        static string Title(LibraryTypeItem entry) => string.IsNullOrWhiteSpace(entry.Item.Title)
+            ? entry.Item.Path ?? string.Empty : entry.Item.Title;
+        static DateTimeOffset? Date(LibraryTypeItem entry) => entry.Item.CreatedAt ?? entry.Item.UpdatedAt;
+
+        return sort switch
+        {
+            LibrarySort.TitleAscending => items.OrderBy(Title, StringComparer.CurrentCultureIgnoreCase).ToArray(),
+            LibrarySort.TitleDescending => items.OrderByDescending(Title, StringComparer.CurrentCultureIgnoreCase).ToArray(),
+            LibrarySort.DateNewest => items.OrderBy(entry => Date(entry) is null).ThenByDescending(Date).ToArray(),
+            LibrarySort.DateOldest => items.OrderBy(entry => Date(entry) is null).ThenBy(Date).ToArray(),
+            LibrarySort.Random => items.OrderBy(_ => Random.Shared.Next()).ToArray(),
+            _ => items
+        };
+    }
+
     public static IReadOnlyList<LibraryTypeGroup> GroupByType(IReadOnlyList<LibraryGroup> groups) =>
         groups.SelectMany(source => source.Items.Select(item => new LibraryTypeItem(item, source)))
             .GroupBy(entry => entry.Item.MediaType)
@@ -80,7 +100,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                                 StashSearchKind.Markers => LibraryMediaType.Marker,
                                 StashSearchKind.Galleries or StashSearchKind.Groups => LibraryMediaType.Collection,
                                 _ => LibraryMediaType.Image
-                            }))
+                            }, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, Path: item.Path))
                         .ToArray()));
             }
         }
@@ -93,7 +113,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                     .Where(entry => entry.Type.HasValue)
                     .Take(limit)
                     .Select(entry => new LibraryItem(entry.Item.Id.ToString(CultureInfo.InvariantCulture), entry.Item.Title, entry.Item.Mime, null,
-                        PreviewService.CreateLink("hydrus", instance.Id, "files", entry.Item.Id.ToString(CultureInfo.InvariantCulture)), entry.Type!.Value))
+                        PreviewService.CreateLink("hydrus", instance.Id, "files", entry.Item.Id.ToString(CultureInfo.InvariantCulture)), entry.Type!.Value,
+                        CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path))
                     .ToArray()));
             tasks.Add(SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Tags", null,
                 async () => (await hydrusClient.SearchTagsAsync(instance, capturedQuery, limit, cancellationToken))

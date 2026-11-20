@@ -2,7 +2,12 @@ namespace PersonalServerManager.Hydrus;
 
 public sealed record HydrusInstance(Guid Id, string Name, Uri ApiEndpoint, string? ApiKey);
 
-public sealed record HydrusFile(long Id, string Title, string Mime);
+public sealed record HydrusFile(long Id, string Title, string Mime)
+{
+    public DateTimeOffset? CreatedAt { get; init; }
+    public DateTimeOffset? UpdatedAt { get; init; }
+    public string? Path { get; init; }
+}
 
 public sealed record HydrusTag(string Name, long Count);
 
