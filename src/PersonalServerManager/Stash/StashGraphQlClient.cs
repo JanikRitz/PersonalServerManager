@@ -154,7 +154,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         if (!response.IsSuccessStatusCode)
         {
             response.Dispose();
-            throw new HttpRequestException($"Stash returned HTTP {(int)response.StatusCode}.");
+            throw new HttpRequestException($"Stash returned HTTP {(int)response.StatusCode}.", null, response.StatusCode);
         }
 
         return response;

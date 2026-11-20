@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Stash;
@@ -20,7 +21,10 @@ public record LibraryGroup(
     string Category,
     IReadOnlyList<LibraryItem> Items,
     Uri? SearchUrl,
-    string? Error);
+    string? Error)
+{
+    public bool BackendUnreachable { get; init; }
+}
 
 public record LibraryTypeItem(LibraryItem Item, LibraryGroup Source);
 
@@ -80,15 +84,14 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
         var capturedQuery = query.Trim();
         var tags = ParseHydrusTags(capturedQuery);
         using var semaphore = new SemaphoreSlim(6);
-        var tasks = new List<Task<LibraryGroup>>();
+        var tasks = new List<Task<LibraryGroup[]>>();
 
         foreach (var instance in stashInstances)
         {
-            foreach (var kind in Enum.GetValues<StashSearchKind>())
-            {
-                tasks.Add(SearchGroupAsync(instance.Id, instance.Name, "Stash", kind.ToString(),
+            tasks.Add(SearchBackendAsync(backend => Enum.GetValues<StashSearchKind>().Select(kind =>
+                SearchGroupAsync(instance.Id, instance.Name, "Stash", kind.ToString(),
                     new Uri(instance.WebUiUrl, $"{(kind == StashSearchKind.Markers ? "scenes/markers" : kind.ToString().ToLowerInvariant())}?q={Uri.EscapeDataString(capturedQuery)}"),
-                    async () => (await stashClient.SearchAsync(instance, kind, capturedQuery, limit, cancellationToken))
+                    async token => (await stashClient.SearchAsync(instance, kind, capturedQuery, limit, token))
                         .Take(limit)
                         .Select(item => new LibraryItem(item.Id, item.Title, kind.ToString(), item.ItemUrl,
                             PreviewService.CreateLink("stash", instance.Id, kind.ToString(), item.Id), kind switch
@@ -101,27 +104,29 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                                 StashSearchKind.Galleries or StashSearchKind.Groups => LibraryMediaType.Collection,
                                 _ => LibraryMediaType.Image
                             }, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, Path: item.Path))
-                        .ToArray()));
-            }
+                        .ToArray(), backend))));
         }
 
         foreach (var instance in hydrusInstances)
         {
-            tasks.Add(SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Files", null,
-                async () => (await hydrusClient.SearchAsync(instance, tags, limit, cancellationToken))
+            tasks.Add(SearchBackendAsync(backend =>
+            [
+                SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Files", null,
+                async token => (await hydrusClient.SearchAsync(instance, tags, limit, token))
                     .Select(item => (Item: item, Type: HydrusMediaType(item.Mime)))
                     .Where(entry => entry.Type.HasValue)
                     .Take(limit)
                     .Select(entry => new LibraryItem(entry.Item.Id.ToString(CultureInfo.InvariantCulture), entry.Item.Title, entry.Item.Mime, null,
                         PreviewService.CreateLink("hydrus", instance.Id, "files", entry.Item.Id.ToString(CultureInfo.InvariantCulture)), entry.Type!.Value,
                         CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path))
-                    .ToArray()));
-            tasks.Add(SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Tags", null,
-                async () => (await hydrusClient.SearchTagsAsync(instance, capturedQuery, limit, cancellationToken))
+                    .ToArray(), backend),
+                SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Tags", null,
+                async token => (await hydrusClient.SearchTagsAsync(instance, capturedQuery, limit, token))
                     .Take(limit)
                     .Select(tag => new LibraryItem(tag.Name, tag.Name, tag.Count.ToString(CultureInfo.InvariantCulture),
                         new Uri($"/?q={Uri.EscapeDataString(tag.Name)}", UriKind.Relative), MediaType: LibraryMediaType.Tag))
-                    .ToArray()));
+                        .ToArray(), backend)
+                    ]));
         }
 
         var client = localClient ?? new LocalLibraryClient();
@@ -134,15 +139,38 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                 LocalLibraryKind.CalibreComic => "Comics",
                 _ => throw new ArgumentOutOfRangeException(nameof(localLibraries))
             };
-            tasks.Add(SearchGroupAsync(instance.Id, instance.Name,
+            tasks.Add(Task.WhenAll(SearchGroupAsync(instance.Id, instance.Name,
                 instance.Kind == LocalLibraryKind.Notes ? "Notes" : "Calibre", category,
                 new Uri($"/libraries/{instance.Id:D}?q={Uri.EscapeDataString(capturedQuery)}", UriKind.Relative),
-                async () => (await client.SearchAsync(instance, capturedQuery, limit, cancellationToken)).Take(limit).ToArray()));
+                async token => (await client.SearchAsync(instance, capturedQuery, limit, token)).Take(limit).ToArray())));
         }
 
         var groups = await Task.WhenAll(tasks);
         cancellationToken.ThrowIfCancellationRequested();
-        return groups;
+        return groups.SelectMany(backend => backend).ToArray();
+
+        async Task<LibraryGroup[]> SearchBackendAsync(Func<CancellationTokenSource, IEnumerable<Task<LibraryGroup>>> search)
+        {
+            using var backend = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var results = await Task.WhenAll(search(backend));
+            if (backend.IsCancellationRequested)
+            {
+                var reportOutage = true;
+                for (var index = 0; index < results.Length; index++)
+                {
+                    if (results[index].Error is not null)
+                    {
+                        results[index] = results[index] with
+                        {
+                            BackendUnreachable = true,
+                            Error = reportOutage ? "Backend is not reachable." : null
+                        };
+                        reportOutage = false;
+                    }
+                }
+            }
+            return results;
+        }
 
         async Task<LibraryGroup> SearchGroupAsync(
             Guid instanceId,
@@ -150,19 +178,29 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             string provider,
             string category,
             Uri? searchUrl,
-            Func<Task<IReadOnlyList<LibraryItem>>> search)
+            Func<CancellationToken, Task<IReadOnlyList<LibraryItem>>> search,
+            CancellationTokenSource? backend = null)
         {
-            await semaphore.WaitAsync(cancellationToken);
+            var token = backend?.Token ?? cancellationToken;
             try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var items = await search();
-                cancellationToken.ThrowIfCancellationRequested();
-                return new LibraryGroup(instanceId, instanceName, provider, category, items, searchUrl, null);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
+                await semaphore.WaitAsync(token);
+                try
+                {
+                    token.ThrowIfCancellationRequested();
+                    var items = await search(token);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return new LibraryGroup(instanceId, instanceName, provider, category, items, searchUrl, null);
+                }
+                catch (Exception exception) when (backend is not null && !token.IsCancellationRequested && IsBackendUnreachable(exception))
+                {
+                    backend.Cancel();
+                    throw;
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
             }
             catch (Exception)
             {
@@ -170,12 +208,12 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                 return new LibraryGroup(instanceId, instanceName, provider, category, [], searchUrl,
                     "Search failed. Check the instance connection and try again.");
             }
-            finally
-            {
-                semaphore.Release();
-            }
         }
     }
+
+    private static bool IsBackendUnreachable(Exception exception) => exception is
+        HttpRequestException { StatusCode: null or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout }
+        or TaskCanceledException;
 
     private static LibraryMediaType? HydrusMediaType(string mime)
     {

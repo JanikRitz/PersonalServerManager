@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using Microsoft.Data.Sqlite;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.LocalLibraries;
@@ -229,7 +230,7 @@ public sealed class LibrarySearchServiceTests
         var healthyHydrus = HydrusInstance("Healthy files");
         Exception failure = providerCancellation
             ? new OperationCanceledException("private-key provider timeout")
-            : new HttpRequestException("private-key provider response");
+            : new HttpRequestException("private-key provider response", null, HttpStatusCode.BadRequest);
         var stash = new FakeStashClient((instance, kind, _, _) =>
             instance.Id == failingStash.Id && kind == StashSearchKind.Images
                 ? Task.FromException<IReadOnlyList<StashSearchResult>>(failure)
@@ -256,6 +257,60 @@ public sealed class LibrarySearchServiceTests
             group => Assert.Single(group.Items));
         Assert.All(LibrarySearchService.GroupByType(groups).SelectMany(group => group.Sources), source => Assert.Null(source.Error));
         Assert.Equal(2, groups.Count(group => group.Error is not null));
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(HttpStatusCode.BadGateway, false)]
+    [InlineData(null, true)]
+    public async Task SearchAsync_ReportsAnOutageOnceAndCancelsOnlyThatBackendsWork(HttpStatusCode? status, bool timedOut)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var offline = StashInstance("Offline Stash");
+        var healthy = StashInstance("Healthy Stash");
+        var sixStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var canceled = 0;
+        var stash = new FakeStashClient(async (instance, kind, _, token) =>
+        {
+            if (instance.Id == healthy.Id)
+            {
+                return [StashResult(instance, kind)];
+            }
+
+            if (Interlocked.Increment(ref calls) == 6)
+            {
+                sixStarted.SetResult();
+            }
+            if (kind == StashSearchKind.Scenes)
+            {
+                await sixStarted.Task.WaitAsync(token);
+                throw timedOut ? new TaskCanceledException("private timeout details")
+                    : new HttpRequestException("private connection details", null, status);
+            }
+
+            try
+            {
+                await Task.Delay(Timeout.Infinite, token);
+                return [];
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                Interlocked.Increment(ref canceled);
+                throw;
+            }
+        });
+
+        var groups = await new LibrarySearchService(stash, new FakeHydrusClient())
+            .SearchAsync([offline, healthy], [], "query", cancellation.Token);
+
+        Assert.Equal(6, calls);
+        Assert.Equal(5, canceled);
+        var warning = Assert.Single(groups, group => group.Error is not null);
+        Assert.Equal(offline.Id, warning.InstanceId);
+        Assert.Equal("Backend is not reachable.", warning.Error);
+        Assert.All(groups.Where(group => group.InstanceId == offline.Id), group => Assert.True(group.BackendUnreachable));
+        Assert.Equal(8, groups.Count(group => group.InstanceId == healthy.Id && group.Items.Count == 1));
     }
 
     [Fact]
@@ -335,7 +390,7 @@ public sealed class LibrarySearchServiceTests
         var calls = 0;
         async Task WaitForCancellation(CancellationToken token)
         {
-            Assert.Equal(cancellation.Token, token);
+            Assert.True(token.CanBeCanceled);
             if (Interlocked.Increment(ref calls) == 6)
             {
                 sixStarted.SetResult();
@@ -441,7 +496,7 @@ public sealed class LibrarySearchServiceTests
         var stash = new LimitAwareStashClient((instance, kind, query, selectedLimit, token) =>
         {
             Assert.Equal(limit, selectedLimit);
-            Assert.Equal(cancellation.Token, token);
+            Assert.True(token.CanBeCanceled);
             Assert.Equal("query", query);
             return Task.FromResult<IReadOnlyList<StashSearchResult>>(Enumerable.Range(1, 30)
                 .Select(index => StashResult(instance, kind, index)).ToArray());
@@ -449,7 +504,7 @@ public sealed class LibrarySearchServiceTests
         var hydrus = new LimitAwareHydrusClient((_, tags, selectedLimit, token) =>
         {
             Assert.Equal(limit, selectedLimit);
-            Assert.Equal(cancellation.Token, token);
+            Assert.True(token.CanBeCanceled);
             Assert.Equal(new[] { "query" }, tags);
             string[] mimes = ["image/png", "video/webm", "application/pdf", "application/x-cbz"];
             return Task.FromResult<IReadOnlyList<HydrusFile>>(Enumerable.Range(1, 32)
@@ -568,7 +623,7 @@ public sealed class LibrarySearchServiceTests
         {
             Assert.Equal("original, query", query);
             Assert.Equal(limit, selectedLimit);
-            Assert.Equal(cancellation.Token, token);
+            Assert.True(token.CanBeCanceled);
             return Task.FromResult<IReadOnlyList<HydrusTag>>(Enumerable.Range(0, 30)
                 .Select(index => new HydrusTag(index == 0 ? name : $"tag:{index}", 6000000000L + index)).ToArray());
         });
@@ -593,7 +648,8 @@ public sealed class LibrarySearchServiceTests
     [InlineData(true, true)]
     public async Task SearchAsync_HydrusFilesAndTagsFailIndependently(bool failTags, bool providerCancellation)
     {
-        Exception failure = providerCancellation ? new OperationCanceledException("private-key") : new HttpRequestException("private-key");
+        Exception failure = providerCancellation ? new OperationCanceledException("private-key")
+            : new HttpRequestException("private-key", null, HttpStatusCode.BadRequest);
         var hydrus = new FakeHydrusClient(
             (_, _, _) => !failTags ? Task.FromException<IReadOnlyList<HydrusFile>>(failure)
                 : Task.FromResult<IReadOnlyList<HydrusFile>>([new HydrusFile(1, "File", "image/png")]),
@@ -621,7 +677,7 @@ public sealed class LibrarySearchServiceTests
         var hydrus = new FakeHydrusClient(searchTags: async (_, _, selectedLimit, token) =>
         {
             Assert.Equal(limit, selectedLimit);
-            Assert.Equal(cancellation.Token, token);
+            Assert.True(token.CanBeCanceled);
             started.SetResult();
             await Task.Delay(Timeout.Infinite, token);
             return [];

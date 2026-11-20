@@ -81,7 +81,10 @@
                 }
                 @foreach (var failure in (_expandedGroups ?? _groups).Where(group => group.Error is not null))
                 {
-                    <p class="instance-error" role="status">@failure.InstanceName / @failure.Category: @failure.Error</p>
+                    var source = failure.BackendUnreachable
+                        ? $"{failure.Provider} / {failure.InstanceName}"
+                        : $"{failure.InstanceName} / {failure.Category}";
+                    <p class="instance-error" role="status">@source: @failure.Error</p>
                 }
                 @if (!_isSearching && _typeGroups.Count == 0)
                 {
@@ -265,10 +268,20 @@
         {
             if (_expandedGroups is null)
             {
-                var groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, limit: 25, localLibraries: _localLibraries);
-                _expandedGroups = groups.Select(group => group.Error is null ? group : group with
+                var unavailable = _groups.Where(group => group.BackendUnreachable)
+                    .Select(group => (group.Provider, group.InstanceId)).ToHashSet();
+                var groups = await LibrarySearch.SearchAsync(
+                    _instances.Where(instance => !unavailable.Contains(("Stash", instance.Id))).ToArray(),
+                    _hydrusInstances.Where(instance => !unavailable.Contains(("Hydrus", instance.Id))).ToArray(),
+                    _submittedQuery, _lifetime.Token, limit: 25, localLibraries: _localLibraries);
+                var refreshed = groups.ToDictionary(group => (group.Provider, group.InstanceId, group.Category));
+                _expandedGroups = _groups.Select(original =>
                 {
-                    Items = _groups.FirstOrDefault(original => original.InstanceId == group.InstanceId && original.Category == group.Category)?.Items ?? []
+                    if (!refreshed.TryGetValue((original.Provider, original.InstanceId, original.Category), out var group))
+                    {
+                        return original;
+                    }
+                    return group.Error is null && !group.BackendUnreachable ? group : group with { Items = original.Items };
                 }).ToArray();
                 ApplySort();
             }
