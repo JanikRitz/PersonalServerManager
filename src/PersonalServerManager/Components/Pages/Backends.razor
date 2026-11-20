@@ -153,7 +153,6 @@
             await LoadInstancesAsync();
             await ReloadHydrusAsync();
             await ReloadLocalAsync();
-            await RefreshObservationsAsync();
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
     }
@@ -215,6 +214,12 @@
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         try
         {
+            await RefreshObservationsAsync();
+            if (!_disposed)
+            {
+                StateHasChanged();
+            }
+
             while (await timer.WaitForNextTickAsync(_token))
             {
                 await InvokeAsync(async () =>
