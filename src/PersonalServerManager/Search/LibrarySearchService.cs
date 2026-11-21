@@ -12,7 +12,10 @@ public enum LibrarySort { Default, TitleAscending, TitleDescending, DateNewest, 
 
 public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, Uri? PreviewUrl = null,
     LibraryMediaType MediaType = LibraryMediaType.Image, string? Description = null,
-    DateTimeOffset? CreatedAt = null, DateTimeOffset? UpdatedAt = null, string? Path = null, Uri? ReaderUrl = null);
+    DateTimeOffset? CreatedAt = null, DateTimeOffset? UpdatedAt = null, string? Path = null, Uri? ReaderUrl = null)
+{
+    public string? FileFormat { get; init; }
+}
 
 public record LibraryGroup(
     Guid InstanceId,
@@ -118,7 +121,11 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                                 StashSearchKind.Markers => LibraryMediaType.Marker,
                                 StashSearchKind.Galleries or StashSearchKind.Groups => LibraryMediaType.Collection,
                                 _ => LibraryMediaType.Image
-                            }, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, Path: item.Path))
+                            }, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, Path: item.Path)
+                        {
+                            FileFormat = kind is StashSearchKind.Images or StashSearchKind.Scenes
+                                ? FormatFromPath(item.Path) : null
+                        })
                         .ToArray(), backend))));
         }
 
@@ -134,7 +141,11 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                     .Select(entry => new LibraryItem(entry.Item.Id.ToString(CultureInfo.InvariantCulture), entry.Item.Title, entry.Item.Mime,
                         HydrusClientMedia.CanDisplay(entry.Item.Mime) ? HydrusClientMedia.CreateLink(instance.Id, entry.Item.Id) : null,
                         PreviewService.CreateLink("hydrus", instance.Id, "files", entry.Item.Id.ToString(CultureInfo.InvariantCulture)), entry.Type!.Value,
-                        CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path))
+                        CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path)
+                    {
+                        FileFormat = entry.Type is LibraryMediaType.Image or LibraryMediaType.Video
+                            ? FormatFromPath(entry.Item.Path) ?? HydrusFileFormat(entry.Item.Mime) : null
+                    })
                     .ToArray(), backend),
                 SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Tags", null,
                 async token => (await hydrusClient.SearchTagsAsync(instance, capturedQuery, limit, sort, token))
@@ -229,6 +240,30 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
     private static bool IsBackendUnreachable(Exception exception) => exception is
         HttpRequestException { StatusCode: null or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout }
         or TaskCanceledException;
+
+    private static string? FormatFromPath(string? path) => Path.GetExtension(path) is { Length: > 1 } extension
+        ? NormalizeFormat(extension[1..]) : null;
+
+    private static string? NormalizeFormat(string format) =>
+        format.Length is > 0 and <= 12 && format.All(char.IsAsciiLetterOrDigit) ? format.ToUpperInvariant() : null;
+
+    private static string? HydrusFileFormat(string mime)
+    {
+        var normalized = mime.Split(';', 2)[0].Trim().ToLowerInvariant();
+        var subtype = normalized[(normalized.IndexOf('/') + 1)..];
+        return subtype switch
+        {
+            "svg+xml" => "SVG",
+            "vnd.microsoft.icon" or "x-icon" => "ICO",
+            "quicktime" => "MOV",
+            "matroska" or "x-matroska" => "MKV",
+            "x-msvideo" => "AVI",
+            "x-ms-wmv" => "WMV",
+            "x-ms-asf" => "ASF",
+            "x-flv" => "FLV",
+            _ => NormalizeFormat(subtype.StartsWith("x-", StringComparison.Ordinal) ? subtype[2..] : subtype)
+        };
+    }
 
     private static LibraryMediaType? HydrusMediaType(string mime)
     {

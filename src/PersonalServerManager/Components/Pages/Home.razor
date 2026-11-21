@@ -117,16 +117,23 @@
                                 @foreach (var entry in group.Items.Take(expanded ? 25 : 5))
                                 {
                                     var item = entry.Item;
+                                    var sourceLabel = SourceLabel(entry.Source);
+                                    var badgeId = $"{resultsId}-{entry.Source.InstanceId:N}-{entry.Source.Category}-{Uri.EscapeDataString(item.Id)}";
+                                    var descriptions = item.FileFormat is null ? $"{badgeId}-source" : $"{badgeId}-source {badgeId}-format";
                                     <li class="media-tile" @key="(entry.Source.InstanceId, entry.Source.Category, item.Id)">
-                                        <a class="thumbnail-link" href="@(item.ReaderUrl ?? item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ReaderUrl is not null ? $"Read {item.Title}" : item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")">
+                                        <a class="thumbnail-link" href="@(item.ReaderUrl ?? item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ReaderUrl is not null ? $"Read {item.Title}" : item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")" aria-describedby="@descriptions">
                                             <span class="thumbnail-placeholder" aria-hidden="true"><MudIcon Icon="@TypeIcon(group.Type)" /></span>
                                             @if (item.PreviewUrl is not null)
                                             {
                                                 <img class="thumbnail" src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
                                                 <span class="thumbnail-zoom" aria-hidden="true"><img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.parentElement.hidden=true" /></span>
                                             }
+                                            @if (item.FileFormat is not null)
+                                            {
+                                                <span class="format-badge" id="@($"{badgeId}-format")">@item.FileFormat</span>
+                                            }
+                                            <span class="source-badge" id="@($"{badgeId}-source")" title="@sourceLabel">@sourceLabel</span>
                                         </a>
-                                        <small class="media-source">@entry.Source.Provider / @entry.Source.InstanceName</small>
                                         <span class="media-title" title="@item.Title">@item.Title</span>
                                         @if (item.ReaderUrl is not null && item.ItemUrl is not null)
                                         {
@@ -338,6 +345,20 @@
             }
             return group.Error is null && !group.BackendUnreachable ? group : group with { Items = original.Items };
         }).ToArray();
+    }
+
+    private string SourceLabel(LibraryGroup source)
+    {
+        var instanceCount = source.Provider switch
+        {
+            "Stash" => _instances.Count,
+            "Hydrus" => _hydrusInstances.Count,
+            "Calibre" => _localLibraries.Count(instance => instance.IsCalibre),
+            "Notes" => _localLibraries.Count(instance => instance.Kind == LocalLibraryKind.Notes),
+            _ => 0
+        };
+        return instanceCount == 1 && string.Equals(source.Provider, source.InstanceName, StringComparison.OrdinalIgnoreCase)
+            ? source.Provider : $"{source.Provider} / {source.InstanceName}";
     }
 
     private void ApplySort()

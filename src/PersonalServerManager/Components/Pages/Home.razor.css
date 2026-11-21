@@ -71,12 +71,14 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--teal); outline-
 .thumbnail-link { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--line); border-radius: 4px; background: #e8ede8; color: #8a9b91; }
 .thumbnail-placeholder { position: absolute; display: grid; place-items: center; inset: 0; }
 .thumbnail { position: absolute; inset: 0; display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+.format-badge, .source-badge { position: absolute; padding: 2px 5px; border-radius: 4px; background: #17251f; color: #fff; font: 600 10px/1.4 "Segoe UI", sans-serif; }
+.format-badge { top: 6px; right: 6px; }
+.source-badge { bottom: 6px; left: 6px; max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thumbnail[hidden], .thumbnail-zoom[hidden] { display: none; }
 .thumbnail-zoom { display: none; position: fixed; z-index: 20; right: 24px; bottom: 24px; max-width: calc(100vw - 48px); max-height: calc(100dvh - 100px); padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: #fff; box-shadow: 0 12px 48px #132a2440; pointer-events: none; }
 .thumbnail-zoom img { display: block; width: auto; height: auto; max-width: min(720px, calc(100vw - 66px)); max-height: calc(100dvh - 118px); object-fit: contain; }
 .thumbnail-link:focus-visible .thumbnail-zoom { display: block; }
-.media-source { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.media-title { display: -webkit-box; margin-top: 3px; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.media-title { display: -webkit-box; margin-top: 8px; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .source-actions { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); }
 @media (hover: hover) and (pointer: fine) { .thumbnail-link:hover .thumbnail-zoom { display: block; } }
 @media (max-width: 1000px) { .media-grid, .loading-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }

@@ -26,6 +26,7 @@ public sealed class LocalLibraryClientTests : IDisposable
         Assert.Equal(new DateTimeOffset(File.GetCreationTimeUtc(path)), item.CreatedAt);
         Assert.Equal(new DateTimeOffset(File.GetLastWriteTimeUtc(path)), item.UpdatedAt);
         Assert.Equal(Path.Combine("nested", "match.txt"), item.Path);
+        Assert.Equal("TXT", item.FileFormat);
     }
 
     [Fact]
@@ -38,6 +39,8 @@ public sealed class LocalLibraryClientTests : IDisposable
         var instance = Instance();
         var items = await _client.SearchAsync(instance, "match", 25);
         Assert.Equal(2, items.Count);
+        Assert.Equal("MD", items.Single(item => item.Title == "MATCH.md").FileFormat);
+        Assert.Equal("MARKDOWN", items.Single(item => item.Title == "other.markdown").FileFormat);
         Assert.All(items, item =>
         {
             Assert.Equal(LibraryMediaType.Note, item.MediaType);

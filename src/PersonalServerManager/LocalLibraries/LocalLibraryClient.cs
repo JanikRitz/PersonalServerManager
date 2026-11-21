@@ -173,7 +173,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                         ComicFormats.Contains(format) ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                         Description: NormalizeDescription(JsonText(metadata, "comments") ?? ""),
                         CreatedAt: JsonDate(metadata, "timestamp"), UpdatedAt: JsonDate(metadata, "last_modified"),
-                        ReaderUrl: instance.GetCalibreReaderUrl(id, format)));
+                        ReaderUrl: instance.GetCalibreReaderUrl(id, format)) { FileFormat = format });
                 }
             }
             candidateOffset += ids.Length;
@@ -280,7 +280,10 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 items.Add(new LibraryItem(id, Path.GetFileName(path), "Note", ItemUrl(instance.Id, id),
                     MediaType: LibraryMediaType.Note, CreatedAt: fileInfo.CreationTimeUtc,
                     UpdatedAt: fileInfo.LastWriteTimeUtc, Path: Path.GetRelativePath(root, path),
-                    ReaderUrl: new Uri($"/libraries/{instance.Id:D}/read/{id}", UriKind.Relative)));
+                    ReaderUrl: new Uri($"/libraries/{instance.Id:D}/read/{id}", UriKind.Relative))
+                {
+                    FileFormat = Path.GetExtension(path).TrimStart('.').ToUpperInvariant()
+                });
                 if (items.Count == stopAt) break;
             }
             catch (Exception exception) when (IsFileFailure(exception))
@@ -433,7 +436,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 comicItem ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                 Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4)),
                 CreatedAt: ReadCalibreDate(reader, 5), UpdatedAt: ReadCalibreDate(reader, 6), Path: bookPath,
-                ReaderUrl: instance.GetCalibreReaderUrl(id, file.Value.Format)));
+                ReaderUrl: instance.GetCalibreReaderUrl(id, file.Value.Format)) { FileFormat = file.Value.Format });
                 if (items.Count == limit) break;
             }
             if (items.Count == limit) break;

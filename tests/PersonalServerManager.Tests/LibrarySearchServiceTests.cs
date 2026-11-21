@@ -57,7 +57,8 @@ public sealed class LibrarySearchServiceTests
     public async Task SearchAsync_MapsAllEightStashCategories()
     {
         var stash = new FakeStashClient((instance, kind, _, _) =>
-            Task.FromResult<IReadOnlyList<StashSearchResult>>([StashResult(instance, kind)]));
+            Task.FromResult<IReadOnlyList<StashSearchResult>>([StashResult(instance, kind) with
+                { Path = kind == StashSearchKind.Scenes ? "media/clip.Mp4" : "media/photo.webp" }]));
 
         var groups = await new LibrarySearchService(stash, new FakeHydrusClient())
             .SearchAsync([StashInstance("Stash")], [], "query");
@@ -67,6 +68,8 @@ public sealed class LibrarySearchServiceTests
             LibraryMediaType.Studio, LibraryMediaType.Tag, LibraryMediaType.Marker,
             LibraryMediaType.Collection, LibraryMediaType.Collection];
         Assert.Equal(expected, groups.Select(group => Assert.Single(group.Items).MediaType));
+        Assert.Equal(new string?[] { "MP4", "WEBP", null, null, null, null, null, null },
+            groups.Select(group => Assert.Single(group.Items).FileFormat));
     }
 
     [Fact]
@@ -187,7 +190,7 @@ public sealed class LibrarySearchServiceTests
             Assert.Equal("Files", group.Category);
             Assert.Null(group.SearchUrl);
             Assert.Equal(new LibraryItem("6000000001", "File 1", "image/png", new Uri($"/media/hydrus/{instance.Id}/6000000001", UriKind.Relative),
-                new Uri($"/previews/hydrus/{instance.Id}/files/6000000001", UriKind.Relative)), group.Items[0]);
+                new Uri($"/previews/hydrus/{instance.Id}/files/6000000001", UriKind.Relative)) { FileFormat = "PNG" }, group.Items[0]);
             Assert.Equal(new[] { "6000000001", "6000000002", "6000000003", "6000000004", "6000000005" }, group.Items.Select(item => item.Id));
         }
 
@@ -557,6 +560,22 @@ public sealed class LibrarySearchServiceTests
             Assert.Null(group.Error);
             Assert.Equal(group.Provider == "Hydrus" && group.Category == "Tags" ? 0 : 25, group.Items.Count);
         });
+    }
+
+    [Theory]
+    [InlineData("image/svg+xml", "SVG")]
+    [InlineData("VIDEO/MP4; charset=utf-8", "MP4")]
+    [InlineData("video/quicktime", "MOV")]
+    [InlineData("video/x-matroska", "MKV")]
+    public async Task SearchAsync_MapsHydrusMediaFormatsWithoutAFilePath(string mime, string format)
+    {
+        var hydrus = new FakeHydrusClient((_, _, _) =>
+            Task.FromResult<IReadOnlyList<HydrusFile>>([new HydrusFile(1, "File", mime)]));
+
+        var groups = await new LibrarySearchService(new FakeStashClient(), hydrus)
+            .SearchAsync([], [HydrusInstance("Hydrus")], "query");
+
+        Assert.Equal(format, Assert.Single(Assert.Single(groups, group => group.Category == "Files").Items).FileFormat);
     }
 
     [Theory]
