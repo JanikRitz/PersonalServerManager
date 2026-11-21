@@ -28,7 +28,7 @@
         <div class="page-heading">
             <h1>Server Management</h1>
             <div class="heading-meta">
-                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count).ToString("00")) <span>INSTANCES</span></span>
+                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count + _comicInstanceCount).ToString("00")) <span>INSTANCES</span></span>
             </div>
         </div>
         @if (_pageError is not null)
@@ -99,6 +99,7 @@
             <div class="hydrus-section"><HydrusInstances Changed="ReloadHydrusAsync" /></div>
             <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Calibre" Changed="ReloadLocalAsync" /></div>
             <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Notes" Changed="ReloadLocalAsync" /></div>
+            <div class="backend-section"><ComicCompanionControls CountChanged="count => _comicInstanceCount = count" /></div>
         </div>
     </main>
 
@@ -147,6 +148,7 @@
     private IReadOnlyList<StashInstance> _instances = [];
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
+    private int _comicInstanceCount;
     private Guid? _selectedInstanceId;
     private DateTimeOffset? _lastRefresh;
     private string _draftName = string.Empty;

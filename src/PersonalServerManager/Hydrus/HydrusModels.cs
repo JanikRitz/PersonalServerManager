@@ -36,4 +36,8 @@ public interface IHydrusClient
     Task<IReadOnlyList<HydrusTag>> SearchTagsAsync(HydrusInstance instance, string query, int limit, Search.LibrarySort sort,
         CancellationToken cancellationToken = default) => SearchTagsAsync(instance, query, limit, cancellationToken);
     Task<string> OpenSearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<HydrusFile>> SearchExpandedAsync(HydrusInstance instance, IReadOnlyList<string> tags, int limit,
+        Search.LibrarySort sort, CancellationToken cancellationToken = default) => SearchAsync(instance, tags, limit, sort, cancellationToken);
+    Task<string> OpenExpandedSearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default) =>
+        OpenSearchAsync(instance, tags, cancellationToken);
 }

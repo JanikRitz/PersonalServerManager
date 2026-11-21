@@ -76,12 +76,21 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         int limit,
         CancellationToken cancellationToken = default) => SearchAsync(instance, tags, limit, LibrarySort.Default, cancellationToken);
 
-    public async Task<IReadOnlyList<HydrusFile>> SearchAsync(
+    public Task<IReadOnlyList<HydrusFile>> SearchAsync(HydrusInstance instance, IReadOnlyList<string> tags,
+        int limit, LibrarySort sort, CancellationToken cancellationToken = default) =>
+        SearchFilesAsync(instance, tags, limit, sort, false, cancellationToken);
+
+    public Task<IReadOnlyList<HydrusFile>> SearchExpandedAsync(HydrusInstance instance, IReadOnlyList<string> tags,
+        int limit, LibrarySort sort, CancellationToken cancellationToken = default) =>
+        SearchFilesAsync(instance, tags, limit, sort, true, cancellationToken);
+
+    private async Task<IReadOnlyList<HydrusFile>> SearchFilesAsync(
         HydrusInstance instance,
         IReadOnlyList<string> tags,
         int limit,
         LibrarySort sort,
-        CancellationToken cancellationToken = default)
+        bool expandTags,
+        CancellationToken cancellationToken)
     {
         if (limit is not (5 or 25))
         {
@@ -98,12 +107,13 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             _ => throw new ArgumentOutOfRangeException(nameof(sort))
         };
         ValidateTags(tags);
+        IEnumerable<object> predicates = expandTags ? await ResolveSearchPredicatesAsync(instance, tags, cancellationToken) : tags;
         await _searchGate.WaitAsync(cancellationToken);
         try
         {
             using var timeout = CreateTimeout(cancellationToken);
             using var search = await SendAsync(instance, HttpMethod.Get,
-                $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(tags.Append($"system:limit={limit}")))}&return_file_ids=true&return_hashes=false{order}",
+                $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(predicates.Append($"system:limit={limit}")))}&return_file_ids=true&return_hashes=false{order}",
                 null, timeout.Token, cancellationToken);
             var ids = ReadIds(search.RootElement, limit);
             if (ids.Length == 0)
@@ -161,6 +171,19 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             throw new ArgumentException("Hydrus tag searches require 1 to 1024 nonblank characters.", nameof(query));
         }
 
+        var tags = await FindTagsAsync(instance, query, cancellationToken);
+        IEnumerable<HydrusTag> ordered = sort switch
+        {
+            LibrarySort.TitleAscending => tags.OrderBy(tag => tag.Name, StringComparer.CurrentCultureIgnoreCase),
+            LibrarySort.TitleDescending => tags.OrderByDescending(tag => tag.Name, StringComparer.CurrentCultureIgnoreCase),
+            LibrarySort.Random => tags.OrderBy(_ => Random.Shared.Next()),
+            _ => tags
+        };
+        return ordered.Take(limit).ToArray();
+    }
+
+    private async Task<List<HydrusTag>> FindTagsAsync(HydrusInstance instance, string query, CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         using var timeout = CreateTimeout(cancellationToken);
         using var payload = await SendAsync(instance, HttpMethod.Get,
@@ -186,23 +209,26 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             tags.Add(new HydrusTag(name, count));
         }
 
-        // Hydrus returns every matching tag, so sort the full list before applying the limit.
-        IEnumerable<HydrusTag> ordered = sort switch
-        {
-            LibrarySort.TitleAscending => tags.OrderBy(tag => tag.Name, StringComparer.CurrentCultureIgnoreCase),
-            LibrarySort.TitleDescending => tags.OrderByDescending(tag => tag.Name, StringComparer.CurrentCultureIgnoreCase),
-            LibrarySort.Random => tags.OrderBy(_ => Random.Shared.Next()),
-            _ => tags
-        };
-        return ordered.Take(limit).ToArray();
+        return tags;
     }
 
-    public async Task<string> OpenSearchAsync(
-        HydrusInstance instance,
-        IReadOnlyList<string> tags,
-        CancellationToken cancellationToken = default)
+    public Task<string> OpenSearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default)
     {
         ValidateTags(tags);
+        return OpenPageAsync(instance, tags, cancellationToken);
+    }
+
+    public async Task<string> OpenExpandedSearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default)
+    {
+        ValidateTags(tags);
+        return await OpenPageAsync(instance, await ResolveSearchPredicatesAsync(instance, tags, cancellationToken), cancellationToken);
+    }
+
+    private async Task<string> OpenPageAsync(
+        HydrusInstance instance,
+        IReadOnlyList<object> tags,
+        CancellationToken cancellationToken)
+    {
         using var timeout = CreateTimeout(cancellationToken);
         using var payload = await SendAsync(instance, HttpMethod.Post, "manage_pages/new_page",
             new { page_type = 6, page_name = "Personal Server Manager", tags, focus_page = true }, timeout.Token, cancellationToken);
@@ -314,6 +340,36 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         {
             throw new ArgumentException("The Hydrus endpoint must be an HTTP(S) URL without credentials, query, or fragment.", nameof(endpoint));
         }
+    }
+
+    private async Task<IReadOnlyList<object>> ResolveSearchPredicatesAsync(HydrusInstance instance,
+        IReadOnlyList<string> tags, CancellationToken cancellationToken)
+    {
+        var predicates = tags.Cast<object>().ToArray();
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(2));
+        var lookups = 0;
+        for (var index = 0; index < tags.Count && lookups < 8 && !budget.IsCancellationRequested; index++)
+        {
+            var tag = tags[index];
+            if (tag.Contains(':') || tag.Contains('*') || tag.StartsWith('-')) continue;
+            lookups++;
+            try
+            {
+                var matches = await FindTagsAsync(instance, tag, budget.Token);
+                var alternatives = matches.Select(match => match.Name)
+                    .Where(name => name.IndexOf(':') is > 0 and var separator && !name.Contains('*') &&
+                        name.AsSpan(separator + 1).Equals(tag, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Take(16).Prepend(tag).ToArray();
+                if (alternatives.Length > 1) predicates[index] = alternatives;
+            }
+            catch (Exception exception) when (exception is HttpRequestException or InvalidDataException or OperationCanceledException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return predicates;
     }
 
     private static void ValidateTags(IReadOnlyList<string> tags)

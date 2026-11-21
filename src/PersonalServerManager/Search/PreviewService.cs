@@ -1,13 +1,15 @@
 using System.Globalization;
 using System.Net.Http.Headers;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.Management;
 using PersonalServerManager.Stash;
 
 namespace PersonalServerManager.Search;
 
 public sealed record PreviewImage(byte[] Content, string ContentType);
 
-public sealed class PreviewService(HttpClient client, IStashInstanceStore stashStore, IHydrusInstanceStore hydrusStore)
+public sealed class PreviewService(HttpClient client, IStashInstanceStore stashStore, IHydrusInstanceStore hydrusStore,
+    ComicCompanionService? comics = null)
 {
     private const int MaximumBytes = 5 * 1024 * 1024;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
@@ -59,6 +61,13 @@ public sealed class PreviewService(HttpClient client, IStashInstanceStore stashS
                 path = $"scene/{numericSceneId.ToString(CultureInfo.InvariantCulture)}/{path}";
             }
         }
+        else if (provider.Equals("comiccompanion", StringComparison.OrdinalIgnoreCase))
+        {
+            if (comics is null || (await comics.GetAllAsync(timeout.Token))
+                .FirstOrDefault(instance => instance.Id == instanceId)?.ApiUrl is not { } url) return null;
+            endpoint = url;
+            apiKey = null;
+        }
         else
         {
             var instance = (await hydrusStore.GetAllAsync(timeout.Token)).FirstOrDefault(item => item.Id == instanceId);
@@ -104,6 +113,14 @@ public sealed class PreviewService(HttpClient client, IStashInstanceStore stashS
     private static bool TryPath(string provider, string category, string itemId, out string path)
     {
         path = "";
+        if (provider.Equals("comiccompanion", StringComparison.OrdinalIgnoreCase) &&
+            category.Equals("comics", StringComparison.OrdinalIgnoreCase))
+        {
+            if (itemId.Length != 64 || !itemId.All(Uri.IsHexDigit)) return false;
+            path = $"media/thumbnail/{itemId}";
+            return true;
+        }
+
         if (itemId.Length == 0 || itemId.Length > 19 || itemId.Any(character => character is < '0' or > '9') ||
             !long.TryParse(itemId, NumberStyles.None, CultureInfo.InvariantCulture, out var id) || id <= 0)
             return false;
@@ -140,7 +157,7 @@ public static class PreviewEndpoints
                 var image = await previews.FetchAsync(provider, instanceId, category, itemId, context.RequestAborted);
                 return image is null ? Results.NotFound() : Results.File(image.Content, image.ContentType);
             }
-            catch (Exception exception) when (exception is HttpRequestException or InvalidDataException or IOException or ArgumentException or OperationCanceledException)
+            catch (Exception exception) when (exception is HttpRequestException or InvalidDataException or IOException or ArgumentException or OperationCanceledException or UnauthorizedAccessException or System.Text.Json.JsonException)
             {
                 return Results.StatusCode(StatusCodes.Status502BadGateway);
             }

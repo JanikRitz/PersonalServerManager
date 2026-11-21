@@ -77,6 +77,9 @@ builder.Services.AddSingleton(services => new ManagedCalibreServer(Path.Combine(
 builder.Services.AddHostedService(services => services.GetRequiredService<ManagedCalibreServer>());
 builder.Services.AddSingleton<ManagedBackendService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<ManagedBackendService>());
+builder.Services.AddComicCompanion(dataDirectory);
+builder.Services.AddHttpClient<ComicCompanionClient>(client => client.Timeout = TimeSpan.FromSeconds(8))
+    .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
 builder.Services.AddSingleton<NotesGitSyncService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<NotesGitSyncService>());
 builder.Services.AddSingleton<LocalLibraryClient>();

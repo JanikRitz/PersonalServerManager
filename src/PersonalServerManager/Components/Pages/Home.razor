@@ -4,11 +4,13 @@
 @using PersonalServerManager.Hydrus
 @using PersonalServerManager.Search
 @using PersonalServerManager.LocalLibraries
+@using PersonalServerManager.Management
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
 @inject IHydrusInstanceStore HydrusStore
 @inject IHydrusClient HydrusClient
 @inject LibrarySearchService LibrarySearch
+@inject ComicCompanionService ComicCompanion
 @inject ILocalLibraryStore LocalStore
 
 <PageTitle>Library search | Personal Server Manager</PageTitle>
@@ -35,7 +37,7 @@
                 <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search all libraries" autocomplete="off" />
                 <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _isSorting || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
             </form>
-            @if (_configurationLoaded && _instances.Count + _hydrusInstances.Count + _localLibraries.Count == 0 && _pageError is null)
+            @if (_configurationLoaded && _comicCompanionCount + _instances.Count + _hydrusInstances.Count + _localLibraries.Count == 0 && _pageError is null)
             {
                 <p class="empty-state">No backends connected. <a href="/backends">Add a backend</a></p>
             }
@@ -226,6 +228,8 @@
         _ => Icons.Material.Outlined.Image
     };
 
+    private int _comicCompanionCount;
+
     protected override async Task OnInitializedAsync()
     {
         try
@@ -233,8 +237,9 @@
             _instances = await InstanceStore.GetAllAsync(_lifetime.Token);
             _hydrusInstances = await HydrusStore.GetAllAsync(_lifetime.Token);
             _localLibraries = await LocalStore.GetAllAsync(_lifetime.Token);
+            _comicCompanionCount = (await ComicCompanion.GetAllAsync(_lifetime.Token)).Count;
         }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or UriFormatException or System.Security.Cryptography.CryptographicException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UriFormatException or System.Security.Cryptography.CryptographicException or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
             _pageError = "Backend configuration could not be loaded. Check the data directory and Windows account; existing data was not changed.";
         }
@@ -365,6 +370,7 @@
             "Hydrus" => _hydrusInstances.Count,
             "Calibre" => _localLibraries.Count(instance => instance.IsCalibre),
             "Notes" => _localLibraries.Count(instance => instance.Kind == LocalLibraryKind.Notes),
+            "Comic Companion" => _comicCompanionCount,
             _ => 0
         };
         return instanceCount == 1 && string.Equals(source.Provider, source.InstanceName, StringComparison.OrdinalIgnoreCase)
@@ -393,7 +399,7 @@
         _openingHydrus = instanceId;
         try
         {
-            await HydrusClient.OpenSearchAsync(instance, LibrarySearchService.ParseHydrusTags(_submittedQuery), _lifetime.Token);
+            await HydrusClient.OpenExpandedSearchAsync(instance, LibrarySearchService.ParseHydrusTags(_submittedQuery), _lifetime.Token);
             _hydrusActionMessage = $"Opened the full query in {instance.Name}'s Hydrus desktop client.";
         }
         catch (Exception exception) when (exception is HttpRequestException or InvalidDataException or JsonException or ArgumentException)

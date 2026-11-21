@@ -1,7 +1,7 @@
 # Personal Server Manager
 
 A Windows-hosted, owner-operated dashboard for Stash, Hydrus, Notes, and local
-or external Calibre libraries. Search media, metadata, notes, ebooks, and comics
+or external Calibre libraries, plus Hydrus comics via Comic Companion. Search media, metadata, notes, ebooks, and comics
 together, observe each endpoint independently, and start or stop managed servers.
 GPU policy and MCP management are not implemented. See
 [REQUIREMENTS.md](REQUIREMENTS.md) for the broader target.
@@ -55,7 +55,7 @@ Search and observation do not mutate Stash library contents.
 
 ## Managed Lifecycle
 
-Managed Stash, Hydrus, and each Calibre library have start/stop controls and an
+Managed Stash, Hydrus, Comic Companion, and each Calibre library have start/stop controls and an
 opt-in **Start with Personal Server Manager** setting, applied at app launch.
 The manager only stops processes it launched; it does not adopt existing processes
 or take over occupied ports. On normal app shutdown, Stash and Hydrus receive a
@@ -63,6 +63,28 @@ graceful GUI-close request, with up to 10 seconds to exit before a process-tree
 kill and a further bounded 5-second wait. Calibre's headless server is killed
 directly with a bounded 5-second exit wait. API health is separate from process
 state. External servers remain under their owner's lifecycle control.
+
+## Comic Companion
+
+Run the updated HydrusComicCompanion build, then open **Server Management** and
+select **Add Comic Companion instance**. Give each instance a name and an API base
+URL. The optional browser URL controls where results open. Use a URL reachable
+from the browser, especially when accessing the manager from another device.
+Each instance shows its catalog API status separately from its managed process state.
+
+To let the manager launch your existing installation, select **Managed**,
+select the source checkout or published folder, and use an HTTP URL with a specific
+local IP and port. For LAN access, use the server's LAN IP instead of loopback.
+Stop any independently running copy before starting the managed process.
+
+**Automatic sync** is off by default. When enabled for a managed process, it syncs
+at startup and again 60 minutes after each completed run by default. You can also
+sync manually in Companion. Run a regular sync once after upgrading to populate
+page tags for previously synced comics and imagesets. Search uses the cached
+catalog, including OCR from the configured Hydrus note or manual OCR sync.
+Comics appear alongside Calibre comics, and imagesets appear under **Collection**.
+Results open the first readable page or image directly. Keep the Companion service
+on a trusted LAN; its catalog endpoint does not require a login.
 
 ## Hydrus
 

@@ -143,6 +143,41 @@ public sealed class HydrusClientTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExpandedSearchUsesOnlyExactSubtagsAndPreservesExplicitPredicates(bool openPage)
+    {
+        var calls = 0;
+        using var client = new HydrusClient(new StubHandler((request, body) =>
+        {
+            calls++;
+            var query = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (calls == 1)
+            {
+                Assert.Equal("/add_tags/search_tags", request.RequestUri.AbsolutePath);
+                Assert.Equal("Lara Croft", query["search"].ToString());
+                return Json("""{"tags":[{"value":"character:lara croft (classic)","count":50},{"value":"character:lara croft","count":10},{"value":"title:lara croft","count":3}]}""");
+            }
+
+            Assert.Equal(openPage ? "/manage_pages/new_page" : "/get_files/search_files", request.RequestUri.AbsolutePath);
+            using var payload = JsonDocument.Parse(openPage ? body : query["tags"].ToString());
+            var predicates = openPage ? payload.RootElement.GetProperty("tags") : payload.RootElement;
+            Assert.Equal(new[] { "Lara Croft", "character:lara croft", "title:lara croft" }, predicates[0].Deserialize<string[]>());
+            Assert.Equal("creator:someone", predicates[1].GetString());
+            Assert.Equal("-tag", predicates[2].GetString());
+            if (!openPage) Assert.Equal("system:limit=5", predicates[3].GetString());
+            return Json(openPage ? """{"page_key":"abcd"}""" : """{"file_ids":[]}""");
+        }));
+
+        var tags = new[] { "Lara Croft", "creator:someone", "-tag" };
+        if (openPage)
+            Assert.Equal("abcd", await client.OpenExpandedSearchAsync(Instance(), tags));
+        else
+            Assert.Empty(await client.SearchExpandedAsync(Instance(), tags, 5, LibrarySort.Default));
+        Assert.Equal(2, calls);
+    }
+
+    [Theory]
     [InlineData(5)]
     [InlineData(25)]
     public async Task SearchAsync_RequestsAndClampsSelectedLimitIncludingMetadata(int limit)

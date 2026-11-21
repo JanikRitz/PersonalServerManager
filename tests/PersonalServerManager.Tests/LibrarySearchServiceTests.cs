@@ -1,8 +1,11 @@
 using System.Collections.Concurrent;
 using System.Net;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging.Abstractions;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.LocalLibraries;
+using PersonalServerManager.Management;
 using PersonalServerManager.Search;
 using PersonalServerManager.Stash;
 using Xunit;
@@ -11,6 +14,75 @@ namespace PersonalServerManager.Tests;
 
 public sealed class LibrarySearchServiceTests
 {
+    [Fact]
+    public async Task SearchAsync_GroupsCompanionMediaWithDirectReadersAndPerInstanceCovers()
+    {
+        var root = Directory.CreateTempSubdirectory("psm-comic-search-");
+        try
+        {
+            using var service = new ComicCompanionService(Path.Combine(root.FullName, "companion.json"),
+                NullLogger<ComicCompanionService>.Instance);
+            var first = await service.SaveSettingsAsync(new(new("http://api.example.test/catalog"), new("https://reader.example.test/books")));
+            var second = await service.SaveSettingsAsync(new(new("http://other-api.example.test/catalog"), new("https://other-reader.example.test/books"))
+                { Id = Guid.NewGuid(), Name = "Other Companion" });
+            var hash = new string('a', 64);
+            using var http = new HttpClient(new CatalogHandler(request =>
+            {
+                Assert.Equal("/catalog/api/manager/comics", request.RequestUri!.AbsolutePath);
+                var query = QueryHelpers.ParseQuery(request.RequestUri.Query);
+                Assert.Equal("Lara Croft & allies", query["q"].ToString());
+                Assert.Equal("25", query["limit"].ToString());
+                Assert.Equal("TitleAscending", query["sort"].ToString());
+                var body = query["kind"].ToString() switch
+                {
+                    "Comic" => $$"""
+                        [{"id":11,"title":"A comic","coverHash":"{{hash}}","kind":"Comic","readerPath":"read/11/42/1"},
+                         {"id":11,"title":"Duplicate","kind":"Comic"},
+                         {"id":12,"title":"An invalid reader link","kind":"Comic","readerPath":"//untrusted.test/read/12/1/1"}]
+                        """,
+                    "Imageset" => $$"""
+                        [{"id":11,"title":"An imageset","coverHash":"{{hash}}","kind":"Imageset","readerPath":"collection/11/image/{{hash}}"}]
+                        """,
+                    _ => throw new InvalidOperationException("Missing catalog kind.")
+                };
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+            }));
+            var search = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(),
+                comicSettings: service, comicClient: new(http));
+
+            var results = await search.SearchAsync([], [], "Lara Croft & allies", limit: 25, sort: LibrarySort.TitleAscending);
+            var groups = LibrarySearchService.GroupByType(results);
+            var comics = Assert.Single(groups, group => group.Type == LibraryMediaType.Comic);
+            var collections = Assert.Single(groups, group => group.Type == LibraryMediaType.Collection);
+            Assert.Equal(4, comics.Items.Count);
+            Assert.Equal(2, collections.Items.Count);
+            foreach (var instance in new[] { first, second })
+            {
+                var comic = Assert.Single(comics.Items, entry => entry.Source.InstanceId == instance.Id && entry.Item.Id == "11");
+                var imageset = Assert.Single(collections.Items, entry => entry.Source.InstanceId == instance.Id);
+                Assert.Equal(instance.Name, comic.Source.InstanceName);
+                Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, "read/11/42/1"), comic.Item.ReaderUrl);
+                Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, $"collection/11/image/{hash}"), imageset.Item.ReaderUrl);
+                Assert.Null(comic.Item.ItemUrl);
+                Assert.Null(imageset.Item.ItemUrl);
+                Assert.Equal($"/previews/comiccompanion/{instance.Id:D}/comics/{hash}", imageset.Item.PreviewUrl!.OriginalString);
+                var fallback = Assert.Single(comics.Items, entry => entry.Source.InstanceId == instance.Id && entry.Item.Id == "12").Item;
+                Assert.Null(fallback.ReaderUrl);
+                Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, "comic/12"), fallback.ItemUrl);
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    private sealed class CatalogHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(respond(request));
+    }
+
     [Fact]
     public void SortItems_UsesTitleOrPathAndCreationBeforeUpdateWithMissingDatesLast()
     {

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.LocalLibraries;
+using PersonalServerManager.Management;
 using PersonalServerManager.Stash;
 
 namespace PersonalServerManager.Search;
@@ -37,7 +38,8 @@ public record LibraryTypeGroup(LibraryMediaType Type, IReadOnlyList<LibraryTypeI
     IReadOnlyList<LibraryGroup> Sources);
 
 public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydrusClient hydrusClient,
-    LocalLibraryClient? localClient = null)
+    LocalLibraryClient? localClient = null, ComicCompanionService? comicSettings = null,
+    ComicCompanionClient? comicClient = null)
 {
     public static IReadOnlyList<LibraryTypeItem> SortItems(IReadOnlyList<LibraryTypeItem> items, LibrarySort sort) =>
         SortItems(items, entry => entry.Item, sort);
@@ -138,7 +140,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             tasks.Add(SearchBackendAsync(backend =>
             [
                 SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Files", null,
-                async token => (await hydrusClient.SearchAsync(instance, tags, limit, sort, token))
+                async token => (await hydrusClient.SearchExpandedAsync(instance, tags, limit, sort, token))
                     .Select(item => (Item: item, Type: HydrusMediaType(item.Mime)))
                     .Where(entry => entry.Type.HasValue)
                     .Take(limit)
@@ -176,9 +178,36 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                 async token => (await client.SearchAsync(instance, capturedQuery, limit, token, sort: sort)).Take(limit).ToArray())));
         }
 
+        if (comicSettings is not null && comicClient is not null)
+        {
+            tasks.Add(SearchComicsAsync(comicSettings, comicClient));
+        }
+
         var groups = await Task.WhenAll(tasks);
         cancellationToken.ThrowIfCancellationRequested();
         return groups.SelectMany(backend => backend).ToArray();
+
+        async Task<LibraryGroup[]> SearchComicsAsync(ComicCompanionService settingsService, ComicCompanionClient companion)
+        {
+            IReadOnlyList<ComicCompanionSettings> instances;
+            try
+            {
+                instances = await settingsService.GetAllAsync(cancellationToken);
+            }
+            catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException)
+            {
+                return [new(ComicCompanionService.LegacyInstanceId, "Comic Companion", "Comic Companion", "Comics", [], null,
+                    "Comic Companion configuration could not be loaded.")];
+            }
+            var results = await Task.WhenAll(instances.Select(settings => SearchBackendAsync(backend =>
+            [
+                SearchGroupAsync(settings.Id, settings.Name, "Comic Companion", "Comics", null,
+                    token => companion.SearchAsync(settings, capturedQuery, limit, sort, imagesets: false, token), backend),
+                SearchGroupAsync(settings.Id, settings.Name, "Comic Companion", "Collections", null,
+                    token => companion.SearchAsync(settings, capturedQuery, limit, sort, imagesets: true, token), backend)
+            ])));
+            return results.SelectMany(groups => groups).ToArray();
+        }
 
         async Task<LibraryGroup[]> SearchBackendAsync(Func<CancellationTokenSource, IEnumerable<Task<LibraryGroup>>> search)
         {

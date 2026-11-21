@@ -1,0 +1,272 @@
+@using System.Text.Json
+@using PersonalServerManager.Management
+@inject IServiceProvider Services
+@inject IJSRuntime JavaScript
+@implements IAsyncDisposable
+
+@if (_service is not null)
+{
+    <section class="comic-instances" aria-labelledby="comic-companion-heading" aria-busy="@_busy">
+        <div class="section-heading">
+            <h2 id="comic-companion-heading">Comic Companion</h2>
+            <button class="icon-action" type="button" title="Add Comic Companion instance" aria-label="Add Comic Companion instance" disabled="@(_busy || !_loaded)" @onclick="() => OpenEditor(null)"><MudIcon Icon="@Icons.Material.Filled.Add" /></button>
+        </div>
+        @if (_error is not null)
+        {
+            <p role="alert">@_error</p>
+        }
+        @if (_loaded && _instances.Count == 0)
+        {
+            <p class="empty-message">No Comic Companion instances configured.</p>
+        }
+        <ul class="instance-list" aria-label="Comic Companion instances">
+            @foreach (var instance in _instances)
+            {
+                var status = _service.GetStatus(instance.Id);
+                _catalogAvailability.TryGetValue(instance.Id, out var available);
+                <li class="instance-row" @key="instance.Id">
+                    <span class="status-dot @(available is true ? "online" : available is false ? "offline" : null)" aria-hidden="true"></span>
+                    <div class="instance-copy">
+                        <strong>@instance.Name</strong>
+                        <small>@instance.ApiUrl?.AbsoluteUri</small>
+                        <small role="status">@(instance.IsManaged ? $"Managed: {status.Message}" : "External")</small>
+                        <small role="status">Catalog API: @(available is true ? "Available" : available is false ? "Unavailable" : "Checking...")</small>
+                    </div>
+                    <div class="actions">
+                        @if (instance.IsManaged)
+                        {
+                            <MudIconButton Icon="@Icons.Material.Filled.PlayArrow" title="Start" aria-label="@($"Start {instance.Name}")" Disabled="@(_busy || status.IsRunning)" OnClick="() => RunAsync(() => _service.StartInstanceAsync(instance.Id, _lifetime.Token))" Size="Size.Small" />
+                            <MudIconButton Icon="@Icons.Material.Filled.Stop" title="Stop" aria-label="@($"Stop {instance.Name}")" Disabled="@(_busy || !status.IsRunning)" OnClick="() => RunAsync(() => _service.StopInstanceAsync(instance.Id))" Size="Size.Small" />
+                            <MudIconButton Icon="@Icons.Material.Filled.Refresh" title="Restart" aria-label="@($"Restart {instance.Name}")" Disabled="@(_busy || !status.IsRunning)" OnClick="() => RunAsync(() => _service.RestartInstanceAsync(instance.Id, _lifetime.Token))" Size="Size.Small" />
+                        }
+                        @if (instance.EffectiveBrowserUrl is { } browser)
+                        {
+                            <MudIconButton Icon="@Icons.Material.Filled.OpenInNew" Href="@browser.AbsoluteUri" Target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="@($"Open {instance.Name}")" Size="Size.Small" />
+                        }
+                        <MudIconButton Icon="@Icons.Material.Filled.Edit" title="Edit" aria-label="@($"Edit {instance.Name}")" Disabled="@(_busy || status.IsRunning)" OnClick="() => OpenEditor(instance)" Size="Size.Small" />
+                        <MudIconButton Icon="@Icons.Material.Filled.DeleteOutline" title="Remove" aria-label="@($"Remove {instance.Name}")" Color="Color.Error" Disabled="@(_busy || status.IsRunning)" OnClick="() => RemoveAsync(instance)" Size="Size.Small" />
+                    </div>
+                </li>
+            }
+        </ul>
+        @if (_draft is { } draft)
+        {
+            <div class="editor-backdrop" role="presentation" @onclick="CloseEditor" @onkeydown="HandleEditorKey">
+                <section class="editor-panel" role="dialog" aria-modal="true" aria-labelledby="comic-editor-title" @onclick:stopPropagation>
+                    <MudFocusTrap>
+                        <div class="editor-heading">
+                            <h3 id="comic-editor-title">@(_instances.Any(instance => instance.Id == draft.Id) ? "Edit Comic Companion" : "Add Comic Companion")</h3>
+                            <button class="icon-action" type="button" title="Close Comic Companion editor" aria-label="Close Comic Companion editor" disabled="@_busy" @onclick="CloseEditor"><MudIcon Icon="@Icons.Material.Filled.Close" /></button>
+                        </div>
+                        @if (_editorError is not null)
+                        {
+                            <p role="alert">@_editorError</p>
+                        }
+                        <form @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                            <fieldset disabled="@_busy">
+                                <label>Instance name <input @ref="_nameInput" @bind="_name" maxlength="60" required /></label>
+                                <div class="mode-selector" role="radiogroup" aria-label="Comic Companion mode">
+                                    <label><input type="radio" name="comic-mode" checked="@(!_managed)" @onchange="() => _managed = false" /> External</label>
+                                    <label><input type="radio" name="comic-mode" checked="@_managed" @onchange="() => _managed = true" /> Managed</label>
+                                </div>
+                                <label>API base URL <input type="url" @bind="_apiUrl" placeholder="http://127.0.0.1:5053/" required /></label>
+                                <label>Browser URL (optional) <input type="url" @bind="_browserUrl" /></label>
+                                @if (_managed)
+                                {
+                                    <label>Installation folder <input @bind="_folder" required /></label>
+                                    <label class="checkbox"><input type="checkbox" @bind="_autostart" /> Start with Personal Server Manager</label>
+                                    <label class="checkbox"><input type="checkbox" @bind="_automaticSync" /> Automatic sync</label>
+                                    @if (_automaticSync)
+                                    {
+                                        <label>Sync interval (minutes) <input type="number" min="1" max="35791" required @bind="_syncMinutes" /></label>
+                                    }
+                                }
+                                <div class="editor-actions">
+                                    <button class="cancel-button" type="button" @onclick="CloseEditor">Cancel</button>
+                                    <button class="save-button" type="submit">@(_busy ? "Saving..." : "Save instance")</button>
+                                </div>
+                            </fieldset>
+                        </form>
+                    </MudFocusTrap>
+                </section>
+            </div>
+        }
+    </section>
+}
+
+@code {
+    [Parameter] public EventCallback<int> CountChanged { get; set; }
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private ComicCompanionService? _service;
+    private ComicCompanionCatalogProbe? _catalogProbe;
+    private IReadOnlyList<ComicCompanionSettings> _instances = [];
+    private Dictionary<Guid, ManagedBackendStatus> _statuses = [];
+    private Dictionary<Guid, bool?> _catalogAvailability = [];
+    private ComicCompanionSettings? _draft;
+    private Task? _refreshTask;
+    private Task? _observationTask;
+    private ElementReference _nameInput;
+    private string? _name, _apiUrl, _browserUrl, _folder, _error, _editorError;
+    private bool _managed, _autostart, _automaticSync, _busy, _loaded, _focusEditor;
+    private int _syncMinutes = 60;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _service = Services.GetService<ComicCompanionService>();
+        if (_service is null) return;
+        await RunAsync(ReloadAsync);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && _service is not null && !_lifetime.IsCancellationRequested)
+        {
+            _catalogProbe = Services.GetRequiredService<ComicCompanionCatalogProbe>();
+            _refreshTask = RefreshAsync();
+            _observationTask = ObserveCatalogPeriodicallyAsync();
+        }
+        if (_focusEditor && _draft is not null)
+        {
+            _focusEditor = false;
+            await _nameInput.FocusAsync();
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        _instances = await _service!.GetAllAsync(_lifetime.Token);
+        _catalogAvailability.Clear();
+        _statuses = ReadStatuses();
+        _loaded = true;
+        await CountChanged.InvokeAsync(_instances.Count);
+        if (_observationTask is not null && !_lifetime.IsCancellationRequested)
+        {
+            StateHasChanged();
+            await RefreshCatalogAvailabilityAsync();
+        }
+    }
+
+    private void OpenEditor(ComicCompanionSettings? instance)
+    {
+        _draft = instance ?? new() { Id = Guid.NewGuid(), Name = string.Empty };
+        _name = _draft.Name;
+        _apiUrl = _draft.ApiUrl?.AbsoluteUri;
+        _browserUrl = _draft.BrowserUrl?.AbsoluteUri;
+        _folder = _draft.InstallationFolder;
+        _managed = _draft.IsManaged;
+        _autostart = _draft.StartWithApp;
+        _automaticSync = _draft.AutomaticSync;
+        _syncMinutes = _draft.SyncIntervalMinutes;
+        _editorError = null;
+        _focusEditor = true;
+    }
+
+    private void CloseEditor() { if (!_busy) _draft = null; }
+
+    private void HandleEditorKey(KeyboardEventArgs args) { if (args.Key == "Escape") CloseEditor(); }
+
+    private Dictionary<Guid, ManagedBackendStatus> ReadStatuses() =>
+        _instances.ToDictionary(instance => instance.Id, instance => _service!.GetStatus(instance.Id));
+
+    private async Task RefreshAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_lifetime.Token))
+                await InvokeAsync(() =>
+                {
+                    var statuses = ReadStatuses();
+                    if (statuses.All(entry => _statuses.GetValueOrDefault(entry.Key) == entry.Value)) return;
+                    _statuses = statuses;
+                    StateHasChanged();
+                });
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+    }
+
+    private async Task ObserveCatalogPeriodicallyAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        try
+        {
+            await RefreshCatalogAvailabilityAsync();
+            while (await timer.WaitForNextTickAsync(_lifetime.Token))
+                if (!_busy) await RefreshCatalogAvailabilityAsync();
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+    }
+
+    private async Task RefreshCatalogAvailabilityAsync()
+    {
+        var snapshot = _instances;
+        var observations = await Task.WhenAll(snapshot.Select(async instance =>
+            (instance.Id, Available: (bool?)await _catalogProbe!.IsAvailableAsync(instance, _lifetime.Token))));
+        if (_lifetime.IsCancellationRequested || !ReferenceEquals(snapshot, _instances)) return;
+
+        var availability = observations.ToDictionary(observation => observation.Id, observation => observation.Available);
+        if (availability.Count == _catalogAvailability.Count &&
+            availability.All(entry => _catalogAvailability.GetValueOrDefault(entry.Key) == entry.Value)) return;
+
+        _catalogAvailability = availability;
+        StateHasChanged();
+    }
+
+    private Task SaveAsync() => RunAsync(async () =>
+    {
+        if (_draft is not { } draft) return;
+        if (_managed && string.IsNullOrWhiteSpace(_folder)) throw new InvalidDataException("Enter the installation folder.");
+        await _service!.SaveSettingsAsync(new(ParseUrl(_apiUrl), ParseUrl(_browserUrl),
+            _managed ? _folder : null, _autostart, _automaticSync, _syncMinutes) { Id = draft.Id, Name = _name ?? string.Empty }, _lifetime.Token);
+        await ReloadAsync();
+        _draft = null;
+    }, editor: true);
+
+    private Task RemoveAsync(ComicCompanionSettings instance) => RunAsync(async () =>
+    {
+        if (!await JavaScript.InvokeAsync<bool>("confirm", _lifetime.Token, $"Remove {instance.Name}?")) return;
+        await _service!.RemoveSettingsAsync(instance.Id, _lifetime.Token);
+        await ReloadAsync();
+    });
+
+    private async Task RunAsync(Func<Task> action, bool editor = false)
+    {
+        if (_busy) return;
+        _busy = true;
+        SetError(null);
+        try { await action(); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (InvalidDataException exception) { SetError(exception.Message); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or JsonException or NotSupportedException)
+        {
+            SetError("Unable to read or save Comic Companion settings.");
+        }
+        finally
+        {
+            _statuses = ReadStatuses();
+            _busy = false;
+        }
+
+        void SetError(string? message)
+        {
+            if (editor) _editorError = message;
+            else _error = message;
+        }
+    }
+
+    private static Uri? ParseUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return Uri.TryCreate(value.Trim(), UriKind.Absolute, out var url)
+            ? url : throw new InvalidDataException("Enter an absolute HTTP or HTTPS URL.");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _lifetime.CancelAsync();
+        if (_refreshTask is not null) await _refreshTask;
+        if (_observationTask is not null) await _observationTask;
+        _lifetime.Dispose();
+    }
+}
