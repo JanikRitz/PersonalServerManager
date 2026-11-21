@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.WebUtilities;
+using PersonalServerManager.Feeds;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.Search;
 using Xunit;
@@ -11,6 +12,184 @@ namespace PersonalServerManager.Tests;
 
 public sealed class HydrusClientTests
 {
+    [Theory]
+    [InlineData("a AND b", 8)]
+    [InlineData("a && b", 8)]
+    [InlineData("a OR b", 14)]
+    [InlineData("a || b", 14)]
+    [InlineData("NOT a", 5)]
+    [InlineData("!a", 5)]
+    [InlineData("-a", 5)]
+    [InlineData("a => b", 13)]
+    [InlineData("a xor b", 6)]
+    [InlineData("a xnor b", 9)]
+    [InlineData("a iff b", 9)]
+    [InlineData("a <=> b", 9)]
+    [InlineData("a nand b", 7)]
+    [InlineData("a nor b", 1)]
+    [InlineData("NOT (a OR b)", 1)]
+    [InlineData("a OR (b AND c)", 234)]
+    [InlineData("a OR b NAND c", 31)]
+    [InlineData("a => b => c", 242)]
+    [InlineData("a XOR b IFF c", 105)]
+    public async Task SearchFeedAsync_CompilesBooleanTruthTables(string expression, int expectedMask)
+    {
+        JsonElement predicates = default;
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            using var document = JsonDocument.Parse(args["tags"].ToString());
+            predicates = document.RootElement.Clone();
+            return Json("""{"file_ids":[]}""");
+        }));
+        await client.SearchFeedAsync(Instance(), expression, FeedMedia.All, FeedOrder.Newest, 0, 10);
+        var variables = expression.Contains('c') ? 3 : 2;
+        var mask = 0;
+        for (var assignment = 0; assignment < 1 << variables; assignment++)
+        {
+            bool Literal(string text)
+            {
+                if (text == "system:limit=10" || text == "system:everything") return true;
+                var negative = text.StartsWith('-');
+                var name = negative ? text[1..] : text;
+                var bit = name switch { "a" => 0, "b" => 1, "c" => 2, _ => throw new InvalidOperationException(name) };
+                return ((assignment & (1 << bit)) != 0) != negative;
+            }
+            var matches = predicates.EnumerateArray().All(item => item.ValueKind == JsonValueKind.Array
+                ? item.EnumerateArray().Any(part => Literal(part.GetString()!)) : Literal(item.GetString()!));
+            if (matches) mask |= 1 << assignment;
+        }
+        Assert.Equal(expectedMask, mask);
+    }
+
+    [Theory]
+    [InlineData("a AND")]
+    [InlineData("(a OR b")]
+    [InlineData("a OR ()")]
+    [InlineData("a & b")]
+    [InlineData("a NOT b")]
+    [InlineData("namespace:")]
+    [InlineData("system:")]
+    [InlineData("a\\")]
+    public async Task SearchFeedAsync_RejectsInvalidExpressionsBeforeSending(string expression)
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send.")));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SearchFeedAsync(Instance(), expression, FeedMedia.All, FeedOrder.Newest, 0, 10));
+    }
+
+    [Theory]
+    [InlineData("system:limit=4")]
+    [InlineData("system:has tag")]
+    [InlineData("NOT system:width > 5")]
+    [InlineData("system:height > 2 AND system:width > 3")]
+    public async Task SearchFeedAsync_RejectsUnsupportedSystemPredicates(string expression)
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send.")));
+        await Assert.ThrowsAsync<NotSupportedException>(() => client.SearchFeedAsync(Instance(), expression, FeedMedia.All, FeedOrder.Newest, 0, 10));
+    }
+
+    [Theory]
+    [InlineData(FeedOrder.Newest, "false")]
+    [InlineData(FeedOrder.Oldest, "true")]
+    public async Task SearchFeedAsync_BlankQueryPaginatesInNativeOrder(FeedOrder order, string ascending)
+    {
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+            {
+                Assert.Equal(new[] { "system:everything", "system:limit=30" }, JsonSerializer.Deserialize<string[]>(args["tags"].ToString()));
+                Assert.Equal("2", args["file_sort_type"].ToString());
+                Assert.Equal(ascending, args["file_sort_asc"].ToString());
+                return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, 30) }));
+            }
+            var ids = JsonSerializer.Deserialize<int[]>(args["file_ids"].ToString())!;
+            Assert.Equal(Enumerable.Range(6, 25), ids);
+            return Json(JsonSerializer.Serialize(new { metadata = ids.Reverse().Select(id => new { file_id = id, mime = "image/png" }) }));
+        }));
+        var files = await client.SearchFeedAsync(Instance(), " ", FeedMedia.All, order, 5, 25);
+        Assert.Equal(Enumerable.Range(6, 25).Select(id => (long)id), files.Select(file => file.Id));
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_MediaPagingExpandsUntilThereAreEnoughMatches()
+    {
+        var limits = new List<int>();
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+            {
+                var tags = JsonSerializer.Deserialize<string[]>(args["tags"].ToString())!;
+                var requested = int.Parse(tags[^1]["system:limit=".Length..]);
+                limits.Add(requested);
+                return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, Math.Min(requested, 8)) }));
+            }
+            var ids = JsonSerializer.Deserialize<int[]>(args["file_ids"].ToString())!;
+            return Json(JsonSerializer.Serialize(new { metadata = ids.Select(id => new { file_id = id, mime = id % 2 == 0 ? "video/webm" : "image/png" }) }));
+        }));
+        var files = await client.SearchFeedAsync(Instance(), "tag", FeedMedia.Videos, FeedOrder.Oldest, 1, 2);
+        Assert.Equal(new[] { 4L, 6L }, files.Select(file => file.Id));
+        Assert.Equal(new[] { 3, 6 }, limits);
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_BatchesLargePagesAndPreservesOrder()
+    {
+        var batchSizes = new List<int>();
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+                return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, 150) }));
+            var ids = JsonSerializer.Deserialize<int[]>(args["file_ids"].ToString())!;
+            batchSizes.Add(ids.Length);
+            return Json(JsonSerializer.Serialize(new { metadata = ids.Select(id => new { file_id = id, mime = "image/png" }) }));
+        }));
+        var files = await client.SearchFeedAsync(Instance(), "tag", FeedMedia.All, FeedOrder.Oldest, 0, 150);
+        Assert.Equal(Enumerable.Range(1, 150).Select(id => (long)id), files.Select(file => file.Id));
+        Assert.Equal(new[] { 100, 50 }, batchSizes);
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_RejectsDuplicateIdsAndMissingMetadata()
+    {
+        using var duplicates = new HydrusClient(new StubHandler((_, _) => Json("""{"file_ids":[1,1]}""")));
+        await Assert.ThrowsAsync<InvalidDataException>(() => duplicates.SearchFeedAsync(Instance(), "tag", FeedMedia.All, FeedOrder.Newest, 0, 2));
+        using var missing = new HydrusClient(new StubHandler((request, _) => Json(request.RequestUri!.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal)
+            ? """{"file_ids":[1]}""" : """{"metadata":[]}""")));
+        await Assert.ThrowsAsync<InvalidDataException>(() => missing.SearchFeedAsync(Instance(), "tag", FeedMedia.All, FeedOrder.Newest, 0, 1));
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_ValidatesArgumentsAndCancellation()
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send.")));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(), "", FeedMedia.All, FeedOrder.Newest, -1, 1));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(), "", FeedMedia.All, FeedOrder.Newest, 0, 0));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(), "", (FeedMedia)99, FeedOrder.Newest, 0, 1));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(), "", FeedMedia.All, (FeedOrder)99, 0, 1));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.SearchFeedAsync(Instance(), "", FeedMedia.All, FeedOrder.Newest, 0, 1, cancellation.Token));
+    }
+
+    [Theory]
+    [InlineData(@"series:alpha\(beta\) OR a\|b", "[\"series:alpha(beta)\",\"a|b\"]")]
+    [InlineData("NOT system:inbox", "\"system:archive\"")]
+    [InlineData("system:width != 50", "\"system:width != 50\"")]
+    [InlineData("tag!", "\"tag!\"")]
+    public async Task SearchFeedAsync_SendsEscapedAndSupportedPredicates(string expression, string expected)
+    {
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            using var predicates = JsonDocument.Parse(QueryHelpers.ParseQuery(request.RequestUri!.Query)["tags"].ToString());
+            using var expectedJson = JsonDocument.Parse(expected);
+            Assert.True(JsonElement.DeepEquals(expectedJson.RootElement, predicates.RootElement[0]));
+            return Json("""{"file_ids":[]}""");
+        }));
+        await client.SearchFeedAsync(Instance(), expression, FeedMedia.All, FeedOrder.Random, 0, 1);
+    }
     [Theory]
     [InlineData(5)]
     [InlineData(25)]

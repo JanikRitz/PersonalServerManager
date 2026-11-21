@@ -150,6 +150,10 @@ public sealed class LibrarySearchSwarmUITests
     private sealed class FakeSwarmClient(
         Func<SwarmUIInstance, string, int, LibrarySort, Task<IReadOnlyList<SwarmUIFile>>> search) : ISwarmUIClient
     {
+        public Task<IReadOnlyList<SwarmUIFile>> SearchFeedAsync(SwarmUIInstance instance, PersonalServerManager.Feeds.FeedSource source,
+            PersonalServerManager.Feeds.FeedOrder order, int offset, int limit, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
         public Task<IReadOnlyList<SwarmUIFile>> SearchAsync(SwarmUIInstance instance, string query, int limit, LibrarySort sort,
             CancellationToken cancellationToken = default) => search(instance, query, limit, sort);
 

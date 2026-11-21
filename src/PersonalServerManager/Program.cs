@@ -13,6 +13,7 @@ using PersonalServerManager.Search;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Management;
 using PersonalServerManager.SwarmUI;
+using PersonalServerManager.Feeds;
 using Yarp.ReverseProxy.Forwarder;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -73,6 +74,8 @@ builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusIn
 builder.Services.AddSingleton<ISwarmUIClient>(_ => new SwarmUIClient());
 builder.Services.AddSingleton<ISwarmUIInstanceStore>(_ => new JsonSwarmUIInstanceStore(
     Path.Combine(dataDirectory, "swarmui-instances.json")));
+builder.Services.AddSingleton<IFeedStore>(_ => new JsonFeedStore(Path.Combine(dataDirectory, "feeds.json")));
+builder.Services.AddTransient<FeedService>();
 builder.Services.AddTransient<LibrarySearchService>();
 builder.Services.AddSingleton<ILocalLibraryStore>(_ => new JsonLocalLibraryStore(
     Path.Combine(dataDirectory, "local-libraries.json")));
@@ -93,6 +96,8 @@ builder.Services.AddHttpClient<HydrusClientMedia>(client => client.Timeout = Tim
     .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
 builder.Services.AddHttpClient<SwarmUIMedia>(client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
+builder.Services.AddHttpClient<StashMedia>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(StashMedia.CreateHttpHandler);
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
@@ -167,6 +172,7 @@ app.MapAccountEndpoints();
 app.MapPreviewEndpoints();
 app.MapLocalLibraryEndpoints();
 app.MapManagedServiceProxy();
+app.MapStashMediaEndpoints();
 app.MapGet("/media/hydrus/{instanceId:guid}/{fileId:long}",
     (Guid instanceId, long fileId, HydrusClientMedia media, HttpContext context) => media.ServeAsync(instanceId, fileId, context))
     .RequireAuthorization();

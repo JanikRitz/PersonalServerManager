@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using PersonalServerManager.Feeds;
 using PersonalServerManager.Search;
 using PersonalServerManager.SwarmUI;
 using Xunit;
@@ -15,6 +16,147 @@ public sealed class SwarmUIClientTests
         "aspectratio":"5:8","width":1152,"height":1824,"negativeprompt":"","swarm_version":"0.9.8.3","promptimages":["x"],"refiner":false},
         "sui_extra_data":{"date":"2026-09-26","prep_time":"0.03 sec","generation_time":"21.86 sec"},"sui_models":[{"name":"m"}]}
         """;
+
+    [Theory]
+    [InlineData(FeedOrder.Newest)]
+    [InlineData(FeedOrder.Oldest)]
+    [InlineData(FeedOrder.Random)]
+    public async Task SearchFeedAsync_FiltersAndPagesDeterministically(FeedOrder order)
+    {
+        var instance = Instance(new SwarmUISearchPath("raw"), new SwarmUISearchPath("raw/sub"));
+        using var client = Client(path => path switch
+        {
+            "raw" => Files(("sub/2026-01-01/a.png", null), ("sub/2026-01-01/b.png", null),
+                ("sub/2026-01-02/c.mp4", null), ("../escape.png", null)),
+            "raw/sub" => Files(("2026-01-01/a.png", null), ("2026-01-01/b.png", null)),
+            _ => Files()
+        });
+        var source = new FeedSource(instance.Id, FeedProvider.SwarmUI) { Media = FeedMedia.Images };
+
+        var all = await client.SearchFeedAsync(instance, source, order, 0, 10);
+        var first = await client.SearchFeedAsync(instance, source, order, 0, 1);
+        var second = await client.SearchFeedAsync(instance, source, order, 1, 1);
+
+        Assert.Equal(2, all.Count);
+        Assert.Equal(all.Select(file => file.Path), first.Concat(second).Select(file => file.Path));
+        Assert.Equal(2, all.Select(file => file.Path).Distinct().Count());
+        Assert.All(all, file => Assert.True(SwarmUIPaths.IsServable(instance, file.Path)));
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_SendsFolderQueryAndDepthAndReturnsStarredFiles()
+    {
+        var requests = new List<JsonElement>();
+        using var client = new SwarmUIClient(new StubHandler((request, body) =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/GetNewSession")) return Json("""{"session_id":"s"}""");
+            using var document = JsonDocument.Parse(body);
+            var payload = document.RootElement.Clone();
+            lock (requests) requests.Add(payload);
+            return Json(payload.GetProperty("path").GetString() == "Starred"
+                ? Files(("raw/sub/file.png", null)) : Files(("file.png", null)));
+        }));
+        var instance = Instance(new SwarmUISearchPath("raw", 4));
+        var source = new FeedSource(instance.Id, FeedProvider.SwarmUI) { SwarmFolder = "raw/sub", SwarmQuery = "  cat  " };
+
+        var file = Assert.Single(await client.SearchFeedAsync(instance, source, FeedOrder.Oldest, 0, 10));
+
+        Assert.Equal("raw/sub/file.png", file.Path);
+        Assert.True(file.IsStarred);
+        var listing = Assert.Single(requests, payload => payload.GetProperty("path").GetString() == "raw/sub");
+        Assert.Equal("cat", listing.GetProperty("filter").GetString());
+        Assert.Equal(4, listing.GetProperty("depth").GetInt32());
+        Assert.True(listing.GetProperty("sortReverse").GetBoolean());
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_BlankFolderAndQueryUseAllConfiguredPaths()
+    {
+        var requests = new List<JsonElement>();
+        using var client = new SwarmUIClient(new StubHandler((request, body) =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/GetNewSession")) return Json("""{"session_id":"s"}""");
+            using var document = JsonDocument.Parse(body);
+            lock (requests) requests.Add(document.RootElement.Clone());
+            return Json(Files());
+        }));
+        var instance = Instance(new SwarmUISearchPath("raw", 2), new SwarmUISearchPath("upscaled", 5));
+        var source = new FeedSource(instance.Id, FeedProvider.SwarmUI) { SwarmFolder = " ", SwarmQuery = " " };
+
+        Assert.Empty(await client.SearchFeedAsync(instance, source, FeedOrder.Newest, 0, 10));
+
+        var listings = requests.Where(payload => payload.GetProperty("path").GetString() != "Starred").ToArray();
+        Assert.Equal(new[] { "raw", "upscaled" }, listings.Select(payload => payload.GetProperty("path").GetString()).Order());
+        Assert.All(listings, payload => Assert.Equal("", payload.GetProperty("filter").GetString()));
+        Assert.Equal(2, listings.Single(payload => payload.GetProperty("path").GetString() == "raw").GetProperty("depth").GetInt32());
+        Assert.Equal(5, listings.Single(payload => payload.GetProperty("path").GetString() == "upscaled").GetProperty("depth").GetInt32());
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_DuplicateMetadataIsStableWhenListingOrderChanges()
+    {
+        var calls = 0;
+        var early = """{"sui_extra_data":{"date":"2026-01-01"}}""";
+        var late = """{"sui_extra_data":{"date":"2026-01-03"}}""";
+        using var client = Client(path => path != "raw" ? Files() : Interlocked.Increment(ref calls) % 2 == 1
+            ? Files(("same.png", early), ("same.png", late), ("2026-01-02/other.png", null))
+            : Files(("2026-01-02/other.png", null), ("same.png", late), ("same.png", early)));
+        var instance = Instance();
+        var source = new FeedSource(instance.Id, FeedProvider.SwarmUI);
+
+        var firstPage = await client.SearchFeedAsync(instance, source, FeedOrder.Newest, 0, 1);
+        var secondPage = await client.SearchFeedAsync(instance, source, FeedOrder.Newest, 1, 1);
+        var all = await client.SearchFeedAsync(instance, source, FeedOrder.Newest, 0, 10);
+
+        Assert.Equal(all.Select(file => file.Path), firstPage.Concat(secondPage).Select(file => file.Path));
+        Assert.Equal(2, all.Select(file => file.Path).Distinct().Count());
+    }
+
+    [Theory]
+    [InlineData(FeedOrder.Newest, "raw/2026-01-02/a.png", "raw/2026-01-01/a.png")]
+    [InlineData(FeedOrder.Oldest, "raw/2026-01-01/a.png", "raw/2026-01-02/b.png")]
+    public async Task SearchFeedAsync_SortsDatesTiesAndUndatedFiles(FeedOrder order, string first, string third)
+    {
+        using var client = Client(path => path == "raw"
+            ? Files(("undated.png", null), ("2026-01-02/b.png", null), ("2026-01-02/a.png", null),
+                ("2026-01-01/a.png", null), ("2026-01-03/video.mp4", null)) : Files());
+        var instance = Instance();
+        var source = new FeedSource(instance.Id, FeedProvider.SwarmUI) { Media = FeedMedia.Images };
+
+        var files = await client.SearchFeedAsync(instance, source, order, 0, 10);
+
+        Assert.Equal(4, files.Count);
+        Assert.Equal(first, files[0].Path);
+        Assert.Equal(third, files[2].Path);
+        Assert.Equal("raw/undated.png", files[3].Path);
+        Assert.True(Array.IndexOf(files.Select(file => file.Path).ToArray(), "raw/2026-01-02/a.png") <
+            Array.IndexOf(files.Select(file => file.Path).ToArray(), "raw/2026-01-02/b.png"));
+        Assert.Single(await client.SearchFeedAsync(instance, source with { Media = FeedMedia.Videos }, order, 0, 10));
+        Assert.Empty(await client.SearchFeedAsync(instance, source, order, 4, 10));
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_RejectsInvalidInputsBeforeSending()
+    {
+        using var client = new SwarmUIClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send.")));
+        var instance = Instance();
+        var source = new FeedSource(instance.Id, FeedProvider.SwarmUI);
+        foreach (var folder in new[] { "../raw", "raw/../other", "other", "raw2/sub", "/raw", "raw\\sub" })
+            await Assert.ThrowsAsync<ArgumentException>(() => client.SearchFeedAsync(instance, source with { SwarmFolder = folder }, FeedOrder.Newest, 0, 10));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SearchFeedAsync(instance, source with { SwarmFolder = null! }, FeedOrder.Newest, 0, 10));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SearchFeedAsync(instance, source with { SwarmQuery = new string('x', 1025) }, FeedOrder.Newest, 0, 10));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SearchFeedAsync(instance, source with { Provider = FeedProvider.Hydrus }, FeedOrder.Newest, 0, 10));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SearchFeedAsync(instance, source with { InstanceId = Guid.NewGuid() }, FeedOrder.Newest, 0, 10));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(instance, source, FeedOrder.Newest, -1, 10));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(instance, source, FeedOrder.Newest, 0, 0));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(instance, source, (FeedOrder)99, 0, 10));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(instance, source with { Media = (FeedMedia)99 }, FeedOrder.Newest, 0, 10));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchFeedAsync(instance with { SearchPaths = [new("../bad")] }, source, FeedOrder.Newest, 0, 10));
+        Assert.Empty(await client.SearchFeedAsync(instance with { SearchPaths = [] }, source, FeedOrder.Newest, 0, 10));
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.SearchFeedAsync(instance, source, FeedOrder.Newest, 0, 10, canceled.Token));
+    }
 
     [Fact]
     public async Task SearchAsync_CreatesSessionOnceAndSendsReadOnlyListRequests()

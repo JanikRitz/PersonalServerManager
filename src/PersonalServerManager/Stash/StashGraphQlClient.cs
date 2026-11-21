@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json;
+using PersonalServerManager.Feeds;
 using PersonalServerManager.Search;
 
 namespace PersonalServerManager.Stash;
@@ -9,6 +11,102 @@ namespace PersonalServerManager.Stash;
 public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlClient
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
+
+    public async Task<IReadOnlyList<StashSearchResult>> SearchFeedAsync(
+        StashInstance instance, StashSearchKind kind, FeedSource source, FeedOrder order,
+        int offset, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(instance);
+        ArgumentNullException.ThrowIfNull(source);
+        if (kind is not (StashSearchKind.Scenes or StashSearchKind.Images)) throw new ArgumentOutOfRangeException(nameof(kind));
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
+        var (sort, direction) = order switch
+        {
+            FeedOrder.Newest => ("created_at", "DESC"),
+            FeedOrder.Oldest => ("created_at", "ASC"),
+            FeedOrder.Random => ($"random_{BitConverter.ToUInt32(SHA256.HashData(instance.Id.ToByteArray()), 0).ToString(CultureInfo.InvariantCulture)}", "ASC"),
+            _ => throw new ArgumentOutOfRangeException(nameof(order))
+        };
+        if (source.Media is not (FeedMedia.All or FeedMedia.Images or FeedMedia.Videos)) throw new ArgumentOutOfRangeException(nameof(source));
+        cancellationToken.ThrowIfCancellationRequested();
+        if ((kind == StashSearchKind.Scenes && source.Media == FeedMedia.Images) ||
+            (kind == StashSearchKind.Images && source.Media == FeedMedia.Videos)) return [];
+
+        var objectFilter = new Dictionary<string, object>();
+        foreach (var (includedNames, excludedNames, entity, property) in new[]
+        {
+            (source.IncludeTags, source.ExcludeTags, "tag", "tags"),
+            (source.IncludePerformers, source.ExcludePerformers, "performer", "performers")
+        })
+        {
+            var includes = includedNames.Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim()).Distinct(StringComparer.Ordinal).ToArray();
+            var excludes = excludedNames.Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim()).Distinct(StringComparer.Ordinal).ToArray();
+            var includeIds = await ResolveFeedNamesAsync(instance, entity, includes, cancellationToken);
+            if (includes.Length > 0 && includeIds.Count == 0) return [];
+            var excludeIds = await ResolveFeedNamesAsync(instance, entity, excludes, cancellationToken);
+            if (includeIds.Count == 0 && excludeIds.Count == 0) continue;
+            var criterion = new Dictionary<string, object> { ["modifier"] = "INCLUDES" };
+            if (includeIds.Count > 0) criterion["value"] = includeIds;
+            if (excludeIds.Count > 0) criterion["excludes"] = excludeIds;
+            if (entity == "tag") criterion["depth"] = 0;
+            objectFilter[property] = criterion;
+        }
+
+        var (field, collection, argument, filterType, selection) = kind == StashSearchKind.Scenes
+            ? ("findScenes", "scenes", "scene_filter", "SceneFilterType", "id title paths { screenshot webp } files { path duration } rating100")
+            : ("findImages", "images", "image_filter", "ImageFilterType", "id title paths { thumbnail preview } files { path } visual_files { ... on ImageFile { path } ... on VideoFile { path } } rating100");
+        var document = $"query Feed($filter: FindFilterType, $criteria: {filterType}) {{ {field}(filter: $filter, {argument}: $criteria) {{ {collection} {{ {selection} created_at updated_at }} }} }}";
+        var results = new List<StashSearchResult>();
+        var skip = offset % limit;
+        var page = (long)offset / limit + 1;
+        while (results.Count < limit)
+        {
+            if (page > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(offset));
+            var filter = new { per_page = limit, page = (int)page, sort, direction };
+            using var response = await SendAsync(instance, document, new { filter, criteria = objectFilter }, cancellationToken);
+            using var payload = await ReadPayloadAsync(response, cancellationToken);
+            ThrowForGraphQlErrors(payload.RootElement);
+            if (!payload.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object ||
+                !data.TryGetProperty(field, out var group) || group.ValueKind != JsonValueKind.Object ||
+                !group.TryGetProperty(collection, out var items) || items.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException("Stash returned an invalid feed result list.");
+            var count = items.GetArrayLength();
+            results.AddRange(items.EnumerateArray().Skip(skip).Take(limit - results.Count).Select(item => MapResult(instance, kind, collection, item)));
+            if (count < limit) break;
+            skip = 0;
+            page++;
+        }
+        return results;
+    }
+
+    private async Task<IReadOnlyList<string>> ResolveFeedNamesAsync(
+        StashInstance instance, string entity, IReadOnlyList<string> names, CancellationToken cancellationToken)
+    {
+        var field = entity == "tag" ? "findTags" : "findPerformers";
+        var collection = entity == "tag" ? "tags" : "performers";
+        var type = entity == "tag" ? "TagFilterType" : "PerformerFilterType";
+        var document = $"query FeedNames($criteria: {type}) {{ {field}({entity}_filter: $criteria, filter: {{ per_page: -1 }}) {{ {collection} {{ id name }} }} }}";
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in names)
+        {
+            using var response = await SendAsync(instance, document, new { criteria = new { name = new { value = name, modifier = "EQUALS" } } }, cancellationToken);
+            using var payload = await ReadPayloadAsync(response, cancellationToken);
+            ThrowForGraphQlErrors(payload.RootElement);
+            if (!payload.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object ||
+                !data.TryGetProperty(field, out var group) || group.ValueKind != JsonValueKind.Object ||
+                !group.TryGetProperty(collection, out var items) || items.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException("Stash returned an invalid feed name lookup.");
+            foreach (var item in items.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("name", out var itemName) || itemName.ValueKind != JsonValueKind.String ||
+                    !item.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(id.GetString()))
+                    throw new InvalidDataException("Stash returned an invalid feed name lookup.");
+                if (string.Equals(name, itemName.GetString(), StringComparison.Ordinal)) ids.Add(id.GetString()!);
+            }
+        }
+        return ids.ToArray();
+    }
 
     public async Task<string?> GetMarkerSceneIdAsync(StashInstance instance, string markerId, CancellationToken cancellationToken = default)
     {

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
+using PersonalServerManager.Feeds;
 using PersonalServerManager.Search;
 
 namespace PersonalServerManager.Hydrus;
@@ -83,6 +84,70 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
     public Task<IReadOnlyList<HydrusFile>> SearchExpandedAsync(HydrusInstance instance, IReadOnlyList<string> tags,
         int limit, LibrarySort sort, CancellationToken cancellationToken = default) =>
         SearchFilesAsync(instance, tags, limit, sort, true, cancellationToken);
+
+    public async Task<IReadOnlyList<HydrusFile>> SearchFeedAsync(HydrusInstance instance, string query, FeedMedia media,
+        FeedOrder order, int offset, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (limit <= 0 || (long)offset + limit > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(limit));
+        if (!Enum.IsDefined(media)) throw new ArgumentOutOfRangeException(nameof(media));
+        var predicates = HydrusFeedQuery.Parse(query);
+        var sort = order switch
+        {
+            FeedOrder.Newest => "&file_sort_type=2&file_sort_asc=false",
+            FeedOrder.Oldest => "&file_sort_type=2&file_sort_asc=true",
+            FeedOrder.Random => "&file_sort_type=4",
+            _ => throw new ArgumentOutOfRangeException(nameof(order))
+        };
+        var count = offset + limit;
+        await _searchGate.WaitAsync(cancellationToken);
+        try
+        {
+            using var timeout = CreateTimeout(cancellationToken);
+            while (true)
+            {
+                var maximumBytes = (int)Math.Min(int.MaxValue - 1L, Math.Max(MaximumResponseBytes, (long)count * 22 + 1024));
+                using var search = await SendAsync(instance, HttpMethod.Get,
+                    $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(predicates.Append($"system:limit={count}")))}&return_file_ids=true&return_hashes=false{sort}",
+                    null, timeout.Token, cancellationToken, maximumBytes);
+                var ids = ReadIds(search.RootElement, count);
+                if (ids.Length != Math.Min(count, search.RootElement.GetProperty("file_ids").GetArrayLength()))
+                    throw new InvalidDataException("Hydrus returned duplicate file IDs.");
+                var files = new List<HydrusFile>();
+                var candidates = media == FeedMedia.All ? ids.Skip(offset).Take(limit) : ids.AsEnumerable();
+                foreach (var batch in candidates.Chunk(100))
+                {
+                    var path = $"get_files/file_metadata?file_ids={Uri.EscapeDataString(JsonSerializer.Serialize(batch))}";
+                    IReadOnlyList<HydrusFile> batchFiles;
+                    try
+                    {
+                        using var metadata = await SendAsync(instance, HttpMethod.Get,
+                            $"{path}&only_return_basic_information=false&include_services_object=false", null, timeout.Token, cancellationToken);
+                        batchFiles = ReadFiles(metadata.RootElement, batch, batch.Length);
+                    }
+                    catch (InvalidDataException exception) when (exception.Message == ResponseTooLarge)
+                    {
+                        using var metadata = await SendAsync(instance, HttpMethod.Get,
+                            $"{path}&only_return_basic_information=true&include_services_object=false", null, timeout.Token, cancellationToken);
+                        batchFiles = ReadFiles(metadata.RootElement, batch, batch.Length);
+                    }
+                    if (batchFiles.Count != batch.Length) throw new InvalidDataException("Hydrus returned incomplete file metadata.");
+                    files.AddRange(batchFiles.Where(file => media == FeedMedia.All || file.Mime.StartsWith(
+                        media == FeedMedia.Images ? "image/" : "video/", StringComparison.OrdinalIgnoreCase)));
+                    if (media != FeedMedia.All && files.Count >= offset + limit) break;
+                }
+                if (media == FeedMedia.All) return files;
+                if (files.Count >= offset + limit || ids.Length < count) return files.Skip(offset).Take(limit).ToArray();
+                if (count == int.MaxValue) throw new InvalidDataException("Hydrus feed search exceeds the supported result size.");
+                count = (int)Math.Min(int.MaxValue, (long)count * 2);
+            }
+        }
+        finally
+        {
+            _searchGate.Release();
+        }
+    }
 
     private async Task<IReadOnlyList<HydrusFile>> SearchFilesAsync(
         HydrusInstance instance,
@@ -389,6 +454,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         }
 
         var ids = new List<long>();
+        var seen = new HashSet<long>();
         foreach (var value in values.EnumerateArray().Take(limit))
         {
             if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var id) || id <= 0)
@@ -396,7 +462,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 throw new InvalidDataException("Hydrus returned an invalid file ID.");
             }
 
-            if (!ids.Contains(id))
+            if (seen.Add(id))
             {
                 ids.Add(id);
             }

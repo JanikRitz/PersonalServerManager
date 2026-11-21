@@ -1,3 +1,4 @@
+using PersonalServerManager.Feeds;
 using PersonalServerManager.Search;
 
 namespace PersonalServerManager.SwarmUI;
@@ -47,6 +48,9 @@ public interface ISwarmUIClient
 
     /// <summary>Searches every configured path with SwarmUI's server-side filter and returns at most <paramref name="limit"/> files per media kind.</summary>
     Task<IReadOnlyList<SwarmUIFile>> SearchAsync(SwarmUIInstance instance, string query, int limit, LibrarySort sort,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<SwarmUIFile>> SearchFeedAsync(SwarmUIInstance instance, FeedSource source, FeedOrder order, int offset, int limit,
         CancellationToken cancellationToken = default);
 }
 

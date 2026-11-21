@@ -1,5 +1,7 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
+using PersonalServerManager.Feeds;
 using PersonalServerManager.Search;
 using PersonalServerManager.Stash;
 using Xunit;
@@ -388,6 +390,174 @@ public sealed class StashGraphQlClientTests
         cancellation.Cancel();
         foreach (var kind in Enum.GetValues<StashSearchKind>())
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.SearchAsync(Instance(null), kind, "query", cancellation.Token));
+    }
+
+    [Theory]
+    [InlineData(StashSearchKind.Scenes, "findScenes", "scenes", "scene_filter", "SceneFilterType")]
+    [InlineData(StashSearchKind.Images, "findImages", "images", "image_filter", "ImageFilterType")]
+    public async Task SearchFeedAsync_CombinesExactIncludesAndExcludesOnServer(
+        StashSearchKind kind, string field, string collection, string argument, string filterType)
+    {
+        var calls = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((request, body) =>
+        {
+            calls++;
+            Assert.Equal("Bearer test-key", request.Headers.Authorization?.ToString());
+            using var payload = JsonDocument.Parse(body);
+            var root = payload.RootElement;
+            var query = root.GetProperty("query").GetString()!;
+            var variables = root.GetProperty("variables");
+            if (query.Contains("FeedNames"))
+            {
+                var name = variables.GetProperty("criteria").GetProperty("name");
+                Assert.Equal("EQUALS", name.GetProperty("modifier").GetString());
+                Assert.Contains("per_page: -1", query);
+                var value = name.GetProperty("value").GetString()!;
+                var id = value switch { "included tag" => "1", "excluded tag" => "2", "included performer" => "3", _ => "4" };
+                var isTag = query.Contains("findTags");
+                return Json(JsonSerializer.Serialize(new { data = new Dictionary<string, object> {
+                    [isTag ? "findTags" : "findPerformers"] = new Dictionary<string, object> {
+                        [isTag ? "tags" : "performers"] = new[] { new { id, name = value }, new { id = "999", name = value + " suffix" } } } } }));
+            }
+            Assert.Contains($"$criteria: {filterType}", query);
+            Assert.Contains($"{field}(filter: $filter, {argument}: $criteria)", query);
+            var filter = variables.GetProperty("filter");
+            Assert.Equal("created_at", filter.GetProperty("sort").GetString());
+            Assert.Equal("DESC", filter.GetProperty("direction").GetString());
+            var criteria = variables.GetProperty("criteria");
+            foreach (var (property, includeId, excludeId) in new[] { ("tags", "1", "2"), ("performers", "3", "4") })
+            {
+                var criterion = criteria.GetProperty(property);
+                Assert.Equal("INCLUDES", criterion.GetProperty("modifier").GetString());
+                Assert.Equal(includeId, Assert.Single(criterion.GetProperty("value").EnumerateArray()).GetString());
+                Assert.Equal(excludeId, Assert.Single(criterion.GetProperty("excludes").EnumerateArray()).GetString());
+                if (property == "tags") Assert.Equal(0, criterion.GetProperty("depth").GetInt32());
+            }
+            return Json(JsonSerializer.Serialize(new { data = new Dictionary<string, object> { [field] = new Dictionary<string, object> { [collection] = new[] { new { id = "42", title = "Result" } } } } }));
+        })));
+        var source = new FeedSource(Instance(null).Id, FeedProvider.Stash)
+        {
+            IncludeTags = [" included tag ", "included tag"], ExcludeTags = ["excluded tag"],
+            IncludePerformers = ["included performer"], ExcludePerformers = ["excluded performer"]
+        };
+
+        IStashGraphQlClient contract = client;
+        var result = Assert.Single(await contract.SearchFeedAsync(Instance("test-key"), kind, source, FeedOrder.Newest, 0, 5));
+        Assert.Equal("42", result.Id);
+        Assert.Equal(kind, result.Kind);
+        Assert.Equal(5, calls);
+    }
+
+    [Theory]
+    [InlineData(FeedOrder.Newest, "created_at", "DESC")]
+    [InlineData(FeedOrder.Oldest, "created_at", "ASC")]
+    [InlineData(FeedOrder.Random, null, "ASC")]
+    public async Task SearchFeedAsync_UsesStableSortAndSlicesUnalignedPages(FeedOrder order, string? expectedSort, string direction)
+    {
+        var sorts = new List<string>();
+        var pages = new List<int>();
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            using var payload = JsonDocument.Parse(body);
+            var variables = payload.RootElement.GetProperty("variables");
+            Assert.Empty(variables.GetProperty("criteria").EnumerateObject());
+            var filter = variables.GetProperty("filter");
+            Assert.Equal(3, filter.GetProperty("per_page").GetInt32());
+            Assert.Equal(direction, filter.GetProperty("direction").GetString());
+            var sort = filter.GetProperty("sort").GetString()!;
+            if (expectedSort is null) Assert.Matches(@"^random_\d+$", sort);
+            else Assert.Equal(expectedSort, sort);
+            sorts.Add(sort);
+            var page = filter.GetProperty("page").GetInt32();
+            pages.Add(page);
+            var items = Enumerable.Range((page - 1) * 3 + 1, 3).Select(index => new { id = index.ToString(), title = "Image" });
+            return Json(JsonSerializer.Serialize(new { data = new { findImages = new { images = items } } }));
+        })));
+        var source = new FeedSource(Instance(null).Id, FeedProvider.Stash) { IncludeTags = ["", "  "] };
+
+        var first = await client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source, order, 2, 3);
+        var second = await client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source, order, 5, 3);
+
+        Assert.Equal(new[] { "3", "4", "5" }, first.Select(item => item.Id));
+        Assert.Equal(new[] { "6", "7", "8" }, second.Select(item => item.Id));
+        Assert.Equal(new[] { 1, 2, 2, 3 }, pages);
+        Assert.Single(sorts.Distinct());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SearchFeedAsync_UnknownNamesNeverBroadenIncludes(bool include)
+    {
+        var calls = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            calls++;
+            return body.Contains("FeedNames")
+                ? Json("""{"data":{"findTags":{"tags":[{"id":"9","name":"not exact"}]}}}""")
+                : Json("""{"data":{"findScenes":{"scenes":[{"id":"1"}]}}}""");
+        })));
+        var source = new FeedSource(Instance(null).Id, FeedProvider.Stash)
+        {
+            IncludeTags = include ? ["missing"] : [], ExcludeTags = include ? [] : ["missing"]
+        };
+
+        var results = await client.SearchFeedAsync(Instance(null), StashSearchKind.Scenes, source, FeedOrder.Newest, 0, 5);
+        Assert.Equal(include ? 0 : 1, results.Count);
+        Assert.Equal(include ? 1 : 2, calls);
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_ExcludesOnlyExactNamesAndStopsAtShortPage()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            using var payload = JsonDocument.Parse(body);
+            var query = payload.RootElement.GetProperty("query").GetString()!;
+            var variables = payload.RootElement.GetProperty("variables");
+            if (query.Contains("FeedNames"))
+            {
+                Assert.Equal("a_%", variables.GetProperty("criteria").GetProperty("name").GetProperty("value").GetString());
+                return Json("""{"data":{"findTags":{"tags":[{"id":"1","name":"a_%"},{"id":"2","name":"axb"},{"id":"3","name":"A_%"}]}}}""");
+            }
+            var tags = variables.GetProperty("criteria").GetProperty("tags");
+            Assert.Equal("INCLUDES", tags.GetProperty("modifier").GetString());
+            Assert.False(tags.TryGetProperty("value", out var _));
+            Assert.Equal("1", Assert.Single(tags.GetProperty("excludes").EnumerateArray()).GetString());
+            return Json("""{"data":{"findImages":{"images":[{"id":"5"},{"id":"6"}]}}}""");
+        })));
+        var source = new FeedSource(Instance(null).Id, FeedProvider.Stash) { ExcludeTags = ["a_%"] };
+
+        var results = await client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source, FeedOrder.Oldest, 1, 3);
+
+        Assert.Equal("6", Assert.Single(results).Id);
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_ValidatesArgumentsMediaAndCancellationWithoutRequests()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send."))));
+        var source = new FeedSource(Instance(null).Id, FeedProvider.Stash) { Media = FeedMedia.Images };
+        Assert.Empty(await client.SearchFeedAsync(Instance(null), StashSearchKind.Scenes, source, FeedOrder.Newest, 0, 5));
+        Assert.Empty(await client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source with { Media = FeedMedia.Videos }, FeedOrder.Newest, 0, 5));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(null), StashSearchKind.Tags, source, FeedOrder.Newest, 0, 5));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source, FeedOrder.Newest, -1, 5));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source, FeedOrder.Newest, 0, 0));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source, (FeedOrder)999, 0, 5));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.SearchFeedAsync(Instance(null), StashSearchKind.Scenes, source, FeedOrder.Newest, 0, 5, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task SearchFeedAsync_RejectsMalformedLookupsAndGraphQlErrors()
+    {
+        var source = new FeedSource(Instance(null).Id, FeedProvider.Stash) { ExcludeTags = ["tag"] };
+        foreach (var response in new[] { "{}", """{"errors":[{"message":"bad query"}]}""", """{"data":{"findTags":{"tags":[{"id":null,"name":"tag"}]}}}""" })
+        {
+            var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(response))));
+            await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchFeedAsync(Instance(null), StashSearchKind.Images, source, FeedOrder.Newest, 0, 5));
+        }
     }
 
     private static StashInstance Instance(string? apiKey) => new(

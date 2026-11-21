@@ -31,6 +31,14 @@ public Task RemoveAsync(Guid id, CancellationToken cancellationToken = default);
 
 `IHydrusClient` and `IHydrusInstanceStore` expose the corresponding asynchronous methods. `OpenSearchAsync` returns the created page key. Predicates are separate strings: a multiword tag remains one string, not whitespace-split text. At most 64 predicates of 1024 characters each are accepted.
 
+## Feed Search
+
+`SearchFeedAsync` accepts blank queries and Hydrus advanced Boolean expressions. It supports parentheses, `not`/`!`/`-`, `and`/`&&`, `or`/`||`, `nand`, `nor`, `xor`, `implies`/`=>`, and `xnor`/`iff`/`<=>`, with Hydrus operator precedence and left-associative binary operators. Backslash escapes expression characters; Hydrus itself cannot express a literal wildcard or a leading hyphen in a tag, so those escaped forms are rejected. Wildcards otherwise retain Hydrus semantics.
+
+Supported system predicates are `system:everything` alone, `system:inbox`, `system:archive`, `system:untagged`, `system:has audio`, `system:no audio`, and numeric `system:width` or `system:height` comparisons using `=`, `!=`, `<`, `>`, `<=`, `>=`, or `~=`. Negation is supported for inbox/archive and has/no audio. Other system predicates, multiple system predicates in an expression, and excessively complex expressions are rejected rather than approximated. Hydrus still validates accepted system predicates on the server.
+
+The API has no offset parameter: the client requests up to `offset + limit` sorted IDs and fetches metadata in batches. Image/video filtering uses returned MIME prefixes, expanding the search as necessary until enough matching files are available or the result set ends. Each search and its metadata requests are serialized and share the existing deadline. Newest/oldest use Hydrus import-time sorting; ties and concurrent library changes can move results between pages. Random searches are resampled, so offsets across calls are not stable. Large offsets and sparse media matches may be expensive or time out, and tag-restricted keys may reject searches without a positive top-level tag.
+
 ## Safety and Ownership
 
 The client owns and disposes its transport. Default production transport has redirects and cookies disabled; supplied `HttpClientHandler` and `SocketsHttpHandler` transports (including those inside delegating handlers) are configured likewise before use. Inject only fresh, trusted custom handlers: custom code must not forward credentials or implement redirects itself.

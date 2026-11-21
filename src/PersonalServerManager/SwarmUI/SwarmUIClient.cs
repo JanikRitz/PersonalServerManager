@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using PersonalServerManager.Feeds;
 using PersonalServerManager.Search;
 
 namespace PersonalServerManager.SwarmUI;
@@ -109,6 +112,74 @@ public sealed class SwarmUIClient : ISwarmUIClient, IDisposable
             _ => files.OrderBy(file => file.CreatedAt is null).ThenByDescending(file => file.CreatedAt)
         };
         return ordered.GroupBy(file => file.Kind).SelectMany(kind => kind.Take(limit)).ToArray();
+    }
+
+    public async Task<IReadOnlyList<SwarmUIFile>> SearchFeedAsync(SwarmUIInstance instance, FeedSource source, FeedOrder order,
+        int offset, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(instance);
+        ArgumentNullException.ThrowIfNull(source);
+        if (source.Provider != FeedProvider.SwarmUI || source.InstanceId != instance.Id)
+            throw new ArgumentException("The feed source does not match the SwarmUI instance.", nameof(source));
+        if (!Enum.IsDefined(order)) throw new ArgumentOutOfRangeException(nameof(order));
+        if (!Enum.IsDefined(source.Media)) throw new ArgumentOutOfRangeException(nameof(source));
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
+        if (source.SwarmQuery is null || source.SwarmQuery.Length > 1024)
+            throw new ArgumentException("Invalid SwarmUI feed query.", nameof(source));
+        if (source.SwarmFolder is null)
+            throw new ArgumentException("Invalid SwarmUI feed folder.", nameof(source));
+
+        cancellationToken.ThrowIfCancellationRequested();
+        SwarmUIPaths.ValidateEndpoint(instance.BaseUrl);
+        var searchPaths = instance.SearchPaths.Select(SwarmUIPaths.NormalizeSearchPath).ToArray();
+        if (searchPaths.Where((path, index) => path != instance.SearchPaths[index]).Any())
+            throw new InvalidDataException("Invalid configured SwarmUI search path.");
+
+        SwarmUISearchPath[] paths;
+        if (string.IsNullOrWhiteSpace(source.SwarmFolder))
+        {
+            paths = searchPaths;
+        }
+        else
+        {
+            var folder = source.SwarmFolder;
+            if (!SwarmUIPaths.IsValidRelativePath(folder))
+                throw new ArgumentException("Invalid SwarmUI feed folder.", nameof(source));
+            var roots = searchPaths.Where(path => folder == path.Path || folder.StartsWith(path.Path + "/", StringComparison.Ordinal)).ToArray();
+            if (roots.Length == 0)
+                throw new ArgumentException("The SwarmUI feed folder must be within a configured search path.", nameof(source));
+            paths = [new SwarmUISearchPath(folder, roots.Max(path => path.Depth))];
+        }
+
+        if (paths.Length == 0) return [];
+        using var timeout = CreateTimeout(cancellationToken);
+        await GetSessionAsync(instance, timeout.Token, cancellationToken);
+        var starredTask = LoadStarredAsync(instance, searchPaths.Max(path => path.Depth) + 1, timeout.Token, cancellationToken);
+        var listingTask = Task.WhenAll(paths.Select(path => ListAsync(instance, path.Path, path.Depth,
+            order == FeedOrder.Oldest, source.SwarmQuery.Trim(), timeout.Token, cancellationToken)));
+        await Task.WhenAll(listingTask, starredTask);
+
+        var files = listingTask.Result.SelectMany((listing, index) => listing
+                .Where(entry => SwarmUIPaths.IsValidRelativePath(entry.Source))
+                .Select(entry => (Path: $"{paths[index].Path}/{entry.Source}", entry.Metadata)))
+            .Where(entry => SwarmUIPaths.IsServable(instance, entry.Path))
+            .OrderBy(entry => entry.Metadata, StringComparer.Ordinal)
+            .DistinctBy(entry => entry.Path, StringComparer.Ordinal)
+            .Select(entry => ToFile(entry.Path, entry.Metadata, starredTask.Result))
+            .OfType<SwarmUIFile>()
+            .Where(file => source.Media == FeedMedia.All ||
+                (source.Media == FeedMedia.Images && file.Kind == SwarmUIMediaKind.Image) ||
+                (source.Media == FeedMedia.Videos && file.Kind == SwarmUIMediaKind.Video));
+
+        IOrderedEnumerable<SwarmUIFile> ordered = order switch
+        {
+            FeedOrder.Oldest => files.OrderBy(file => file.CreatedAt is null).ThenBy(file => file.CreatedAt),
+            FeedOrder.Random => files.OrderBy(file => Convert.ToHexString(SHA256.HashData(
+                Encoding.UTF8.GetBytes(instance.Id.ToString("D") + "/" + file.Path))), StringComparer.Ordinal),
+            _ => files.OrderBy(file => file.CreatedAt is null).ThenByDescending(file => file.CreatedAt)
+        };
+        return ordered.ThenBy(file => file.Path, StringComparer.Ordinal).Skip(offset).Take(limit).ToArray();
     }
 
     public void Dispose() => _httpClient.Dispose();

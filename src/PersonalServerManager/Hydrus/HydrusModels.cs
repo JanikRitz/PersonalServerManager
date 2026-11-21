@@ -1,3 +1,5 @@
+using PersonalServerManager.Feeds;
+
 namespace PersonalServerManager.Hydrus;
 
 public sealed record HydrusInstance(Guid Id, string Name, Uri ApiEndpoint, string? ApiKey,
@@ -26,6 +28,9 @@ public sealed record HydrusObservation(
 
 public interface IHydrusClient
 {
+    Task<IReadOnlyList<HydrusFile>> SearchFeedAsync(HydrusInstance instance, string query, FeedMedia media, FeedOrder order,
+        int offset, int limit, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Feed search is not supported by this Hydrus client.");
     Task<IReadOnlyList<HydrusTag>> SearchTagsAsync(HydrusInstance instance, string query, int limit,
         CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<HydrusTag>>([]);
     Task<HydrusObservation> ObserveAsync(HydrusInstance instance, CancellationToken cancellationToken = default);

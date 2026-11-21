@@ -59,6 +59,15 @@ public sealed record StashObservation(
 
 public interface IStashGraphQlClient
 {
+    Task<IReadOnlyList<StashSearchResult>> SearchFeedAsync(
+        StashInstance instance,
+        StashSearchKind kind,
+        Feeds.FeedSource source,
+        Feeds.FeedOrder order,
+        int offset,
+        int limit,
+        CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
     Task<string?> GetMarkerSceneIdAsync(
         StashInstance instance,
         string markerId,

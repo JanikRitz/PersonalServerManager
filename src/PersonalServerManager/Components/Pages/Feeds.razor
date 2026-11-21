@@ -1,0 +1,374 @@
+@page "/feeds"
+@using System.Text.Json
+@using PersonalServerManager.Feeds
+@using PersonalServerManager.Stash
+@using PersonalServerManager.Hydrus
+@using PersonalServerManager.SwarmUI
+@implements IAsyncDisposable
+@inject IFeedStore Store
+@inject FeedService FeedService
+@inject IStashInstanceStore StashStore
+@inject IHydrusInstanceStore HydrusStore
+@inject ISwarmUIInstanceStore SwarmStore
+@inject IJSRuntime JavaScript
+
+<PageTitle>Feeds | Personal Server Manager</PageTitle>
+
+<div class="workspace">
+    <header class="topbar">
+        <a class="wordmark" href="/" aria-label="Personal Server Manager home"><span class="mark">P</span><span>Personal Server Manager</span></a>
+        <nav class="topbar-right" aria-label="Workspace">
+            <button class="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Toggle dark mode"><span class="theme-moon"><MudIcon Icon="@Icons.Material.Outlined.DarkMode" /></span><span class="theme-sun"><MudIcon Icon="@Icons.Material.Outlined.LightMode" /></span></button>
+            <a class="nav-link" href="/" aria-label="Library search" title="Library search"><MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" /><span>Search</span></a>
+            <a class="nav-link" href="/backends" aria-label="Manage backends" title="Manage backends"><MudIcon Icon="@Icons.Material.Outlined.Settings" Size="Size.Small" /><span>Backends</span></a>
+            <form method="post" action="/account/logout"><AntiforgeryToken /><button class="logout" type="submit">Sign out</button></form>
+        </nav>
+    </header>
+    <main>
+        <div class="page-heading"><div><h1>Feeds</h1><p class="subtitle">Your libraries, together.</p></div><button class="primary-action" type="button" @onclick="NewFeed" disabled="@_busy"><MudIcon Icon="@Icons.Material.Filled.Add" Size="Size.Small" />New feed</button></div>
+        @if (_error is not null) { <div class="notice" role="alert">@_error</div> }
+        @if (!_loaded) { <p role="status">Loading feeds...</p> }
+        else if (_feeds.Count == 0) { <p class="empty">No feeds yet. Create a feed to bring sources together.</p> }
+        else
+        {
+            <div class="feed-layout">
+                <section class="feed-list" aria-label="Saved feeds">
+                    @for (var index = 0; index < _feeds.Count; index++)
+                    {
+                        var feed = _feeds[index];
+                        var position = index;
+                        <div class="feed-row" @key="feed.Id">
+                            <button class="feed-select @(feed.Id == _activeId ? "selected" : "")" type="button" aria-pressed="@(feed.Id == _activeId)" @onclick="() => OpenFeedAsync(feed)"><strong>@feed.Name</strong><small>@feed.Sources.Count sources</small></button>
+                            <div class="row-actions">
+                                <button class="icon-action" type="button" title="Move up" aria-label="Move @feed.Name up" disabled="@(_busy || position == 0)" @onclick="() => MoveAsync(feed.Id, -1)"><MudIcon Icon="@Icons.Material.Filled.KeyboardArrowUp" /></button>
+                                <button class="icon-action" type="button" title="Move down" aria-label="Move @feed.Name down" disabled="@(_busy || position == _feeds.Count - 1)" @onclick="() => MoveAsync(feed.Id, 1)"><MudIcon Icon="@Icons.Material.Filled.KeyboardArrowDown" /></button>
+                                <button class="icon-action" type="button" title="Edit feed" aria-label="Edit @feed.Name" disabled="@_busy" @onclick="() => EditFeed(feed)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" /></button>
+                                <button class="icon-action danger" type="button" title="Delete feed" aria-label="Delete @feed.Name" disabled="@_busy" @onclick="() => _deleting = feed"><MudIcon Icon="@Icons.Material.Filled.DeleteOutline" Size="Size.Small" /></button>
+                            </div>
+                        </div>
+                    }
+                </section>
+                <section class="viewer" aria-label="Feed viewer" tabindex="0" @onkeydown="ViewerKeyAsync">
+                    @if (_activeId is null) { <p class="empty">Select a feed to start viewing.</p> }
+                    else
+                    {
+                        <div class="viewer-heading"><h2>@ActiveName</h2><span role="status">@(_items.Count > 0 ? $"{_index + 1} / {_items.Count}" : "")</span></div>
+                        @foreach (var failure in _pageErrors) { <p class="notice" role="status">@failure</p> }
+                        @if (_items.Count > 0)
+                        {
+                            var item = _items[_index];
+                            <div class="media-stage">
+                                @if (item.IsVideo)
+                                {
+                                    <video @key="(_activeId, _index)" src="@item.MediaUrl" controls playsinline preload="metadata" aria-label="@item.Title" @onerror="MediaFailed" @onkeydown:stopPropagation="true"></video>
+                                }
+                                else
+                                {
+                                    <img @key="(_activeId, _index)" src="@item.MediaUrl" alt="@item.Title" @onerror="MediaFailed" />
+                                }
+                                <a class="source-badge" href="@item.SourceUrl" target="_blank" rel="noopener noreferrer" title="Open in @item.SourceName" aria-label="Open @item.Title in @item.SourceName">@item.SourceName <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
+                            </div>
+                            @if (_mediaError) { <p class="notice" role="alert">This media could not be loaded. Open the source or try another item.</p> }
+                            <div class="viewer-controls"><button class="icon-action" type="button" aria-label="Previous item" title="Previous item" disabled="@(_index == 0)" @onclick="Previous"><MudIcon Icon="@Icons.Material.Filled.ChevronLeft" /></button><div class="item-title"><strong>@item.Title</strong><small>@item.Provider</small></div><button class="icon-action" type="button" aria-label="Next item" title="Next item" disabled="@(_index + 1 >= _items.Count && (!_hasMore || _loading))" @onclick="NextAsync"><MudIcon Icon="@Icons.Material.Filled.ChevronRight" /></button></div>
+                        }
+                        else if (!_loading) { <p class="empty">@(_pageErrors.Count > 0 ? "No items are available from the remaining sources." : "No items found in this feed.")</p> }
+                        @if (_loading) { <p class="loading" role="status">Loading more items...</p> }
+                        else if (_hasMore && _items.Count == 0) { <button class="text-action" type="button" @onclick="LoadNextAsync">Load more</button> }
+                        else if (!_hasMore && _items.Count > 0 && _index == _items.Count - 1) { <p class="loading">End of feed</p> }
+                    }
+                </section>
+            </div>
+        }
+    </main>
+    @if (_editing)
+    {
+        <div class="backdrop" @onkeydown="EditorKey">
+            <section class="editor" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+                <div class="editor-heading"><h2 id="editor-title">@(_original is null ? "New feed" : "Edit feed")</h2><button class="icon-action" type="button" aria-label="Close feed editor" title="Close" disabled="@_busy" @onclick="CloseEditor"><MudIcon Icon="@Icons.Material.Filled.Close" /></button></div>
+                @if (_editorError is not null) { <div class="notice" role="alert">@_editorError</div> }
+                <form class="editor-form" @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
+                    <fieldset disabled="@_busy">
+                        <label>Feed name<input required maxlength="80" @bind="_draftName" /></label>
+                        <label>Order<select @bind="_draftOrder"><option value="@FeedOrder.Newest">Newest</option><option value="@FeedOrder.Oldest">Oldest</option><option value="@FeedOrder.Random">Random</option></select></label>
+                        <div class="source-heading"><h3>Sources</h3><a href="/backends">Manage backends</a></div>
+                        @if (_draftSources.Count == 0) { <p class="empty">No compatible backends configured.</p> }
+                        @foreach (var source in _draftSources)
+                        {
+                            <div class="source-editor" @key="(source.Provider, source.InstanceId)">
+                                <label class="source-choice"><input type="checkbox" @bind="source.Selected" /><span><strong>@source.Name</strong><small>@source.Provider@(source.Missing ? " - unavailable" : "")</small></span></label>
+                                @if (source.Selected)
+                                {
+                                    @if (source.Missing) { <p class="notice">This instance no longer exists. Remove it from the feed or restore it before saving.</p> }
+                                    <div class="source-options">
+                                        <label>Media<select @bind="source.Media"><option value="@FeedMedia.All">Images and videos</option><option value="@FeedMedia.Images">Images only</option><option value="@FeedMedia.Videos">Videos only</option></select></label>
+                                        @if (source.Provider == FeedProvider.Stash)
+                                        {
+                                            <p class="hint">Separate names with commas or new lines. Include lists match any; exclude lists remove any matches.</p>
+                                            <label>Include tags<textarea rows="2" @bind="source.IncludeTags"></textarea></label>
+                                            <label>Exclude tags<textarea rows="2" @bind="source.ExcludeTags"></textarea></label>
+                                            <label>Include performers<textarea rows="2" @bind="source.IncludePerformers"></textarea></label>
+                                            <label>Exclude performers<textarea rows="2" @bind="source.ExcludePerformers"></textarea></label>
+                                        }
+                                        else if (source.Provider == FeedProvider.Hydrus)
+                                        {
+                                            <label>Predicate expression<textarea rows="3" maxlength="4096" @bind="source.HydrusQuery" placeholder="tag AND (another tag OR third tag)"></textarea></label>
+                                        }
+                                        else
+                                        {
+                                            <label>Folder<input @bind="source.SwarmFolder" maxlength="1024" placeholder="All configured folders" /></label>
+                                            <p class="hint">Configured roots: @source.Roots</p>
+                                            <label>Query<input @bind="source.SwarmQuery" maxlength="1024" /></label>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                        <div class="editor-actions"><button class="text-action" type="button" @onclick="CloseEditor">Cancel</button><button class="primary-action" type="submit">@(_busy ? "Saving..." : "Save feed")</button></div>
+                    </fieldset>
+                </form>
+            </section>
+        </div>
+    }
+    @if (_deleting is not null)
+    {
+        <div class="backdrop"><section class="editor confirm" role="dialog" aria-modal="true" aria-labelledby="delete-title"><h2 id="delete-title">Delete @_deleting.Name?</h2><p>This removes the saved feed, not its media.</p><div class="editor-actions"><button class="text-action" type="button" disabled="@_busy" @onclick="() => _deleting = null">Cancel</button><button class="primary-action destructive" type="button" disabled="@_busy" @onclick="DeleteAsync">Delete feed</button></div></section></div>
+    }
+</div>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private IReadOnlyList<FeedDefinition> _feeds = [];
+    private IReadOnlyList<StashInstance> _stash = [];
+    private IReadOnlyList<HydrusInstance> _hydrus = [];
+    private IReadOnlyList<SwarmUIInstance> _swarm = [];
+    private readonly List<FeedItem> _items = [];
+    private readonly List<string> _pageErrors = [];
+    private List<SourceDraft> _draftSources = [];
+    private FeedSession? _session;
+    private FeedDefinition? _original, _deleting;
+    private Guid? _activeId;
+    private string _draftName = "";
+    private FeedOrder _draftOrder;
+    private string? _error, _editorError;
+    private int _index, _generation;
+    private bool _loaded, _busy, _editing, _loading, _hasMore, _disposed, _mediaError;
+    private IJSObjectReference? _gestureModule, _gestureListener;
+    private DotNetObjectReference<Feeds>? _gestureTarget;
+    private string ActiveName => _feeds.FirstOrDefault(feed => feed.Id == _activeId)?.Name ?? "Feed";
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { await RefreshAsync(); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _error = $"Could not load feed configuration: {exception.Message}"; }
+        finally { _loaded = true; }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _disposed) return;
+        try
+        {
+            _gestureModule = await JavaScript.InvokeAsync<IJSObjectReference>("import", "./feed-gestures.js");
+            if (_disposed) { await _gestureModule.DisposeAsync(); return; }
+            _gestureTarget = DotNetObjectReference.Create(this);
+            _gestureListener = await _gestureModule.InvokeAsync<IJSObjectReference>("initialize", _gestureTarget);
+            if (_disposed) { await _gestureListener.InvokeVoidAsync("dispose"); await _gestureListener.DisposeAsync(); }
+        }
+        catch (JSDisconnectedException) { }
+        catch (JSException) { if (!_disposed) { _error = "Swipe navigation is unavailable. Use the previous and next buttons instead."; StateHasChanged(); } }
+    }
+
+    private async Task RefreshAsync()
+    {
+        _feeds = await Store.GetAllAsync(_lifetime.Token);
+        _stash = await StashStore.GetAllAsync(_lifetime.Token);
+        _hydrus = await HydrusStore.GetAllAsync(_lifetime.Token);
+        _swarm = await SwarmStore.GetAllAsync(_lifetime.Token);
+    }
+
+    private void NewFeed() => BeginEdit(null);
+    private void EditFeed(FeedDefinition feed) => BeginEdit(feed);
+    private void BeginEdit(FeedDefinition? feed)
+    {
+        _original = feed;
+        _draftName = feed?.Name ?? "";
+        _draftOrder = feed?.Order ?? FeedOrder.Newest;
+        _editorError = null;
+        _draftSources = _stash.Select(instance => new SourceDraft(FeedProvider.Stash, instance.Id, instance.Name))
+            .Concat(_hydrus.Select(instance => new SourceDraft(FeedProvider.Hydrus, instance.Id, instance.Name)))
+            .Concat(_swarm.Select(instance => new SourceDraft(FeedProvider.SwarmUI, instance.Id, instance.Name) { Roots = string.Join(", ", instance.SearchPaths.Select(path => path.Path)) })).ToList();
+        foreach (var source in feed?.Sources ?? [])
+        {
+            var draft = _draftSources.FirstOrDefault(item => item.Provider == source.Provider && item.InstanceId == source.InstanceId);
+            if (draft is null) { draft = new SourceDraft(source.Provider, source.InstanceId, $"Missing instance ({source.InstanceId})") { Missing = true }; _draftSources.Add(draft); }
+            draft.Load(source);
+        }
+        if (feed is not null)
+            _draftSources = _draftSources.OrderBy(draft => { var index = feed.Sources.ToList().FindIndex(source => source.Provider == draft.Provider && source.InstanceId == draft.InstanceId); return index < 0 ? int.MaxValue : index; }).ToList();
+        _editing = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        _editorError = null;
+        try
+        {
+            var feeds = await Store.GetAllAsync(_lifetime.Token);
+            if (_original is not null && !SameFeed(_original, feeds.FirstOrDefault(feed => feed.Id == _original.Id)))
+                throw new InvalidDataException("This feed changed or was deleted elsewhere. Close the editor and reload before saving.");
+            var stash = await StashStore.GetAllAsync(_lifetime.Token);
+            var hydrus = await HydrusStore.GetAllAsync(_lifetime.Token);
+            var swarm = await SwarmStore.GetAllAsync(_lifetime.Token);
+            var selected = _draftSources.Where(source => source.Selected).ToArray();
+            if (selected.Length == 0) throw new InvalidDataException("Select at least one source.");
+            foreach (var source in selected)
+            {
+                var exists = source.Provider switch { FeedProvider.Stash => stash.Any(item => item.Id == source.InstanceId), FeedProvider.Hydrus => hydrus.Any(item => item.Id == source.InstanceId), FeedProvider.SwarmUI => swarm.Any(item => item.Id == source.InstanceId), _ => false };
+                if (!exists) throw new InvalidDataException($"{source.Name} is no longer available. Remove it before saving.");
+                if (source.Provider == FeedProvider.SwarmUI && !string.IsNullOrWhiteSpace(source.SwarmFolder))
+                {
+                    var folder = source.SwarmFolder.Trim();
+                    var instance = swarm.Single(item => item.Id == source.InstanceId);
+                    if (!SwarmUIPaths.IsValidRelativePath(folder) || !instance.SearchPaths.Any(root => folder == root.Path || folder.StartsWith(root.Path + "/", StringComparison.Ordinal)))
+                        throw new InvalidDataException($"The folder for {source.Name} must be inside a configured root.");
+                }
+            }
+            var feed = new FeedDefinition(_original?.Id ?? Guid.NewGuid(), _draftName.Trim(), _draftOrder, selected.Select(source => source.ToSource()).ToArray());
+            await Store.SaveAsync(feed, _lifetime.Token);
+            await RefreshAsync();
+            _editing = false;
+            if (_activeId == feed.Id) await OpenFeedAsync(feed);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _editorError = $"Could not save feed: {exception.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private async Task MoveAsync(Guid id, int direction)
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            var ids = _feeds.Select(feed => feed.Id).ToList();
+            var index = ids.IndexOf(id);
+            if (index < 0 || index + direction < 0 || index + direction >= ids.Count) return;
+            (ids[index], ids[index + direction]) = (ids[index + direction], ids[index]);
+            await Store.ReorderAsync(ids, _lifetime.Token);
+            _feeds = await Store.GetAllAsync(_lifetime.Token);
+            _error = null;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _error = $"Could not reorder feeds: {exception.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (_busy || _deleting is null) return;
+        _busy = true;
+        try
+        {
+            var current = await Store.GetAllAsync(_lifetime.Token);
+            if (!SameFeed(_deleting, current.FirstOrDefault(feed => feed.Id == _deleting.Id))) throw new InvalidDataException("This feed changed or was deleted elsewhere. Reload before deleting it.");
+            await Store.RemoveAsync(_deleting.Id, _lifetime.Token);
+            if (_activeId == _deleting.Id) ClearViewer();
+            _feeds = await Store.GetAllAsync(_lifetime.Token);
+            _deleting = null;
+            _error = null;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _deleting = null; _error = $"Could not delete feed: {exception.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private static bool SameFeed(FeedDefinition expected, FeedDefinition? current) => current is not null && JsonSerializer.Serialize(expected) == JsonSerializer.Serialize(current);
+    private void CloseEditor() { if (!_busy) _editing = false; }
+    private void EditorKey(KeyboardEventArgs args) { if (args.Key == "Escape") CloseEditor(); }
+    private void ClearViewer() { _generation++; _session = null; _activeId = null; _items.Clear(); _pageErrors.Clear(); _loading = false; _hasMore = false; _mediaError = false; _index = 0; }
+    private async Task OpenFeedAsync(FeedDefinition feed)
+    {
+        ClearViewer();
+        _activeId = feed.Id;
+        try { _session = FeedService.Start(feed); _hasMore = true; await LoadNextAsync(); }
+        catch (Exception exception) { _pageErrors.Add($"Could not open feed: {exception.Message}"); }
+    }
+
+    private async Task LoadNextAsync()
+    {
+        if (_loading || !_hasMore || _session is null) return;
+        var generation = _generation;
+        var session = _session;
+        _loading = true;
+        try
+        {
+            var page = await session.LoadNextAsync(_lifetime.Token);
+            if (_disposed || generation != _generation) return;
+            _items.AddRange(page.Items);
+            _pageErrors.AddRange(page.Errors);
+            _hasMore = page.HasMore;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { if (!_disposed && generation == _generation) _pageErrors.Add($"Could not load feed: {exception.Message}"); }
+        finally { if (generation == _generation) _loading = false; }
+    }
+
+    private void MediaFailed() => _mediaError = true;
+    private void Previous() { if (_index > 0) { _index--; _mediaError = false; } }
+    private async Task NextAsync()
+    {
+        var generation = _generation;
+        if (_index + 1 >= _items.Count && _hasMore) await LoadNextAsync();
+        if (_disposed || generation != _generation) return;
+        if (_index + 1 < _items.Count) { _index++; _mediaError = false; }
+        if (_index + 2 >= _items.Count && _hasMore && !_loading) await LoadNextAsync();
+    }
+    private async Task ViewerKeyAsync(KeyboardEventArgs args) { if (args.Key == "ArrowLeft") Previous(); else if (args.Key == "ArrowRight") await NextAsync(); }
+    [JSInvokable]
+    public Task SwipeAsync(bool next) => InvokeAsync(async () =>
+    {
+        if (_disposed || _editing || _deleting is not null) return;
+        if (next) await NextAsync(); else Previous();
+        if (!_disposed) StateHasChanged();
+    });
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true; _generation++; _lifetime.Cancel();
+        try
+        {
+            if (_gestureListener is not null) { await _gestureListener.InvokeVoidAsync("dispose"); await _gestureListener.DisposeAsync(); }
+            if (_gestureModule is not null) await _gestureModule.DisposeAsync();
+        }
+        catch (JSDisconnectedException) { }
+        finally { _gestureTarget?.Dispose(); _lifetime.Dispose(); }
+    }
+
+    private sealed class SourceDraft(FeedProvider provider, Guid instanceId, string name)
+    {
+        public FeedProvider Provider { get; } = provider;
+        public Guid InstanceId { get; } = instanceId;
+        public string Name { get; } = name;
+        public bool Selected { get; set; }
+        public bool Missing { get; set; }
+        public string Roots { get; set; } = "";
+        public FeedMedia Media { get; set; }
+        public string HydrusQuery { get; set; } = "";
+        public string SwarmFolder { get; set; } = "";
+        public string SwarmQuery { get; set; } = "";
+        public string IncludeTags { get; set; } = "";
+        public string ExcludeTags { get; set; } = "";
+        public string IncludePerformers { get; set; } = "";
+        public string ExcludePerformers { get; set; } = "";
+        public void Load(FeedSource source)
+        {
+            Selected = true; Media = source.Media; HydrusQuery = source.HydrusQuery; SwarmFolder = source.SwarmFolder; SwarmQuery = source.SwarmQuery;
+            IncludeTags = string.Join('\n', source.IncludeTags); ExcludeTags = string.Join('\n', source.ExcludeTags);
+            IncludePerformers = string.Join('\n', source.IncludePerformers); ExcludePerformers = string.Join('\n', source.ExcludePerformers);
+        }
+        public FeedSource ToSource() => new(InstanceId, Provider) { Media = Media, HydrusQuery = HydrusQuery, SwarmFolder = SwarmFolder.Trim(), SwarmQuery = SwarmQuery, IncludeTags = Split(IncludeTags), ExcludeTags = Split(ExcludeTags), IncludePerformers = Split(IncludePerformers), ExcludePerformers = Split(ExcludePerformers) };
+        private static string[] Split(string text) => text.Split([',', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+}
