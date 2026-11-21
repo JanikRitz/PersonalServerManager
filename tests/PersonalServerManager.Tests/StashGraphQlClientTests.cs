@@ -220,17 +220,17 @@ public sealed class StashGraphQlClientTests
     }
 
     [Theory]
-    [InlineData("A marker", "A marker")]
-    [InlineData("", "Primary tag")]
-    public async Task SearchAsync_MarkersLinkToSceneTimestampWithoutInventingPreview(string title, string expectedTitle)
+    [InlineData("A marker", "A marker", 145.5)]
+    [InlineData("", "Primary tag", null)]
+    public async Task SearchAsync_MarkersLinkToSceneTimestampWithoutInventingPreview(string title, string expectedTitle, double? endSeconds)
     {
         var instance = Instance(null) with { WebUiUrl = new Uri("https://stash.example/prefix/") };
         var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
         {
-            Assert.Contains("scene_markers { id title seconds scene { id } primary_tag { name } screenshot created_at updated_at }", body);
+            Assert.Contains("scene_markers { id title seconds end_seconds scene { id } primary_tag { name } screenshot created_at updated_at }", body);
             return Json(System.Text.Json.JsonSerializer.Serialize(new
             {
-                data = new { findSceneMarkers = new { scene_markers = new[] { new { id = "42", title, seconds = 123.75, scene = new { id = "9" }, primary_tag = new { name = "Primary tag" }, screenshot = "https://evil.example/thumbnail" } } } }
+                data = new { findSceneMarkers = new { scene_markers = new[] { new { id = "42", title, seconds = 123.75, end_seconds = endSeconds, scene = new { id = "9" }, primary_tag = new { name = "Primary tag" }, screenshot = "https://evil.example/thumbnail" } } } }
             }));
         })));
         var previousCulture = System.Globalization.CultureInfo.CurrentCulture;
@@ -239,6 +239,8 @@ public sealed class StashGraphQlClientTests
             System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("de-DE");
             var result = Assert.Single(await client.SearchAsync(instance, StashSearchKind.Markers, "query"));
             Assert.Equal(expectedTitle, result.Title);
+            Assert.Equal(TimeSpan.FromSeconds(123.75), result.MarkerStart);
+            Assert.Equal(endSeconds.HasValue ? TimeSpan.FromSeconds(endSeconds.Value) : null, result.MarkerEnd);
             Assert.Equal(new Uri("https://stash.example/prefix/scenes/9?t=123.75"), result.ItemUrl);
             Assert.Null(result.ThumbnailUrl);
             Assert.Equal("42", result.Id);

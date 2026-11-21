@@ -5,6 +5,7 @@
 @using PersonalServerManager.Search
 @using PersonalServerManager.LocalLibraries
 @using PersonalServerManager.Management
+@using PersonalServerManager.SwarmUI
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
 @inject IHydrusInstanceStore HydrusStore
@@ -12,6 +13,7 @@
 @inject LibrarySearchService LibrarySearch
 @inject ComicCompanionService ComicCompanion
 @inject ILocalLibraryStore LocalStore
+@inject ISwarmUIInstanceStore SwarmStore
 
 <PageTitle>Library search | Personal Server Manager</PageTitle>
 
@@ -37,7 +39,7 @@
                 <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search all libraries" autocomplete="off" />
                 <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _isSorting || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
             </form>
-            @if (_configurationLoaded && _comicCompanionCount + _instances.Count + _hydrusInstances.Count + _localLibraries.Count == 0 && _pageError is null)
+            @if (_configurationLoaded && _comicCompanionCount + _instances.Count + _hydrusInstances.Count + _localLibraries.Count + _swarmInstances.Count == 0 && _pageError is null)
             {
                 <p class="empty-state">No backends connected. <a href="/backends">Add a backend</a></p>
             }
@@ -137,6 +139,18 @@
                                     var durationBadgeLabel = item.Duration is { } duration &&
                                         group.Type is LibraryMediaType.Video or LibraryMediaType.Image
                                             ? $"Duration: {FormatDuration(duration)}" : null;
+                                    var durationBadgeText = durationBadgeLabel is not null ? FormatDuration(item.Duration!.Value) : null;
+                                    if (group.Type == LibraryMediaType.Marker && item.MarkerStart is { } markerStart)
+                                    {
+                                        durationBadgeText = FormatDuration(markerStart);
+                                        durationBadgeLabel = $"Start: {durationBadgeText}";
+                                        if (item.MarkerEnd is { } markerEnd)
+                                        {
+                                            var endText = FormatDuration(markerEnd);
+                                            durationBadgeText += $" - {endText}";
+                                            durationBadgeLabel += $", end: {endText}";
+                                        }
+                                    }
                                     if (durationBadgeLabel is not null) descriptions += $" {badgeId}-duration";
                                     <li class="media-tile" @key="(entry.Source.InstanceId, entry.Source.Category, item.Id)">
                                         <a class="thumbnail-link" href="@(item.ReaderUrl ?? item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ReaderUrl is not null ? $"Read {item.Title}" : item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")" aria-describedby="@descriptions">
@@ -150,15 +164,17 @@
                                             {
                                                 <span class="format-badge" id="@($"{badgeId}-format")">@item.FileFormat</span>
                                             }
-                                            <span class="source-badge @(contentBadgeText is null ? string.Empty : "with-content-badge")" id="@($"{badgeId}-source")" title="@sourceLabel">@sourceLabel</span>
-                                            @if (contentBadgeText is not null)
-                                            {
-                                                <span class="content-count-badge" id="@($"{badgeId}-count")" aria-label="@contentBadgeLabel" title="@contentBadgeLabel">@contentBadgeText</span>
-                                            }
-                                            @if (durationBadgeLabel is not null)
-                                            {
-                                                <span class="duration-badge" id="@($"{badgeId}-duration")" aria-label="@durationBadgeLabel" title="@durationBadgeLabel">@FormatDuration(item.Duration!.Value)</span>
-                                            }
+                                            <span class="bottom-badges">
+                                                <span class="source-badge" id="@($"{badgeId}-source")" title="@sourceLabel">@sourceLabel</span>
+                                                @if (contentBadgeText is not null)
+                                                {
+                                                    <span class="content-count-badge" id="@($"{badgeId}-count")" aria-label="@contentBadgeLabel" title="@contentBadgeLabel">@contentBadgeText</span>
+                                                }
+                                                @if (durationBadgeLabel is not null)
+                                                {
+                                                    <span class="duration-badge" id="@($"{badgeId}-duration")" aria-label="@durationBadgeLabel" title="@durationBadgeLabel">@durationBadgeText</span>
+                                                }
+                                            </span>
                                             @if (ratingLabel is not null)
                                             {
                                                 <span class="rating-badge" id="@($"{badgeId}-rating")" title="@ratingLabel">
@@ -188,7 +204,7 @@
                                         {
                                             <a class="text-action" href="@source.SearchUrl" target="_blank" rel="noopener noreferrer">Show everything in @source.InstanceName <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
                                         }
-                                        else
+                                        else if (source.Provider == "Hydrus")
                                         {
                                             <button class="text-action" type="button" disabled="@(_openingHydrus is not null)" title="Create and focus the full query in the Hydrus desktop client" @onclick="() => OpenHydrusAsync(source.InstanceId)">@(_openingHydrus == source.InstanceId ? "Opening..." : $"Show everything in {source.InstanceName}") <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></button>
                                         }
@@ -215,6 +231,7 @@
     private IReadOnlyList<StashInstance> _instances = [];
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
+    private IReadOnlyList<SwarmUIInstance> _swarmInstances = [];
     private IReadOnlyList<LibraryGroup> _groups = [];
     private IReadOnlyList<LibraryGroup>? _expandedGroups;
     private IReadOnlyList<LibraryTypeGroup> _typeGroups = [];
@@ -282,6 +299,7 @@
             _instances = await InstanceStore.GetAllAsync(_lifetime.Token);
             _hydrusInstances = await HydrusStore.GetAllAsync(_lifetime.Token);
             _localLibraries = await LocalStore.GetAllAsync(_lifetime.Token);
+            _swarmInstances = await SwarmStore.GetAllAsync(_lifetime.Token);
             _comicCompanionCount = (await ComicCompanion.GetAllAsync(_lifetime.Token)).Count;
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UriFormatException or System.Security.Cryptography.CryptographicException or UnauthorizedAccessException or System.Text.Json.JsonException)
@@ -317,7 +335,7 @@
         _submittedQuery = _query.Trim();
         try
         {
-            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries, sort: _sort);
+            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries, sort: _sort, swarmInstances: _swarmInstances);
             ApplySort();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -395,7 +413,8 @@
         var groups = await LibrarySearch.SearchAsync(
             _instances.Where(instance => !unavailable.Contains(("Stash", instance.Id))).ToArray(),
             _hydrusInstances.Where(instance => !unavailable.Contains(("Hydrus", instance.Id))).ToArray(),
-            _submittedQuery, _lifetime.Token, limit: limit, localLibraries: _localLibraries, sort: _sort);
+            _submittedQuery, _lifetime.Token, limit: limit, localLibraries: _localLibraries, sort: _sort,
+            swarmInstances: _swarmInstances.Where(instance => !unavailable.Contains(("SwarmUI", instance.Id))).ToArray());
         var refreshed = groups.ToDictionary(group => (group.Provider, group.InstanceId, group.Category));
         return current.Select(original =>
         {
@@ -416,6 +435,7 @@
             "Calibre" => _localLibraries.Count(instance => instance.IsCalibre),
             "Notes" => _localLibraries.Count(instance => instance.Kind == LocalLibraryKind.Notes),
             "Comic Companion" => _comicCompanionCount,
+            "SwarmUI" => _swarmInstances.Count,
             _ => 0
         };
         return instanceCount == 1 && string.Equals(source.Provider, source.InstanceName, StringComparison.OrdinalIgnoreCase)

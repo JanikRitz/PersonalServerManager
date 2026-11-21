@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.Management;
 using PersonalServerManager.Stash;
+using PersonalServerManager.SwarmUI;
 using Xunit;
 using YamlDotNet.RepresentationModel;
 
@@ -149,6 +150,47 @@ public sealed class ManagedBackendServiceTests : IDisposable
             await service.StopAsync(CancellationToken.None);
             await service.StartInstanceAsync(instance.Id);
             Assert.Contains("shutting down", service.GetStatus(instance.Id).Message);
+        }
+        finally { listener.Stop(); }
+    }
+
+    [Fact]
+    public void SwarmUIManagedValidationRequiresBuiltExecutableAndLoopbackUrl()
+    {
+        var instance = new SwarmUIInstance(Guid.NewGuid(), "Swarm", new Uri("http://127.0.0.1:7801/"),
+            SwarmUIInstance.DefaultSearchPaths, _folder);
+        var missing = Assert.Throws<InvalidDataException>(() => ManagedBackendService.ValidateSwarmUIInstance(instance));
+        Assert.Contains("SwarmUI.exe", missing.Message);
+        var binaries = Directory.CreateDirectory(Path.Combine(_folder, "src", "bin", "live_release"));
+        File.WriteAllText(Path.Combine(binaries.FullName, "SwarmUI.exe"), string.Empty);
+
+        ManagedBackendService.ValidateSwarmUIInstance(instance);
+        ManagedBackendService.ValidateSwarmUIInstance(instance with { InstallationFolder = null, BaseUrl = new Uri("http://example.test/") });
+        Assert.Throws<InvalidDataException>(() => ManagedBackendService.ValidateSwarmUIInstance(instance with { InstallationFolder = "relative\\swarm" }));
+        Assert.Throws<InvalidDataException>(() => ManagedBackendService.ValidateSwarmUIInstance(instance with { BaseUrl = new Uri("http://localhost:7801/") }));
+        Assert.Throws<InvalidDataException>(() => ManagedBackendService.ValidateSwarmUIInstance(instance with { Port = 7802 }));
+        Assert.Throws<InvalidDataException>(() => ManagedBackendService.ValidateSwarmUIInstance(instance with { Port = 0, BaseUrl = new Uri("http://127.0.0.1/") }));
+    }
+
+    [Fact]
+    public async Task ManagedSwarmUIOnOccupiedPortIsNotLaunched()
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0) { ExclusiveAddressUse = true };
+        listener.Start();
+        try
+        {
+            var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            var binaries = Directory.CreateDirectory(Path.Combine(_folder, "src", "bin", "live_release"));
+            await File.WriteAllTextAsync(Path.Combine(binaries.FullName, "SwarmUI.exe"), string.Empty);
+            var swarm = new JsonSwarmUIInstanceStore(Path.Combine(_folder, "swarmui.json"));
+            var instance = new SwarmUIInstance(Guid.NewGuid(), "Swarm", new Uri($"http://127.0.0.1:{port}/"),
+                SwarmUIInstance.DefaultSearchPaths, _folder, port);
+            await swarm.SaveAsync(instance);
+            using var service = new ManagedBackendService(CreateStashStore(), CreateHydrusStore(),
+                NullLogger<ManagedBackendService>.Instance, swarm);
+            await service.StartInstanceAsync(instance.Id);
+            Assert.Contains("already in use", service.GetStatus(instance.Id).Message);
+            Assert.False(service.GetStatus(instance.Id).IsRunning);
         }
         finally { listener.Stop(); }
     }

@@ -4,11 +4,13 @@
 @using PersonalServerManager.Hydrus
 @using PersonalServerManager.LocalLibraries
 @using PersonalServerManager.Management
+@using PersonalServerManager.SwarmUI
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
 @inject IStashGraphQlClient StashClient
 @inject IHydrusInstanceStore HydrusStore
 @inject ILocalLibraryStore LocalStore
+@inject ISwarmUIInstanceStore SwarmStore
 @inject ManagedBackendService ManagedBackends
 @inject IJSRuntime JavaScript
 
@@ -28,7 +30,7 @@
         <div class="page-heading">
             <h1>Server Management</h1>
             <div class="heading-meta">
-                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count + _comicInstanceCount).ToString("00")) <span>INSTANCES</span></span>
+                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count + _swarmInstanceCount + _comicInstanceCount).ToString("00")) <span>INSTANCES</span></span>
             </div>
         </div>
         @if (_pageError is not null)
@@ -97,6 +99,7 @@
             </section>
 
             <div class="hydrus-section"><HydrusInstances Changed="ReloadHydrusAsync" /></div>
+            <div class="backend-section"><SwarmUIInstances Changed="ReloadSwarmAsync" /></div>
             <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Calibre" Changed="ReloadLocalAsync" /></div>
             <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Notes" Changed="ReloadLocalAsync" /></div>
             <div class="backend-section"><ComicCompanionControls CountChanged="count => _comicInstanceCount = count" /></div>
@@ -149,6 +152,7 @@
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
     private int _comicInstanceCount;
+    private int _swarmInstanceCount;
     private Guid? _selectedInstanceId;
     private DateTimeOffset? _lastRefresh;
     private string _draftName = string.Empty;
@@ -178,6 +182,7 @@
             await LoadInstancesAsync();
             await ReloadHydrusAsync();
             await ReloadLocalAsync();
+            await ReloadSwarmAsync();
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
     }
@@ -413,6 +418,16 @@
         {
             _localError = "Local library configuration could not be loaded. Existing data was not changed.";
         }
+    }
+
+    private async Task ReloadSwarmAsync()
+    {
+        try
+        {
+            _swarmInstanceCount = (await SwarmStore.GetAllAsync(_token)).Count;
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsConfigurationFailure(exception)) { }
     }
 
     private void CancelEdit()

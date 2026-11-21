@@ -1,0 +1,452 @@
+@using PersonalServerManager.SwarmUI
+@using System.Text.Json
+@using PersonalServerManager.Management
+@implements IDisposable
+@inject ISwarmUIInstanceStore Store
+@inject ISwarmUIClient Client
+@inject ManagedBackendService ManagedBackends
+@inject IJSRuntime JavaScript
+
+<section class="swarmui-instances" aria-labelledby="@FieldId("heading")">
+    <header class="swarmui-heading">
+        <h2 id="@FieldId("heading")">SwarmUI</h2>
+        <button class="icon-button" type="button" title="Add SwarmUI instance" aria-label="Add SwarmUI instance" disabled="@(_busy || _loading)" @onclick="AddInstance">
+            <MudIcon Icon="@Icons.Material.Filled.Add" aria-hidden="true" />
+        </button>
+    </header>
+    @if (_error is not null)
+    {
+        <p class="error-message" role="alert">@_error</p>
+        <button class="retry-button" type="button" disabled="@(_busy || _loading)" @onclick="ReloadAsync">Retry loading</button>
+    }
+    @if (_loading)
+    {
+        <p class="empty-message" role="status">Loading SwarmUI instances...</p>
+    }
+    else if (_instances.Count == 0 && _error is null)
+    {
+        <p class="empty-message">No SwarmUI instances configured.</p>
+    }
+    <ul class="swarmui-list" aria-label="SwarmUI instances">
+        @foreach (var instance in _instances)
+        {
+            var observation = _observations.GetValueOrDefault(instance.Id);
+            <li @key="instance.Id" class="swarmui-row">
+                <span class="status-dot @(observation is null ? string.Empty : observation.IsReachable ? "online" : "offline")" aria-hidden="true"></span>
+                <div class="instance-copy">
+                    <strong>@instance.Name</strong>
+                    <span class="instance-status" role="status">@(observation is null ? "Checking..." : observation.IsReachable ? "Available" : "Unavailable")</span>
+                    <dl class="instance-details">
+                        <dt>Base URL</dt><dd>@instance.BaseUrl.AbsoluteUri</dd>
+                        <dt>Search paths</dt>
+                        <dd>@string.Join(", ", instance.SearchPaths.Select(path => $"{path.Path} (depth {path.Depth})"))</dd>
+                        <dt>Observation</dt><dd>@(observation?.Message is { Length: > 0 } message ? message : "First check pending")</dd>
+                    </dl>
+                    @if (instance.IsManaged)
+                    {
+                        <ManagedBackendControls InstanceId="@instance.Id" StartWithApp="@instance.StartWithApp" StartWithAppChanged="enabled => SaveAutostartAsync(instance, enabled)" />
+                    }
+                    <a class="open-link" href="@instance.BaseUrl.AbsoluteUri" target="_blank" rel="noopener noreferrer" aria-label="@($"Open SwarmUI {instance.Name}")">Open SwarmUI<MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" aria-hidden="true" /></a>
+                </div>
+                <div class="row-actions">
+                    <button class="icon-button" type="button" title="Edit SwarmUI instance" aria-label="@($"Edit SwarmUI instance {instance.Name}")" disabled="@_busy" @onclick="() => EditInstance(instance)">
+                        <MudIcon Icon="@Icons.Material.Filled.Edit" aria-hidden="true" />
+                    </button>
+                    <button class="icon-button remove-button" type="button" title="Remove SwarmUI instance" aria-label="@($"Remove SwarmUI instance {instance.Name}")" disabled="@_busy" @onclick="() => RemoveAsync(instance)">
+                        <MudIcon Icon="@Icons.Material.Filled.DeleteOutline" aria-hidden="true" />
+                    </button>
+                </div>
+            </li>
+        }
+    </ul>
+
+    @if (_editing)
+    {
+        <div class="swarmui-backdrop" @onkeydown="HandleEditorKey">
+            <dialog open class="swarmui-dialog" aria-modal="true" aria-labelledby="@FieldId("editor-title")">
+                <header class="editor-heading">
+                    <h3 id="@FieldId("editor-title")">@(_editingId is null ? "Add SwarmUI instance" : "Edit SwarmUI instance")</h3>
+                    <button class="icon-button" type="button" title="Close SwarmUI editor" aria-label="Close SwarmUI editor" disabled="@_busy" @onclick="CancelEdit">
+                        <MudIcon Icon="@Icons.Material.Filled.Close" aria-hidden="true" />
+                    </button>
+                </header>
+                @if (_editorError is not null)
+                {
+                    <p class="error-message" role="alert">@_editorError</p>
+                }
+                <form @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
+                    <fieldset disabled="@_busy">
+                        <label for="@FieldId("name")">SwarmUI instance name</label>
+                        <input id="@FieldId("name")" @bind="_draftName" @bind:event="oninput" maxlength="60" required autofocus />
+                        <div class="mode-selector" role="radiogroup" aria-label="SwarmUI mode">
+                            <label><input type="radio" name="@FieldId("mode")" checked="@(!_draftManaged)" @onchange="() => _draftManaged = false" /> External</label>
+                            <label><input type="radio" name="@FieldId("mode")" checked="@_draftManaged" @onchange="() => _draftManaged = true" /> Managed</label>
+                        </div>
+                        @if (_draftManaged)
+                        {
+                            <label for="@FieldId("installation")">SwarmUI installation folder</label>
+                            <input id="@FieldId("installation")" @bind="_draftInstallation" required placeholder="C:\Servers\SwarmUI" aria-describedby="@FieldId("installation-help")" />
+                            <small id="@FieldId("installation-help")">Build SwarmUI once with launch-windows.bat. PSM runs src\bin\live_release\SwarmUI.exe and never builds or updates it.</small>
+                            <label for="@FieldId("port")">Port</label>
+                            <input id="@FieldId("port")" @bind="_draftPort" type="number" min="1" max="65535" required />
+                            <label class="checkbox-label"><input type="checkbox" @bind="_draftAutostart" /> Start with Personal Server Manager</label>
+                        }
+                        else
+                        {
+                            <label for="@FieldId("url")">SwarmUI base URL</label>
+                            <input id="@FieldId("url")" @bind="_draftUrl" @bind:event="oninput" type="url" required spellcheck="false" aria-describedby="@FieldId("url-help")" />
+                            <small id="@FieldId("url-help")">Use HTTP or HTTPS without credentials, a query, or a fragment.</small>
+                        }
+                        <fieldset class="search-paths">
+                            <legend>Search paths</legend>
+                            <small>Folders below the SwarmUI output root, such as raw. Depth limits how many subfolders are searched.</small>
+                            @for (var index = 0; index < _draftPaths.Count; index++)
+                            {
+                                var row = _draftPaths[index];
+                                var number = index + 1;
+                                <div class="search-path-row" @key="row">
+                                    <input @bind="row.Path" @bind:event="oninput" required maxlength="@SwarmUIPaths.MaximumPathLength" spellcheck="false" placeholder="raw" aria-label="@($"Search path {number}")" />
+                                    <input class="depth-input" @bind="row.Depth" type="number" min="1" max="@SwarmUISearchPath.MaximumDepth" required aria-label="@($"Search depth {number}")" title="Search depth" />
+                                    <button class="icon-button remove-button" type="button" title="Remove search path" aria-label="@($"Remove search path {number}")" disabled="@(_draftPaths.Count <= 1)" @onclick="() => _draftPaths.Remove(row)">
+                                        <MudIcon Icon="@Icons.Material.Filled.DeleteOutline" aria-hidden="true" />
+                                    </button>
+                                </div>
+                            }
+                            <button class="add-path-button" type="button" aria-label="Add search path" disabled="@(_draftPaths.Count >= SwarmUIInstance.MaximumSearchPaths)" @onclick="AddPath">
+                                <MudIcon Icon="@Icons.Material.Filled.Add" Size="Size.Small" aria-hidden="true" />Add search path
+                            </button>
+                        </fieldset>
+                        <div class="editor-actions">
+                            <button class="cancel-button" type="button" @onclick="CancelEdit">Cancel</button>
+                            <button class="save-button" type="submit">@(_busy ? "Saving..." : "Save instance")</button>
+                        </div>
+                    </fieldset>
+                </form>
+            </dialog>
+        </div>
+    }
+</section>
+
+@code {
+    private const string DefaultUrl = "http://localhost:7801/";
+
+    [Parameter] public EventCallback Changed { get; set; }
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly string _id = $"swarmui-{Guid.NewGuid():N}";
+    private readonly Dictionary<Guid, SwarmUIObservation> _observations = [];
+    private CancellationToken _token;
+    private IReadOnlyList<SwarmUIInstance> _instances = [];
+    private bool _loading = true;
+    private bool _busy;
+    private bool _editing;
+    private bool _disposed;
+    private Guid? _editingId;
+    private string _draftName = string.Empty;
+    private string _draftUrl = DefaultUrl;
+    private bool _draftManaged;
+    private string _draftInstallation = string.Empty;
+    private int _draftPort = SwarmUIInstance.DefaultPort;
+    private bool _draftAutostart;
+    private List<PathRow> _draftPaths = [];
+    private string? _error;
+    private string? _editorError;
+
+    private sealed class PathRow
+    {
+        public string Path { get; set; } = SwarmUISearchPath.DefaultPath;
+        public int Depth { get; set; } = SwarmUISearchPath.DefaultDepth;
+    }
+
+    private string FieldId(string suffix) => $"{_id}-{suffix}";
+
+    protected override async Task OnInitializedAsync()
+    {
+        _token = _lifetime.Token;
+        await ReloadAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_disposed)
+        {
+            _ = ObservePeriodicallyAsync();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _instances = await Store.GetAllAsync(_token);
+            _observations.Clear();
+            await RefreshObservationsAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _error = "Could not load SwarmUI instances. Check configuration file access, then retry.";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task RefreshObservationsAsync()
+    {
+        var snapshot = _instances;
+        var observations = await Task.WhenAll(snapshot.Select(async instance =>
+        {
+            try
+            {
+                return await Client.ObserveAsync(instance, _token);
+            }
+            catch (OperationCanceledException) when (_token.IsCancellationRequested) { throw; }
+            catch (Exception exception) when (IsExpectedFailure(exception))
+            {
+                return new SwarmUIObservation(instance.Id, instance.Name, false, DateTimeOffset.UtcNow, "SwarmUI could not be reached.");
+            }
+        }));
+
+        if (!_disposed && ReferenceEquals(snapshot, _instances))
+        {
+            foreach (var observation in observations)
+            {
+                _observations[observation.InstanceId] = observation;
+            }
+        }
+    }
+
+    private async Task ObservePeriodicallyAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_token))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (!_disposed && !_busy && !_loading)
+                    {
+                        await RefreshObservationsAsync();
+                        if (!_disposed)
+                        {
+                            StateHasChanged();
+                        }
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (_disposed) { }
+    }
+
+    private void AddInstance()
+    {
+        _editingId = null;
+        _draftName = string.Empty;
+        _draftUrl = DefaultUrl;
+        _draftManaged = false;
+        _draftInstallation = string.Empty;
+        _draftPort = SwarmUIInstance.DefaultPort;
+        _draftAutostart = false;
+        _draftPaths = [new()];
+        _editorError = null;
+        _editing = true;
+    }
+
+    private void EditInstance(SwarmUIInstance instance)
+    {
+        if (ManagedBackends.GetStatus(instance.Id).IsRunning)
+        {
+            _error = "Stop SwarmUI before editing its configuration.";
+            return;
+        }
+        _editingId = instance.Id;
+        _draftName = instance.Name;
+        _draftUrl = instance.IsManaged ? DefaultUrl : instance.BaseUrl.AbsoluteUri;
+        _draftManaged = instance.IsManaged;
+        _draftInstallation = instance.InstallationFolder ?? string.Empty;
+        _draftPort = instance.Port;
+        _draftAutostart = instance.StartWithApp;
+        _draftPaths = instance.SearchPaths.Select(path => new PathRow { Path = path.Path, Depth = path.Depth }).ToList();
+        _editorError = null;
+        _editing = true;
+    }
+
+    private void AddPath()
+    {
+        if (_draftPaths.Count < SwarmUIInstance.MaximumSearchPaths)
+        {
+            _draftPaths.Add(new() { Path = string.Empty });
+        }
+    }
+
+    private void CancelEdit()
+    {
+        if (!_busy)
+        {
+            _editing = false;
+            _editingId = null;
+            _editorError = null;
+        }
+    }
+
+    private void HandleEditorKey(KeyboardEventArgs args)
+    {
+        if (args.Key == "Escape")
+        {
+            CancelEdit();
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_busy || _disposed)
+        {
+            return;
+        }
+
+        _editorError = null;
+        if (string.IsNullOrWhiteSpace(_draftName) || _draftName.Trim().Length > 60)
+        {
+            _editorError = "Enter a SwarmUI instance name of up to 60 characters.";
+            return;
+        }
+
+        var url = _draftManaged ? $"http://127.0.0.1:{_draftPort}/" : _draftUrl.Trim();
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var baseUrl) || string.IsNullOrEmpty(baseUrl.Host))
+        {
+            _editorError = _draftManaged ? "Enter a port between 1 and 65535." : "Enter an HTTP or HTTPS SwarmUI URL without credentials, a query, or a fragment.";
+            return;
+        }
+
+        if (_draftPaths.Count == 0)
+        {
+            _editorError = "Add at least one search path.";
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            if (_editingId is { } existingId && ManagedBackends.GetStatus(existingId).IsRunning)
+                throw new InvalidDataException("Stop SwarmUI before editing its configuration.");
+            var instance = new SwarmUIInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), baseUrl,
+                _draftPaths.Select(row => new SwarmUISearchPath(row.Path, row.Depth)).ToArray(),
+                _draftManaged ? _draftInstallation.Trim() : null, _draftPort, _draftManaged && _draftAutostart);
+            await Store.SaveAsync(instance, _token);
+            _editing = false;
+            _editingId = null;
+            await ReloadAsync();
+            await NotifyChangedAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (InvalidDataException exception)
+        {
+            _editorError = $"Configuration was not saved: {exception.Message}";
+        }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _editorError = "Could not save this instance. Check configuration file access, then retry.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task RemoveAsync(SwarmUIInstance instance)
+    {
+        if (_busy || _disposed)
+        {
+            return;
+        }
+
+        _busy = true;
+        _error = null;
+        try
+        {
+            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, $"Remove {instance.Name} from this manager? SwarmUI and its outputs will not be changed."))
+            {
+                return;
+            }
+
+            await ManagedBackends.StopInstanceAsync(instance.Id);
+            if (ManagedBackends.GetStatus(instance.Id).IsRunning)
+                throw new InvalidDataException("SwarmUI could not stop. Retry Stop before removing the instance.");
+            await Store.RemoveAsync(instance.Id, _token);
+            await ReloadAsync();
+            await NotifyChangedAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (InvalidDataException exception)
+        {
+            _error = exception.Message;
+        }
+        catch (Exception exception) when (IsExpectedFailure(exception) || exception is JSException)
+        {
+            _error = "Could not remove this instance. Check the browser connection and configuration file access, then retry.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task SaveAutostartAsync(SwarmUIInstance instance, bool enabled)
+    {
+        try
+        {
+            await Store.SaveAsync(instance with { StartWithApp = enabled }, _token);
+            _instances = await Store.GetAllAsync(_token);
+            await NotifyChangedAsync();
+        }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _error = "Could not save the autostart setting.";
+        }
+    }
+
+    private async Task NotifyChangedAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await Changed.InvokeAsync();
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _error = "The instance configuration was saved, but the page could not refresh. Reload the page to retry.";
+        }
+    }
+
+    private static bool IsExpectedFailure(Exception exception) => exception is
+        IOException or InvalidDataException or ArgumentException or UnauthorizedAccessException or
+        System.Security.SecurityException or JsonException or HttpRequestException or
+        OperationCanceledException or InvalidOperationException or FormatException;
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _instances = [];
+        _observations.Clear();
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

@@ -18,7 +18,8 @@ public sealed class HydrusClientMedia(HttpClient client, IHydrusInstanceStore st
         var response = context.Response;
         response.Headers.CacheControl = "no-store";
         response.Headers.XContentTypeOptions = "nosniff";
-        response.Headers.ContentSecurityPolicy = "default-src 'none'; frame-ancestors 'none'";
+        // Firefox applies this CSP to its standalone media document, so the file itself must be loadable.
+        response.Headers.ContentSecurityPolicy = "default-src 'none'; media-src 'self'; img-src 'self'; frame-ancestors 'none'";
         response.StatusCode = StatusCodes.Status404NotFound;
         if (fileId <= 0) return;
 

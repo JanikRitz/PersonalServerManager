@@ -4,6 +4,7 @@ using PersonalServerManager.Hydrus;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Management;
 using PersonalServerManager.Stash;
+using PersonalServerManager.SwarmUI;
 
 namespace PersonalServerManager.Search;
 
@@ -19,6 +20,8 @@ public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, 
     public int? ContentCount { get; init; }
     public long? FileSizeBytes { get; init; }
     public TimeSpan? Duration { get; init; }
+    public TimeSpan? MarkerStart { get; init; }
+    public TimeSpan? MarkerEnd { get; init; }
     public bool IsFavorite { get; init; }
     public decimal? RatingOutOfFive { get; init; }
 }
@@ -42,8 +45,11 @@ public record LibraryTypeGroup(LibraryMediaType Type, IReadOnlyList<LibraryTypeI
 
 public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydrusClient hydrusClient,
     LocalLibraryClient? localClient = null, ComicCompanionService? comicSettings = null,
-    ComicCompanionClient? comicClient = null)
+    ComicCompanionClient? comicClient = null, ISwarmUIClient? swarmClient = null)
 {
+    private const int MaximumSwarmTitleLength = 120;
+    private const int MaximumSwarmDescriptionLength = 4000;
+
     public static IReadOnlyList<LibraryTypeItem> SortItems(IReadOnlyList<LibraryTypeItem> items, LibrarySort sort) =>
         SortItems(items, entry => entry.Item, sort);
 
@@ -93,7 +99,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
         CancellationToken cancellationToken = default,
         int limit = 5,
         IReadOnlyList<LocalLibraryInstance>? localLibraries = null,
-        LibrarySort sort = LibrarySort.Default)
+        LibrarySort sort = LibrarySort.Default,
+        IReadOnlyList<SwarmUIInstance>? swarmInstances = null)
     {
         if (limit is not (5 or 25))
         {
@@ -132,6 +139,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                         {
                             ContentCount = item.ContentCount,
                             Duration = item.Duration,
+                            MarkerStart = item.MarkerStart,
+                            MarkerEnd = item.MarkerEnd,
                             RatingOutOfFive = item.Rating100 / 20m,
                             IsFavorite = item.IsFavorite,
                             FileFormat = kind is StashSearchKind.Images or StashSearchKind.Scenes
@@ -182,6 +191,22 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                 instance.Kind == LocalLibraryKind.Notes ? "Notes" : "Calibre", category,
                 new Uri($"/libraries/{instance.Id:D}?q={Uri.EscapeDataString(capturedQuery)}", UriKind.Relative),
                 async token => (await client.SearchAsync(instance, capturedQuery, limit, token, sort: sort)).Take(limit).ToArray())));
+        }
+
+        if (swarmClient is not null)
+        {
+            foreach (var instance in swarmInstances ?? [])
+            {
+                tasks.Add(SearchBackendAsync(backend =>
+                [
+                    SearchGroupAsync(instance.Id, instance.Name, "SwarmUI", "Outputs", instance.BaseUrl,
+                        async token => (await swarmClient.SearchAsync(instance, capturedQuery, limit, sort, token))
+                            .GroupBy(file => file.Kind)
+                            .SelectMany(kind => kind.Take(limit))
+                            .Select(file => SwarmItem(instance, file))
+                            .ToArray(), backend)
+                ]));
+            }
         }
 
         if (comicSettings is not null && comicClient is not null)
@@ -280,6 +305,93 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
     private static bool IsBackendUnreachable(Exception exception) => exception is
         HttpRequestException { StatusCode: null or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout }
         or TaskCanceledException;
+
+    private static LibraryItem SwarmItem(SwarmUIInstance instance, SwarmUIFile file)
+    {
+        var prompt = string.IsNullOrWhiteSpace(file.Prompt) ? null
+            : string.Join(' ', file.Prompt.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        var title = prompt is null ? Path.GetFileNameWithoutExtension(file.Path) : Truncate(prompt, MaximumSwarmTitleLength);
+        var size = file is { Width: { } width, Height: { } height } ? $"{width}x{height}" : null;
+        var detail = string.Join(" · ", new[] { file.Model, size }.Where(part => !string.IsNullOrWhiteSpace(part)));
+        return new LibraryItem(file.Path, title, detail,
+            SwarmUIPaths.CreateFileLink(instance.Id, file.Path), SwarmUIPaths.CreatePreviewLink(instance.Id, file.Path),
+            file.Kind == SwarmUIMediaKind.Video ? LibraryMediaType.Video : LibraryMediaType.Image,
+            SwarmDescription(file, size), file.CreatedAt, Path: file.Path)
+        {
+            IsFavorite = file.IsStarred,
+            FileFormat = FormatFromPath(file.Path)
+        };
+    }
+
+    private static string? SwarmDescription(SwarmUIFile file, string? size)
+    {
+        var metadata = file.Metadata.Where(entry => !string.IsNullOrWhiteSpace(entry.Value)).ToArray();
+        bool Has(params string[] keys) => metadata.Any(entry => keys.Contains(entry.Key, StringComparer.OrdinalIgnoreCase));
+        string? Value(string key) => metadata.FirstOrDefault(entry => string.Equals(entry.Key, key, StringComparison.OrdinalIgnoreCase)).Value?.Trim();
+
+        var lines = new List<string>();
+        if ((file.Prompt ?? Value("prompt")) is { } prompt && !string.IsNullOrWhiteSpace(prompt))
+        {
+            lines.Add(prompt.Trim());
+        }
+        if (!Has("model") && !string.IsNullOrWhiteSpace(file.Model))
+        {
+            lines.Add($"Model: {file.Model}");
+        }
+        size ??= Value("width") is { } width && Value("height") is { } height ? $"{width}x{height}" : null;
+        if (!Has("width", "height") && size is not null)
+        {
+            lines.Add($"Size: {size}");
+        }
+
+        var sizeWritten = false;
+        foreach (var (key, value) in metadata)
+        {
+            switch (key.ToLowerInvariant())
+            {
+                case "prompt":
+                    break;
+                case "width" or "height":
+                    if (!sizeWritten && size is not null)
+                    {
+                        lines.Add($"Size: {size}");
+                    }
+                    sizeWritten = true;
+                    break;
+                default:
+                    lines.Add($"{SwarmMetadataLabel(key)}: {value.Trim()}");
+                    break;
+            }
+        }
+
+        return lines.Count == 0 ? null : Truncate(string.Join('\n', lines), MaximumSwarmDescriptionLength);
+    }
+
+    private static string SwarmMetadataLabel(string key) => key.ToLowerInvariant() switch
+    {
+        "negativeprompt" => "Negative prompt",
+        "model" => "Model",
+        "seed" => "Seed",
+        "steps" => "Steps",
+        "cfgscale" => "CFG scale",
+        "aspectratio" => "Aspect ratio",
+        "textvideoframes" => "Video frames",
+        "sampler" => "Sampler",
+        "scheduler" => "Scheduler",
+        "generation_time" => "Generation time",
+        "swarm_version" => "SwarmUI version",
+        _ => key
+    };
+
+    private static string Truncate(string value, int maximumLength)
+    {
+        if (value.Length <= maximumLength)
+        {
+            return value;
+        }
+        var length = char.IsHighSurrogate(value[maximumLength - 4]) ? maximumLength - 4 : maximumLength - 3;
+        return value[..length].TrimEnd() + "...";
+    }
 
     private static string? FormatFromPath(string? path) => Path.GetExtension(path) is { Length: > 1 } extension
         ? NormalizeFormat(extension[1..]) : null;

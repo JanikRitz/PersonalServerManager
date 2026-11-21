@@ -41,6 +41,8 @@ public sealed record StashSearchResult(
     public DateTimeOffset? CreatedAt { get; init; }
     public DateTimeOffset? UpdatedAt { get; init; }
     public TimeSpan? Duration { get; init; }
+    public TimeSpan? MarkerStart { get; init; }
+    public TimeSpan? MarkerEnd { get; init; }
     public string? Path { get; init; }
     public int? ContentCount { get; init; }
     public int? Rating100 { get; init; }

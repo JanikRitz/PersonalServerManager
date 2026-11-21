@@ -128,6 +128,21 @@ public sealed class LibrarySearchServiceTests
     }
 
     [Fact]
+    public async Task SearchAsync_PreservesMarkerTimes()
+    {
+        var stash = new FakeStashClient((instance, kind, _, _) =>
+            Task.FromResult<IReadOnlyList<StashSearchResult>>([StashResult(instance, kind) with
+                { MarkerStart = TimeSpan.Zero, MarkerEnd = TimeSpan.FromSeconds(90) }]));
+
+        var groups = await new LibrarySearchService(stash, new FakeHydrusClient())
+            .SearchAsync([StashInstance("Stash")], [], "query");
+
+        var marker = Assert.Single(Assert.Single(groups, group => group.Category == "Markers").Items);
+        Assert.Equal(TimeSpan.Zero, marker.MarkerStart);
+        Assert.Equal(TimeSpan.FromSeconds(90), marker.MarkerEnd);
+    }
+
+    [Fact]
     public async Task SearchAsync_MapsAllEightStashCategories()
     {
         var stash = new FakeStashClient((instance, kind, _, _) =>

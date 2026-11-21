@@ -74,9 +74,9 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--teal); outline-
 .format-badge, .source-badge, .rating-badge, .content-count-badge, .duration-badge { position: absolute; padding: 2px 5px; border-radius: 4px; background: #17251f; color: #fff; font: 600 10px/1.4 "Segoe UI", sans-serif; }
 .rating-badge { top: 6px; left: 6px; color: #ffd36a; white-space: nowrap; }
 .format-badge { top: 6px; right: 6px; }
-.source-badge { bottom: 6px; left: 6px; max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.source-badge.with-content-badge { max-width: calc(100% - 56px); }
-.content-count-badge, .duration-badge { right: 6px; bottom: 6px; min-width: 22px; text-align: center; }
+.bottom-badges { position: absolute; bottom: 6px; left: 6px; right: 6px; display: flex; align-items: end; justify-content: space-between; gap: 4px; }
+.source-badge { position: static; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.content-count-badge, .duration-badge { position: static; flex-shrink: 0; min-width: 22px; text-align: center; white-space: nowrap; }
 .thumbnail[hidden], .thumbnail-zoom[hidden] { display: none; }
 .thumbnail-zoom { display: none; position: fixed; z-index: 20; right: 24px; bottom: 24px; max-width: calc(100vw - 48px); max-height: calc(100dvh - 100px); padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: #fff; box-shadow: 0 12px 48px #132a2440; pointer-events: none; }
 .thumbnail-zoom img { display: block; width: auto; height: auto; max-width: min(720px, calc(100vw - 66px)); max-height: calc(100dvh - 118px); object-fit: contain; }

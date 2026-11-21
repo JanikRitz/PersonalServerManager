@@ -75,7 +75,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path rating100 favorite", "performers"),
             StashSearchKind.Studios => ("findStudios", "studios", "id name image_path rating100 favorite", "studios"),
             StashSearchKind.Tags => ("findTags", "tags", "id name image_path favorite", "tags"),
-            StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds scene { id } primary_tag { name } screenshot", "scenes"),
+            StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds end_seconds scene { id } primary_tag { name } screenshot", "scenes"),
             StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover } files { path } rating100", "galleries"),
             StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path scenes { id } rating100", "groups"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
@@ -259,6 +259,8 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             CreatedAt = ReadDate(item, "created_at"),
             UpdatedAt = ReadDate(item, "updated_at"),
             Duration = kind == StashSearchKind.Scenes ? ReadFileDuration(item) : null,
+            MarkerStart = kind == StashSearchKind.Markers ? ReadMarkerTime(item, "seconds") : null,
+            MarkerEnd = kind == StashSearchKind.Markers ? ReadMarkerTime(item, "end_seconds") : null,
             Path = path,
             ContentCount = kind switch
             {
@@ -281,6 +283,16 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
     {
         if (!item.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Number ||
             !value.TryGetDouble(out var seconds) || !double.IsFinite(seconds) || seconds <= 0 ||
+            seconds > TimeSpan.MaxValue.TotalSeconds)
+            return null;
+
+        return TimeSpan.FromSeconds(seconds);
+    }
+
+    private static TimeSpan? ReadMarkerTime(JsonElement item, string property)
+    {
+        if (!item.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Number ||
+            !value.TryGetDouble(out var seconds) || !double.IsFinite(seconds) || seconds < 0 ||
             seconds > TimeSpan.MaxValue.TotalSeconds)
             return null;
 

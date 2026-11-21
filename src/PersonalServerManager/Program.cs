@@ -12,6 +12,7 @@ using PersonalServerManager.Hydrus;
 using PersonalServerManager.Search;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Management;
+using PersonalServerManager.SwarmUI;
 using Yarp.ReverseProxy.Forwarder;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -69,6 +70,9 @@ builder.Services.AddSingleton<IHydrusClient>(_ => new HydrusClient());
 builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusInstanceStore(
     Path.Combine(dataDirectory, "hydrus-instances.json"),
     services.GetRequiredService<IDataProtectionProvider>().CreateProtector("HydrusApiKey.v1")));
+builder.Services.AddSingleton<ISwarmUIClient>(_ => new SwarmUIClient());
+builder.Services.AddSingleton<ISwarmUIInstanceStore>(_ => new JsonSwarmUIInstanceStore(
+    Path.Combine(dataDirectory, "swarmui-instances.json")));
 builder.Services.AddTransient<LibrarySearchService>();
 builder.Services.AddSingleton<ILocalLibraryStore>(_ => new JsonLocalLibraryStore(
     Path.Combine(dataDirectory, "local-libraries.json")));
@@ -86,6 +90,8 @@ builder.Services.AddSingleton<LocalLibraryClient>();
 builder.Services.AddHttpClient<PreviewService>(client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
 builder.Services.AddHttpClient<HydrusClientMedia>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
+builder.Services.AddHttpClient<SwarmUIMedia>(client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -163,6 +169,12 @@ app.MapLocalLibraryEndpoints();
 app.MapManagedServiceProxy();
 app.MapGet("/media/hydrus/{instanceId:guid}/{fileId:long}",
     (Guid instanceId, long fileId, HydrusClientMedia media, HttpContext context) => media.ServeAsync(instanceId, fileId, context))
+    .RequireAuthorization();
+app.MapGet("/media/swarmui/{instanceId:guid}/file",
+    (Guid instanceId, string? path, SwarmUIMedia media, HttpContext context) => media.ServeAsync(instanceId, path, false, context))
+    .RequireAuthorization();
+app.MapGet("/media/swarmui/{instanceId:guid}/preview",
+    (Guid instanceId, string? path, SwarmUIMedia media, HttpContext context) => media.ServeAsync(instanceId, path, true, context))
     .RequireAuthorization();
 
 app.MapStaticAssets();
