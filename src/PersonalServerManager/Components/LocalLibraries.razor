@@ -57,7 +57,7 @@
                     }
                     @if (readerInstance.ContentServerUrl is not null)
                     {
-                        <a class="icon-button" href="@readerInstance.ContentServerUrl" target="_blank" rel="noopener noreferrer" title="Open Calibre Content Server" aria-label="@($"Open Calibre Content Server for {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" /></a>
+                        <a class="icon-button" href="@(instance.IsManaged ? readerInstance.ContentServerUrl.PathAndQuery : readerInstance.ContentServerUrl.ToString())" target="_blank" rel="noopener noreferrer" title="Open Calibre Content Server" aria-label="@($"Open Calibre Content Server for {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" /></a>
                     }
                     <button class="icon-button" type="button" title="Edit local library" aria-label="@($"Edit local library {instance.Name}")" disabled="@(_busy || _loading || _editing)" @onclick="() => EditLibrary(instance)">
                         <MudIcon Icon="@Icons.Material.Filled.Edit" aria-hidden="true" />

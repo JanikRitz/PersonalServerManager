@@ -316,6 +316,65 @@ public sealed class LibrarySearchServiceTests
         Assert.Equal(8, groups.Count(group => group.InstanceId == healthy.Id && group.Items.Count == 1));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SearchAsync_UsesManagedProxyForStashLinksOnlyWhenManaged(bool managed)
+    {
+        var instance = StashInstance("Stash") with
+        {
+            WebUiUrl = new Uri("https://stash.example/library/"),
+            InstallationFolder = managed ? "C:\\Stash" : null
+        };
+        var itemUrl = new Uri("https://stash.example/library/scenes/12%20a?t=1.5&other=a%2Fb#section%20one");
+        var stash = new FakeStashClient((source, kind, _, _) =>
+            Task.FromResult<IReadOnlyList<StashSearchResult>>([StashResult(source, kind) with { ItemUrl = itemUrl }]));
+
+        var groups = await new LibrarySearchService(stash, new FakeHydrusClient()).SearchAsync([instance], [], "a & b");
+
+        Assert.Equal(8, groups.Count);
+        foreach (var group in groups)
+        {
+            var route = group.Category == "Markers" ? "scenes/markers" : group.Category.ToLowerInvariant();
+            var prefix = managed ? $"/managed/stash/{instance.Id}" : "https://stash.example";
+            Assert.Equal($"{prefix}/library/{route}?q=a%20%26%20b", group.SearchUrl!.OriginalString);
+            Assert.Equal($"{prefix}/library/scenes/12%20a?t=1.5&other=a%2Fb#section%20one",
+                Assert.Single(group.Items).ItemUrl!.OriginalString);
+            Assert.Equal(!managed, group.SearchUrl.IsAbsoluteUri);
+            Assert.Equal(!managed, group.Items[0].ItemUrl!.IsAbsoluteUri);
+        }
+    }
+
+    [Fact]
+    public void BrowserUrl_ManagedStashRootEndsWithSlash()
+    {
+        var instance = StashInstance("Stash") with
+        {
+            WebUiUrl = new Uri("http://localhost:9999/"),
+            InstallationFolder = "C:\\Stash"
+        };
+
+        Assert.Equal($"/managed/stash/{instance.Id}/", instance.BrowserUrl(instance.WebUiUrl).OriginalString);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BrowserUrl_PreservesStashInterfacePathQueryAndFragment(bool managed)
+    {
+        var instance = StashInstance("Stash") with
+        {
+            WebUiUrl = new Uri("https://stash.example/path%20part/?view=a%2Fb#section%20one"),
+            InstallationFolder = managed ? "C:\\Stash" : null
+        };
+
+        var url = instance.BrowserUrl(instance.WebUiUrl);
+
+        var prefix = managed ? $"/managed/stash/{instance.Id}" : "https://stash.example";
+        Assert.Equal($"{prefix}/path%20part/?view=a%2Fb#section%20one", url.OriginalString);
+        Assert.Equal(!managed, url.IsAbsoluteUri);
+    }
+
     [Fact]
     public async Task SearchAsync_EncodesTrimmedQueryForEveryStashCategory()
     {

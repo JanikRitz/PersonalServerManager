@@ -43,12 +43,12 @@ comic archives such as CBZ/CBR produce Comic results. A mixed-format book appear
 in both categories, without conversion.
 
 Managed Calibre binds to `127.0.0.1` with no Calibre login. Other processes on
-the same PC can reach it. Reader URLs use loopback, so in a remote browser they
-refer to that browser's device, not the manager PC. Do not forward
-or reverse-proxy the managed port. Use the external setup below for that.
-Personal Server Manager does not synchronize reading progress, convert ebooks,
-or proxy Calibre credentials. File downloads, unlike reader links, are proxied
-through Personal Server Manager and require its sign-in.
+the same PC can reach it. The manager proxies the Content Server interface and
+reader links through its own signed-in session, so they also work when accessed
+from another device. Do not expose the managed Calibre port directly to the LAN
+or internet. Personal Server Manager does not synchronize reading progress,
+convert ebooks, or proxy Calibre credentials. File downloads also go through
+Personal Server Manager and require its sign-in.
 
 ## External Setup
 

@@ -47,8 +47,12 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             return await SearchNotesAsync(instance, root, query.Trim(), limit, cancellationToken, offset, sort);
         try
         {
-            return await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance) ?? instance,
+            var results = await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance) ?? instance,
                 root, query.Trim(), limit, cancellationToken, offset, sort);
+            return instance.IsManaged
+                ? results.Select(item => item.ReaderUrl is null ? item : item with
+                    { ReaderUrl = new Uri(item.ReaderUrl.PathAndQuery + item.ReaderUrl.Fragment, UriKind.Relative) }).ToArray()
+                : results;
         }
         catch (SqliteException) when (cancellationToken.IsCancellationRequested)
         {

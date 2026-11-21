@@ -1,0 +1,178 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Net.WebSockets;
+using System.Security.Claims;
+using System.Text;
+using System.Text.Encodings.Web;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using PersonalServerManager.LocalLibraries;
+using PersonalServerManager.Management;
+using PersonalServerManager.Stash;
+using Xunit;
+
+namespace PersonalServerManager.Tests;
+
+public sealed class ManagedServiceProxyTests
+{
+    [Fact]
+    public async Task ManagedStashRequiresAuthenticationAndForwardsOnlyManagedInstances()
+    {
+        var upstreamRequests = 0;
+        var upstreamBuilder = WebApplication.CreateBuilder();
+        upstreamBuilder.Logging.ClearProviders();
+        upstreamBuilder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var upstream = upstreamBuilder.Build();
+        upstream.UseWebSockets();
+        upstream.Run(async context =>
+        {
+            Interlocked.Increment(ref upstreamRequests);
+            if (context.WebSockets.IsWebSocketRequest)
+            {
+                using var socket = await context.WebSockets.AcceptWebSocketAsync();
+                var buffer = new byte[1024];
+                var result = await socket.ReceiveAsync(buffer.AsMemory(), context.RequestAborted);
+                await socket.SendAsync(buffer.AsMemory(0, result.Count), result.MessageType, result.EndOfMessage,
+                    context.RequestAborted);
+                await socket.ReceiveAsync(buffer.AsMemory(), context.RequestAborted);
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", context.RequestAborted);
+                return;
+            }
+
+            await context.Response.WriteAsJsonAsync(new UpstreamRequest(
+                context.Request.Path.Value ?? "",
+                context.Request.QueryString.Value ?? "",
+                context.Request.Headers["X-Forwarded-Prefix"].ToString(),
+                context.Request.Headers.Cookie.ToString(),
+                context.Request.Host.Value ?? "",
+                context.Request.Headers["X-Forwarded-Host"].ToString(),
+                context.Request.Headers["X-Forwarded-Proto"].ToString(),
+                context.Request.Headers["X-Forwarded-For"].ToString()));
+        });
+        await upstream.StartAsync();
+        var upstreamAddress = new Uri(upstream.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses.Single());
+
+        var managed = new StashInstance(Guid.NewGuid(), "Managed", new Uri(upstreamAddress, "/graphql"),
+            upstreamAddress, null, InstallationFolder: "dummy", Port: upstreamAddress.Port);
+        var external = managed with { Id = Guid.NewGuid(), Name = "External", InstallationFolder = null };
+        var libraries = new FixtureLocalLibraryStore();
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Services.AddSingleton<IStashInstanceStore>(new FixtureStashStore(managed, external));
+        builder.Services.AddSingleton<ILocalLibraryStore>(libraries);
+        builder.Services.AddSingleton(serviceProvider => new ManagedCalibreServer(
+            Path.Combine(Path.GetTempPath(), $"psm-calibre-{Guid.NewGuid():N}.json"), libraries,
+            serviceProvider.GetRequiredService<ILogger<ManagedCalibreServer>>()));
+        builder.Services.AddHttpForwarder();
+        builder.Services.AddAuthentication("fixture").AddScheme<AuthenticationSchemeOptions, FixtureAuthentication>("fixture", _ => { });
+        builder.Services.AddAuthorization();
+        await using var app = builder.Build();
+        app.UseWebSockets();
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.MapManagedServiceProxy();
+        await app.StartAsync();
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = false })
+        {
+            BaseAddress = new Uri(app.Services.GetRequiredService<IServer>()
+                .Features.Get<IServerAddressesFeature>()!.Addresses.Single())
+        };
+        var managedPath = $"/managed/stash/{managed.Id:D}";
+        using var unauthorized = await http.GetAsync($"{managedPath}/scenes/1?x=y");
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+        Assert.Equal(0, Volatile.Read(ref upstreamRequests));
+
+        http.DefaultRequestHeaders.Add("X-Fixture-Authorization", "yes");
+        http.DefaultRequestHeaders.Add("Cookie", "PersonalServerManager.Auth=secret-fixture; upstream=value");
+        http.DefaultRequestHeaders.Host = "public.example:8443";
+        http.DefaultRequestHeaders.Add("X-Forwarded-Host", "spoofed.example");
+        http.DefaultRequestHeaders.Add("X-Forwarded-Proto", "https");
+        http.DefaultRequestHeaders.Add("X-Forwarded-For", "203.0.113.42");
+        http.DefaultRequestHeaders.Add("X-Forwarded-Prefix", "/spoofed");
+        using var response = await http.GetAsync($"{managedPath}/scenes/1?x=y");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var forwarded = await response.Content.ReadFromJsonAsync<UpstreamRequest>();
+        Assert.NotNull(forwarded);
+        Assert.Equal("/scenes/1", forwarded.Path);
+        Assert.Equal("?x=y", forwarded.Query);
+        Assert.Equal(managedPath, forwarded.ForwardedPrefix);
+        Assert.Equal("public.example:8443", forwarded.Host);
+        Assert.Equal("public.example:8443", forwarded.ForwardedHost);
+        Assert.Equal("http", forwarded.ForwardedProto);
+        Assert.Equal(IPAddress.Loopback.ToString(), forwarded.ForwardedFor);
+        Assert.DoesNotContain("PersonalServerManager.Auth", forwarded.Cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret-fixture", forwarded.Cookie, StringComparison.Ordinal);
+        Assert.Equal(1, Volatile.Read(ref upstreamRequests));
+
+        using var externalResponse = await http.GetAsync($"/managed/stash/{external.Id:D}/scenes/1?x=y");
+        Assert.Equal(HttpStatusCode.NotFound, externalResponse.StatusCode);
+        using var missingResponse = await http.GetAsync($"/managed/stash/{Guid.NewGuid():D}/scenes/1?x=y");
+        Assert.Equal(HttpStatusCode.NotFound, missingResponse.StatusCode);
+        Assert.Equal(1, Volatile.Read(ref upstreamRequests));
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var webSocket = new ClientWebSocket();
+        webSocket.Options.SetRequestHeader("X-Fixture-Authorization", "yes");
+        var webSocketAddress = new UriBuilder(http.BaseAddress!)
+        {
+            Scheme = "ws",
+            Path = $"{managedPath}/echo"
+        }.Uri;
+        await webSocket.ConnectAsync(webSocketAddress, cancellation.Token);
+        var message = Encoding.UTF8.GetBytes("managed stash echo");
+        await webSocket.SendAsync(message.AsMemory(), WebSocketMessageType.Text, true, cancellation.Token);
+        var echo = new byte[1024];
+        var echoResult = await webSocket.ReceiveAsync(echo.AsMemory(), cancellation.Token);
+        Assert.Equal(WebSocketMessageType.Text, echoResult.MessageType);
+        Assert.True(echoResult.EndOfMessage);
+        Assert.Equal("managed stash echo", Encoding.UTF8.GetString(echo, 0, echoResult.Count));
+        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", cancellation.Token);
+        Assert.Equal(2, Volatile.Read(ref upstreamRequests));
+    }
+
+    private sealed record UpstreamRequest(string Path, string Query, string ForwardedPrefix, string Cookie,
+        string Host, string ForwardedHost, string ForwardedProto, string ForwardedFor);
+
+    private sealed class FixtureStashStore(params StashInstance[] instances) : IStashInstanceStore
+    {
+        public Task<IReadOnlyList<StashInstance>> GetAllAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<StashInstance>>(instances);
+
+        public Task SaveAsync(StashInstance instance, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task RemoveAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class FixtureLocalLibraryStore : ILocalLibraryStore
+    {
+        public Task<IReadOnlyList<LocalLibraryInstance>> GetAllAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<LocalLibraryInstance>>([]);
+
+        public Task SaveAsync(LocalLibraryInstance instance, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task RemoveAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class FixtureAuthentication(IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger,
+        UrlEncoder encoder) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
+    {
+        protected override Task<AuthenticateResult> HandleAuthenticateAsync() => Task.FromResult(
+            Request.Headers["X-Fixture-Authorization"] == "yes"
+                ? AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(new ClaimsIdentity(
+                    [new Claim(ClaimTypes.Name, "fixture")], Scheme.Name)), Scheme.Name))
+                : AuthenticateResult.NoResult());
+    }
+}

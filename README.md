@@ -31,7 +31,8 @@ Add each external Stash instance using one base URL (for example,
 `http://127.0.0.1:9999/`) and optional API key. The GraphQL endpoint is derived
 by appending `/graphql`; there are no separate GraphQL and web URL inputs.
 Managed Stash requires an absolute installation folder containing `stash-win.exe`
-and a port; its URLs use loopback. On launch, the manager updates the root `port`
+and a port; the manager connects to it over loopback and proxies browser links
+through the signed-in manager. On launch, the manager updates the root `port`
 value in that folder's `config.yml`, preserving other YAML values but not comments
 or formatting. Invalid YAML is left untouched and prevents launch.
 One query searches all categories
@@ -162,10 +163,10 @@ store or send Calibre login credentials: servers requiring login cannot be
 API-searched unless an owner-managed reverse proxy grants read-only access to
 Personal Server Manager. Browser reader links may still prompt for login.
 Managed Calibre is loopback-only with no authentication; do not expose its port.
-Its reader URL uses loopback, so a remote browser cannot use it to reach the
-manager PC. File downloads are proxied through Personal Server Manager and
-require sign-in. See [Calibre hosting](docs/calibre-hosting.md) for external
-hosting and TLS guidance.
+Its browser interface, reader links, and file downloads are proxied through
+Personal Server Manager and require sign-in, including when accessed from a LAN
+device. See [Calibre hosting](docs/calibre-hosting.md) for external hosting and
+TLS guidance.
 
 ## Network Access
 

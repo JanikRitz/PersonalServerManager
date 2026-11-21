@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging.Abstractions;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Search;
 using Xunit;
@@ -143,6 +146,91 @@ public sealed class LocalLibraryClientTests : IDisposable
         Assert.False(File.Exists(database + "-journal"));
         Assert.False(File.Exists(database + "-wal"));
         Assert.False(File.Exists(database + "-shm"));
+    }
+
+    [Theory]
+    [InlineData("EPUB")]
+    [InlineData("PDF")]
+    public async Task CalibreSearchUsesRelativeReaderUrlsOnlyForRunningManagedInstances(string format)
+    {
+        await CreateDatabaseAsync();
+        if (format == "PDF") await ExecuteAsync("DELETE FROM data WHERE book = 1 AND format = 'EPUB'");
+        await File.WriteAllTextAsync(Path.Combine(_root, "calibre-server.exe"), "fixture");
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var store = new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"));
+        var first = Instance(LocalLibraryKind.CalibreText) with { ManagedPort = port, CalibreInstallationFolder = _root };
+        var second = first with { Id = Guid.NewGuid(), Name = "Second" };
+        await store.SaveAsync(first);
+        await store.SaveAsync(second);
+        using var http = new HttpClient(new CalibreReadyHandler(Path.GetFileName(_root)));
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
+            NullLogger<ManagedCalibreServer>.Instance, http, _ => Process.Start(
+                new ProcessStartInfo("cmd.exe", "/d /c set /p fixture=")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true }));
+        var client = new LocalLibraryClient(server);
+
+        Assert.Null(Assert.Single(await client.SearchAsync(first, "fixture", 5)).ReaderUrl);
+        Assert.Null(Assert.Single(await _client.SearchAsync(first, "fixture", 5)).ReaderUrl);
+        foreach (var instance in new[] { first, second })
+        {
+            await server.StartServerAsync(instance.Id);
+            Assert.NotNull(server.GetStatus(instance.Id).Url);
+            var item = Assert.Single(await client.SearchAsync(instance, "fixture", 5));
+            Assert.Equal(format, item.FileFormat);
+            Assert.NotNull(item.ReaderUrl);
+            Assert.False(item.ReaderUrl.IsAbsoluteUri);
+            var prefix = $"/managed/calibre/{instance.Id:D}/";
+            var expected = format == "PDF"
+                ? prefix + "get/pdf/1/fixture-id?content_disposition=inline"
+                : prefix + "#mode=read_book&library_id=fixture-id&book_id=1&fmt=epub";
+            Assert.Equal(expected, item.ReaderUrl.ToString());
+            await server.StopServerAsync(instance.Id);
+        }
+
+        var external = first with { ContentServerUrl = new Uri("https://calibre.example/reader/"), ContentServerLibraryId = "Books & Comics" };
+        var externalItem = Assert.Single(await client.SearchAsync(external, "fixture", 5));
+        Assert.NotNull(externalItem.ReaderUrl);
+        Assert.True(externalItem.ReaderUrl.IsAbsoluteUri);
+        var externalExpected = format == "PDF"
+            ? "https://calibre.example/reader/get/pdf/1/Books%20%26%20Comics?content_disposition=inline"
+            : "https://calibre.example/reader/#mode=read_book&library_id=Books%20%26%20Comics&book_id=1&fmt=epub";
+        Assert.Equal(externalExpected, externalItem.ReaderUrl.AbsoluteUri);
+
+        using var remoteHttp = new HttpClient(new CalibreRemoteHandler(format));
+        var remoteClient = new LocalLibraryClient(server, remoteHttp);
+        var remoteItem = Assert.Single(await remoteClient.SearchAsync(external with { RootPath = "" }, "fixture", 5));
+        Assert.NotNull(remoteItem.ReaderUrl);
+        Assert.True(remoteItem.ReaderUrl.IsAbsoluteUri);
+        Assert.Equal(externalExpected, remoteItem.ReaderUrl.AbsoluteUri);
+    }
+
+    private sealed class CalibreReadyHandler(string libraryName) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    library_map = new Dictionary<string, string> { ["fixture-id"] = libraryName }
+                }))
+            });
+    }
+
+    private sealed class CalibreRemoteHandler(string format) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(request.RequestUri!.AbsolutePath.Contains("/ajax/search/")
+                    ? "{\"book_ids\":[1],\"total_num\":1}"
+                    : System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object>
+                    {
+                        ["1"] = new { title = "Fixture", formats = new[] { format } }
+                    }))
+            });
     }
 
     [Fact]

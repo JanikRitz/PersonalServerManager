@@ -23,6 +23,10 @@ public sealed record StashInstance(
     bool StartWithApp = false)
 {
     public bool IsManaged => !string.IsNullOrWhiteSpace(InstallationFolder);
+
+    public Uri BrowserUrl(Uri url) => IsManaged
+        ? new Uri($"/managed/stash/{Id:D}{url.PathAndQuery}{url.Fragment}", UriKind.Relative)
+        : url;
 }
 
 public sealed record StashSearchResult(

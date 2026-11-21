@@ -88,7 +88,7 @@
                             <ManagedBackendControls @key="_selectedInstance.Id" InstanceId="@_selectedInstance.Id" StartWithApp="@_selectedInstance.StartWithApp" StartWithAppChanged="SaveStashAutostartAsync" />
                         }
                         <div class="detail-actions">
-                            <a class="outline-action" href="@_selectedInstance.WebUiUrl" target="_blank" rel="noopener noreferrer">Open Stash<MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
+                            <a class="outline-action" href="@_selectedInstance.BrowserUrl(_selectedInstance.WebUiUrl)" target="_blank" rel="noopener noreferrer">Open Stash<MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
                             <button class="text-action" type="button" disabled="@_isSaving" @onclick="() => EditInstance(_selectedInstance)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" />Edit</button>
                             <button class="text-action danger-action" type="button" disabled="@_isSaving" @onclick="() => RemoveInstanceAsync(_selectedInstance)"><MudIcon Icon="@Icons.Material.Filled.DeleteOutline" Size="Size.Small" />Remove</button>
                         </div>

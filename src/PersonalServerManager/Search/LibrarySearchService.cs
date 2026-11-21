@@ -110,10 +110,10 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
         {
             tasks.Add(SearchBackendAsync(backend => Enum.GetValues<StashSearchKind>().Select(kind =>
                 SearchGroupAsync(instance.Id, instance.Name, "Stash", kind.ToString(),
-                    new Uri(instance.WebUiUrl, $"{(kind == StashSearchKind.Markers ? "scenes/markers" : kind.ToString().ToLowerInvariant())}?q={Uri.EscapeDataString(capturedQuery)}"),
+                    instance.BrowserUrl(new Uri(instance.WebUiUrl, $"{(kind == StashSearchKind.Markers ? "scenes/markers" : kind.ToString().ToLowerInvariant())}?q={Uri.EscapeDataString(capturedQuery)}")),
                     async token => (await stashClient.SearchAsync(instance, kind, capturedQuery, limit, sort, token))
                         .Take(limit)
-                        .Select(item => new LibraryItem(item.Id, item.Title, kind.ToString(), item.ItemUrl,
+                        .Select(item => new LibraryItem(item.Id, item.Title, kind.ToString(), instance.BrowserUrl(item.ItemUrl),
                             PreviewService.CreateLink("stash", instance.Id, kind.ToString(), item.Id), kind switch
                             {
                                 StashSearchKind.Scenes => LibraryMediaType.Video,

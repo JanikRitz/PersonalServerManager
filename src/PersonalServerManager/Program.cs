@@ -12,6 +12,7 @@ using PersonalServerManager.Hydrus;
 using PersonalServerManager.Search;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Management;
+using Yarp.ReverseProxy.Forwarder;
 
 var builder = WebApplication.CreateBuilder(args);
 var allowInsecureHttp = builder.Configuration.GetValue<bool>("NetworkAccess:AllowInsecureHttp");
@@ -36,6 +37,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     });
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery();
+builder.Services.AddHttpForwarder();
 builder.Services.AddSingleton<IPasswordHasher<string>, PasswordHasher<string>>();
 
 var dataDirectory = Environment.GetEnvironmentVariable("PSM_DATA_DIRECTORY");
@@ -148,12 +150,14 @@ app.Use(async (context, next) =>
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseWebSockets();
 app.UseRateLimiter();
 
 app.UseAntiforgery();
 app.MapAccountEndpoints();
 app.MapPreviewEndpoints();
 app.MapLocalLibraryEndpoints();
+app.MapManagedServiceProxy();
 app.MapGet("/media/hydrus/{instanceId:guid}/{fileId:long}",
     (Guid instanceId, long fileId, HydrusClientMedia media, HttpContext context) => media.ServeAsync(instanceId, fileId, context))
     .RequireAuthorization();

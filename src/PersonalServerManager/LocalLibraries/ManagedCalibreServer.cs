@@ -129,13 +129,14 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
             start.Environment["CALIBRE_CONFIG_DIRECTORY"] = configuration;
             start.Environment["CALIBRE_NO_SI_DANGER_DANGER"] = "1";
             foreach (var argument in new[] { "--listen-on", "127.0.0.1", "--port", library.ManagedPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                $"--url-prefix=/managed/calibre/{library.Id:D}",
                 "--disable-fallback-to-detected-interface", "--disable-local-write", "--disable-use-bonjour", "--disable-auth" }.Concat(roots))
                 start.ArgumentList.Add(argument);
             token.ThrowIfCancellationRequested();
             process = (launchProcess is null ? Process.Start(start) : launchProcess(start))
                 ?? throw new InvalidDataException("Calibre could not be launched.");
 
-            var url = new Uri($"http://127.0.0.1:{library.ManagedPort}/");
+            var url = new Uri($"http://127.0.0.1:{library.ManagedPort}/managed/calibre/{library.Id:D}/");
             _running[library.Id] = new(process, url, roots[0], "");
             var ready = await WaitForLibrariesAsync(process, url, roots, token);
             token.ThrowIfCancellationRequested();

@@ -34,6 +34,8 @@ public sealed class ManagedCalibreTests : IDisposable
         Assert.Contains(first.RootPath, starts[0].ArgumentList);
         Assert.DoesNotContain(second.RootPath, starts[0].ArgumentList);
         Assert.Contains(second.RootPath, starts[1].ArgumentList);
+        Assert.Contains($"--url-prefix=/managed/calibre/{first.Id:D}", starts[0].ArgumentList);
+        Assert.Contains($"--url-prefix=/managed/calibre/{second.Id:D}", starts[1].ArgumentList);
         var firstConfiguration = Path.Combine(_root, "managed-calibre", first.Id.ToString());
         var secondConfiguration = Path.Combine(_root, "managed-calibre", second.Id.ToString());
         Assert.True(starts[0].Environment.TryGetValue("CALIBRE_CONFIG_DIRECTORY", out var firstEnvironment));
