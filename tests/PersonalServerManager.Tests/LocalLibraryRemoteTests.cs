@@ -13,7 +13,7 @@ public sealed class LocalLibraryRemoteTests
 
     private const string Metadata = """
         {"title":"Mixed book","authors":["Writer"],"formats":["epub","cbz","pdf","markdown"],
-         "comments":"<p>Summary</p><script>hidden</script>","timestamp":"2020-01-02T00:00:00Z"}
+         "comments":"<p>Summary</p><script>hidden</script>","rating":4.5,"timestamp":"2020-01-02T00:00:00Z"}
         """;
 
     [Theory]
@@ -38,6 +38,7 @@ public sealed class LocalLibraryRemoteTests
         Assert.Equal(kind == LocalLibraryKind.CalibreComic ? "42:EPUB" : "42", ebook.Id);
         Assert.Equal(kind == LocalLibraryKind.CalibreComic ? "42" : "42:CBZ", comic.Id);
         Assert.Equal("Summary", ebook.Description);
+        Assert.All(items, item => Assert.Equal(4.5m, item.RatingOutOfFive));
         Assert.Equal(DateTimeOffset.Parse("2020-01-02T00:00:00Z"), ebook.CreatedAt);
         Assert.Contains("fmt=cbz", comic.ReaderUrl!.AbsoluteUri);
         Assert.All(requests, request => Assert.StartsWith("https://calibre.example/prefix/ajax/", request.AbsoluteUri));

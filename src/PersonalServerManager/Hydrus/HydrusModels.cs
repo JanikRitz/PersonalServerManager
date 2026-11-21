@@ -8,6 +8,7 @@ public sealed record HydrusInstance(Guid Id, string Name, Uri ApiEndpoint, strin
 
 public sealed record HydrusFile(long Id, string Title, string Mime)
 {
+    public bool IsFavorite { get; init; }
     public DateTimeOffset? CreatedAt { get; init; }
     public DateTimeOffset? UpdatedAt { get; init; }
     public string? Path { get; init; }

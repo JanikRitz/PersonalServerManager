@@ -15,6 +15,8 @@ public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, 
     DateTimeOffset? CreatedAt = null, DateTimeOffset? UpdatedAt = null, string? Path = null, Uri? ReaderUrl = null)
 {
     public string? FileFormat { get; init; }
+    public bool IsFavorite { get; init; }
+    public decimal? RatingOutOfFive { get; init; }
 }
 
 public record LibraryGroup(
@@ -123,6 +125,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                                 _ => LibraryMediaType.Image
                             }, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, Path: item.Path)
                         {
+                            RatingOutOfFive = item.Rating100 / 20m,
+                            IsFavorite = item.IsFavorite,
                             FileFormat = kind is StashSearchKind.Images or StashSearchKind.Scenes
                                 ? FormatFromPath(item.Path) : null
                         })
@@ -143,6 +147,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                         PreviewService.CreateLink("hydrus", instance.Id, "files", entry.Item.Id.ToString(CultureInfo.InvariantCulture)), entry.Type!.Value,
                         CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path)
                     {
+                        IsFavorite = entry.Item.IsFavorite,
                         FileFormat = entry.Type is LibraryMediaType.Image or LibraryMediaType.Video
                             ? FormatFromPath(entry.Item.Path) ?? HydrusFileFormat(entry.Item.Mime) : null
                     })

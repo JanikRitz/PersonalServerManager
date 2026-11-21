@@ -8,6 +8,7 @@ namespace PersonalServerManager.Hydrus;
 public sealed class HydrusClient : IHydrusClient, IDisposable
 {
     private const int MaximumResponseBytes = 256 * 1024;
+    private static readonly string DefaultFavouritesServiceKey = Convert.ToHexStringLower("favourites"u8);
     // Hydrus has no tag-search limit and returns every match, so short queries can be several megabytes.
     private const int MaximumTagResponseBytes = 16 * 1024 * 1024;
     private const string ResponseTooLarge = "Hydrus response exceeded the size limit.";
@@ -379,6 +380,8 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             }
             files.Add(id, new HydrusFile(id, $"File {id.ToString(CultureInfo.InvariantCulture)}", mime)
             {
+                IsFavorite = value.TryGetProperty("ratings", out var ratings) && ratings.ValueKind == JsonValueKind.Object &&
+                    ratings.TryGetProperty(DefaultFavouritesServiceKey, out var favorite) && favorite.ValueKind == JsonValueKind.True,
                 CreatedAt = createdAt,
                 UpdatedAt = ReadTimestamp(value, "time_modified")
             });

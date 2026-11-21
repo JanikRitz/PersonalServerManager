@@ -163,6 +163,8 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 var formats = RemoteFormats(metadata);
                 var ebook = TextFormats.FirstOrDefault(formats.Contains);
                 var comic = ComicFormats.FirstOrDefault(formats.Contains);
+                var rating = metadata.TryGetProperty("rating", out var value) && value.ValueKind == JsonValueKind.Number &&
+                    value.TryGetDecimal(out var score) && score is > 0 and <= 5 ? score : (decimal?)null;
                 foreach (var format in new[] { ebook, comic }.OfType<string>())
                 {
                     var itemId = CategoryItemId(instance, id, format, ebook is not null && comic is not null);
@@ -173,7 +175,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                         ComicFormats.Contains(format) ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                         Description: NormalizeDescription(JsonText(metadata, "comments") ?? ""),
                         CreatedAt: JsonDate(metadata, "timestamp"), UpdatedAt: JsonDate(metadata, "last_modified"),
-                        ReaderUrl: instance.GetCalibreReaderUrl(id, format)) { FileFormat = format });
+                        ReaderUrl: instance.GetCalibreReaderUrl(id, format)) { FileFormat = format, RatingOutOfFive = rating });
                 }
             }
             candidateOffset += ids.Length;
@@ -372,6 +374,11 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             while (await schemaReader.ReadAsync(cancellationToken)) columns.Add(schemaReader.GetString(1));
         }
         var created = columns.Contains("timestamp") ? "b.timestamp" : "NULL";
+        using var ratingSchema = connection.CreateCommand();
+        ratingSchema.CommandText = "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('ratings', 'books_ratings_link')";
+        var ratingColumn = (long)(await ratingSchema.ExecuteScalarAsync(cancellationToken))! == 2
+            ? "(SELECT max(r.rating) FROM ratings r JOIN books_ratings_link br ON br.rating = r.id WHERE br.book = b.id AND r.rating BETWEEN 1 AND 10)"
+            : "NULL";
         var orderBy = sort switch
         {
             LibrarySort.TitleAscending => "b.title COLLATE NOCASE ASC, b.id",
@@ -388,7 +395,8 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                     JOIN books_authors_link ba ON ba.author = a.id WHERE ba.book = b.id), ''),
                 (SELECT substr(c.text, 1, $maximumCommentLength) FROM comments c WHERE c.book = b.id LIMIT 1),
                 {{created}},
-                {{(columns.Contains("last_modified") ? "b.last_modified" : "NULL")}}
+                {{(columns.Contains("last_modified") ? "b.last_modified" : "NULL")}},
+                {{ratingColumn}}
             FROM books b
             WHERE b.title LIKE $query ESCAPE '\'
                 OR EXISTS (SELECT 1 FROM authors a JOIN books_authors_link ba ON ba.author = a.id
@@ -427,6 +435,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             }
 
             var title = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var rating = reader.IsDBNull(7) ? (decimal?)null : reader.GetDecimal(7) / 2m;
             foreach (var file in new[] { ebook, comic }.Where(file => file is not null))
             {
                 if (offset > 0) { offset--; continue; }
@@ -436,7 +445,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 comicItem ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                 Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4)),
                 CreatedAt: ReadCalibreDate(reader, 5), UpdatedAt: ReadCalibreDate(reader, 6), Path: bookPath,
-                ReaderUrl: instance.GetCalibreReaderUrl(id, file.Value.Format)) { FileFormat = file.Value.Format });
+                ReaderUrl: instance.GetCalibreReaderUrl(id, file.Value.Format)) { FileFormat = file.Value.Format, RatingOutOfFive = rating });
                 if (items.Count == limit) break;
             }
             if (items.Count == limit) break;

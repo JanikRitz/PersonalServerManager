@@ -120,6 +120,9 @@
                                     var sourceLabel = SourceLabel(entry.Source);
                                     var badgeId = $"{resultsId}-{entry.Source.InstanceId:N}-{entry.Source.Category}-{Uri.EscapeDataString(item.Id)}";
                                     var descriptions = item.FileFormat is null ? $"{badgeId}-source" : $"{badgeId}-source {badgeId}-format";
+                                    var score = item.RatingOutOfFive?.ToString("0.##");
+                                    var ratingLabel = score is not null ? $"Rated {score} out of 5" : item.IsFavorite ? "Favorite" : null;
+                                    if (ratingLabel is not null) descriptions += $" {badgeId}-rating";
                                     <li class="media-tile" @key="(entry.Source.InstanceId, entry.Source.Category, item.Id)">
                                         <a class="thumbnail-link" href="@(item.ReaderUrl ?? item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ReaderUrl is not null ? $"Read {item.Title}" : item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")" aria-describedby="@descriptions">
                                             <span class="thumbnail-placeholder" aria-hidden="true"><MudIcon Icon="@TypeIcon(group.Type)" /></span>
@@ -133,6 +136,13 @@
                                                 <span class="format-badge" id="@($"{badgeId}-format")">@item.FileFormat</span>
                                             }
                                             <span class="source-badge" id="@($"{badgeId}-source")" title="@sourceLabel">@sourceLabel</span>
+                                            @if (ratingLabel is not null)
+                                            {
+                                                <span class="rating-badge" id="@($"{badgeId}-rating")" title="@ratingLabel">
+                                                    <span class="visually-hidden">@ratingLabel</span>
+                                                    <span aria-hidden="true">&#9733;@(score is null ? null : $" {score}/5")</span>
+                                                </span>
+                                            }
                                         </a>
                                         <span class="media-title" title="@item.Title">@item.Title</span>
                                         @if (item.ReaderUrl is not null && item.ItemUrl is not null)

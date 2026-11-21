@@ -301,6 +301,27 @@ public sealed class HydrusClientTests
     }
 
     [Fact]
+    public async Task SearchAsync_OnlyMarksPositiveRatingsOnTheDefaultFavouriteService()
+    {
+        var calls = 0;
+        using var client = new HydrusClient(new StubHandler((_, _) => ++calls == 1
+            ? Json("""{"file_ids":[1,2,3,4]}""")
+            : Json("""
+                {"metadata":[
+                    {"file_id":1,"mime":"image/png","ratings":{"6661766f757269746573":true}},
+                    {"file_id":2,"mime":"image/png","ratings":{"6661766f757269746573":false,"abcdef":true}},
+                    {"file_id":3,"mime":"image/png","ratings":{"6661766f757269746573":null}},
+                    {"file_id":4,"mime":"image/png"}
+                ]}
+                """)));
+
+        var files = await client.SearchAsync(Instance(), ["tag"]);
+
+        Assert.Equal(new[] { true, false, false, false }, files.Select(file => file.IsFavorite));
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
     public async Task SearchAsync_UsesServerSideLimitAndBoundedMetadataWithoutOpeningAPage()
     {
         var calls = 0;

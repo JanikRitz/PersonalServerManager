@@ -273,6 +273,22 @@ public sealed class LocalLibraryClientTests : IDisposable
         Assert.Equal(filesBefore, Directory.GetFiles(_root, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal));
     }
 
+    [Fact]
+    public async Task CalibreUsesHalfStarRatingsAndHidesZero()
+    {
+        await CreateDatabaseAsync();
+        var instance = Instance(LocalLibraryKind.Calibre);
+        Assert.Null(Assert.Single(await _client.SearchAsync(instance, "fixture", 5)).RatingOutOfFive);
+        await ExecuteAsync("""
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (book INTEGER, rating INTEGER);
+            INSERT INTO ratings VALUES (1, 7), (2, 0);
+            INSERT INTO books_ratings_link VALUES (1, 1), (2, 2);
+            """);
+        Assert.Equal(3.5m, Assert.Single(await _client.SearchAsync(instance, "fixture", 5)).RatingOutOfFive);
+        Assert.Null(Assert.Single(await _client.SearchAsync(instance, "ordinary", 5)).RatingOutOfFive);
+    }
+
     [Theory]
     [InlineData(LocalLibraryKind.CalibreText)]
     [InlineData(LocalLibraryKind.CalibreComic)]

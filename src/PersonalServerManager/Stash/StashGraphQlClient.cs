@@ -70,14 +70,14 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         cancellationToken.ThrowIfCancellationRequested();
         var (field, collectionName, selection, urlSegment) = kind switch
         {
-            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot } files { path }", "scenes"),
-            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail } files { path }", "images"),
-            StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path", "performers"),
-            StashSearchKind.Studios => ("findStudios", "studios", "id name image_path", "studios"),
-            StashSearchKind.Tags => ("findTags", "tags", "id name image_path", "tags"),
+            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot } files { path } rating100", "scenes"),
+            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail } files { path } rating100", "images"),
+            StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path rating100 favorite", "performers"),
+            StashSearchKind.Studios => ("findStudios", "studios", "id name image_path rating100 favorite", "studios"),
+            StashSearchKind.Tags => ("findTags", "tags", "id name image_path favorite", "tags"),
             StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds scene { id } primary_tag { name } screenshot", "scenes"),
-            StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover } files { path }", "galleries"),
-            StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path", "groups"),
+            StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover } files { path } rating100", "galleries"),
+            StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path rating100", "groups"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
 
@@ -258,7 +258,10 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         {
             CreatedAt = ReadDate(item, "created_at"),
             UpdatedAt = ReadDate(item, "updated_at"),
-            Path = path
+            Path = path,
+            Rating100 = item.TryGetProperty("rating100", out var rating) && rating.ValueKind == JsonValueKind.Number &&
+                rating.TryGetInt32(out var score) && score is > 0 and <= 100 ? score : null,
+            IsFavorite = item.TryGetProperty("favorite", out var favorite) && favorite.ValueKind == JsonValueKind.True
         };
     }
 

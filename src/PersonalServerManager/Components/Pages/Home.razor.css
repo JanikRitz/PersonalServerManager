@@ -71,7 +71,8 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--teal); outline-
 .thumbnail-link { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--line); border-radius: 4px; background: #e8ede8; color: #8a9b91; }
 .thumbnail-placeholder { position: absolute; display: grid; place-items: center; inset: 0; }
 .thumbnail { position: absolute; inset: 0; display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
-.format-badge, .source-badge { position: absolute; padding: 2px 5px; border-radius: 4px; background: #17251f; color: #fff; font: 600 10px/1.4 "Segoe UI", sans-serif; }
+.format-badge, .source-badge, .rating-badge { position: absolute; padding: 2px 5px; border-radius: 4px; background: #17251f; color: #fff; font: 600 10px/1.4 "Segoe UI", sans-serif; }
+.rating-badge { top: 6px; left: 6px; color: #ffd36a; white-space: nowrap; }
 .format-badge { top: 6px; right: 6px; }
 .source-badge { bottom: 6px; left: 6px; max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thumbnail[hidden], .thumbnail-zoom[hidden] { display: none; }
