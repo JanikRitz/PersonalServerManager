@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using PersonalServerManager.Search;
 using PersonalServerManager.Stash;
 using Xunit;
 
@@ -45,6 +46,47 @@ public sealed class StashGraphQlClientTests
 
         Assert.Equal(limit, results.Count);
         Assert.Equal(limit.ToString(), results[^1].Id);
+    }
+
+    [Theory]
+    [InlineData(StashSearchKind.Scenes, LibrarySort.TitleAscending, "title", "ASC")]
+    [InlineData(StashSearchKind.Images, LibrarySort.TitleDescending, "title", "DESC")]
+    [InlineData(StashSearchKind.Performers, LibrarySort.TitleDescending, "name", "DESC")]
+    [InlineData(StashSearchKind.Tags, LibrarySort.TitleAscending, "name", "ASC")]
+    [InlineData(StashSearchKind.Scenes, LibrarySort.DateNewest, "created_at", "DESC")]
+    [InlineData(StashSearchKind.Performers, LibrarySort.DateOldest, "created_at", "ASC")]
+    [InlineData(StashSearchKind.Scenes, LibrarySort.Random, null, "ASC")]
+    [InlineData(StashSearchKind.Scenes, LibrarySort.Default, null, null)]
+    public async Task SearchAsync_SendsNativeSortInFilter(StashSearchKind kind, LibrarySort sort, string? expectedSort, string? expectedDirection)
+    {
+        var calls = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            calls++;
+            using var payload = System.Text.Json.JsonDocument.Parse(body);
+            var filter = payload.RootElement.GetProperty("variables").GetProperty("filter");
+            Assert.Equal("query", filter.GetProperty("q").GetString());
+            Assert.Equal(25, filter.GetProperty("per_page").GetInt32());
+            Assert.Equal(1, filter.GetProperty("page").GetInt32());
+            if (sort == LibrarySort.Default)
+            {
+                Assert.False(filter.TryGetProperty("sort", out var _));
+                Assert.False(filter.TryGetProperty("direction", out var _));
+            }
+            else
+            {
+                var actualSort = filter.GetProperty("sort").GetString();
+                if (sort == LibrarySort.Random) Assert.Matches(@"^random_\d+$", actualSort);
+                else Assert.Equal(expectedSort, actualSort);
+                Assert.Equal(expectedDirection, filter.GetProperty("direction").GetString());
+            }
+
+            return Json("""{"data":{"findScenes":{"scenes":[]},"findImages":{"images":[]},"findPerformers":{"performers":[]},"findTags":{"tags":[]}}}""");
+        })));
+
+        await client.SearchAsync(Instance(null), kind, "query", 25, sort);
+
+        Assert.Equal(1, calls);
     }
 
     [Theory]

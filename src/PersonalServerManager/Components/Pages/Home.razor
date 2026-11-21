@@ -33,7 +33,7 @@
                 <label class="visually-hidden" for="search-query">Search all libraries</label>
                 <span class="search-glyph" aria-hidden="true"><MudIcon Icon="@Icons.Material.Outlined.Search" /></span>
                 <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search all libraries" autocomplete="off" />
-                <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
+                <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _isSorting || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
             </form>
             @if (_configurationLoaded && _instances.Count + _hydrusInstances.Count + _localLibraries.Count == 0 && _pageError is null)
             {
@@ -62,8 +62,8 @@
                         @if (_typeGroups.Count > 0)
                         {
                             <div class="sort-controls">
-                                <label for="result-sort">Sort loaded results</label>
-                                <select id="result-sort" @bind="_sort" @bind:after="ApplySort" disabled="@(_expandingType is not null)">
+                                <label for="result-sort">Sort results</label>
+                                <select id="result-sort" @bind="_sort" @bind:after="ChangeSortAsync" disabled="@(_expandingType is not null || _isSorting)">
                                     <option value="@LibrarySort.Default">Default</option>
                                     <option value="@LibrarySort.TitleAscending">A-Z</option>
                                     <option value="@LibrarySort.TitleDescending">Z-A</option>
@@ -73,11 +73,16 @@
                                 </select>
                                 @if (_sort == LibrarySort.Random)
                                 {
-                                    <button type="button" class="shuffle-action" title="Shuffle again" aria-label="Shuffle again" disabled="@(_expandingType is not null)" @onclick="ApplySort"><MudIcon Icon="@Icons.Material.Outlined.Shuffle" Size="Size.Small" /></button>
+                                    <button type="button" class="shuffle-action" title="Shuffle again" aria-label="Shuffle again" disabled="@(_expandingType is not null || _isSorting)" @onclick="ChangeSortAsync"><MudIcon Icon="@Icons.Material.Outlined.Shuffle" Size="Size.Small" /></button>
                                 }
                             </div>
                         }
                     </div>
+                    @if (_isSorting)
+                    {
+                        <div class="expansion-loading" role="status"><span class="loading-spinner" aria-hidden="true"></span><span>Fetching sorted results...</span></div>
+                        <progress class="search-progress" aria-label="Fetching sorted results"></progress>
+                    }
                 }
                 @foreach (var failure in (_expandedGroups ?? _groups).Where(group => group.Error is not null))
                 {
@@ -90,7 +95,7 @@
                 {
                     <p class="empty-state">@(_groups.Any(group => group.Error is not null) ? "No results available from the remaining backends." : "No results found.")</p>
                 }
-                <div class="results" aria-busy="@(_isSearching || _expandingType is not null ? "true" : "false")">
+                <div class="results" aria-busy="@(_isSearching || _isSorting || _expandingType is not null ? "true" : "false")">
                     @foreach (var group in _typeGroups)
                     {
                         var expanded = _expandedTypes.Contains(group.Type);
@@ -98,7 +103,7 @@
                         <section class="result-group" aria-label="@TypeLabel(group.Type)" @key="group.Type">
                             <div class="group-heading">
                                 <h3>@TypeLabel(group.Type)</h3>
-                                <button class="text-action expand-action" type="button" aria-expanded="@(expanded ? "true" : "false")" aria-controls="@resultsId" disabled="@(_expandingType is not null || _openingHydrus is not null)" @onclick="() => ToggleExpandedAsync(group.Type)">
+                                <button class="text-action expand-action" type="button" aria-expanded="@(expanded ? "true" : "false")" aria-controls="@resultsId" disabled="@(_expandingType is not null || _isSorting || _openingHydrus is not null)" @onclick="() => ToggleExpandedAsync(group.Type)">
                                     @(_expandingType == group.Type ? "Loading..." : expanded ? "Show less" : "Show up to 25")
                                     <MudIcon Icon="@(expanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)" Size="Size.Small" />
                                 </button>
@@ -184,6 +189,7 @@
     private bool _configurationLoaded;
     private bool _searchHasRun;
     private bool _isSearching;
+    private bool _isSorting;
 
     private int VisibleResultCount => _typeGroups.Sum(group => Math.Min(group.Items.Count, _expandedTypes.Contains(group.Type) ? 25 : 5));
 
@@ -229,7 +235,7 @@
 
     private async Task SearchAsync()
     {
-        if (_isSearching || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))
+        if (_isSearching || _isSorting || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))
         {
             return;
         }
@@ -244,7 +250,7 @@
         _submittedQuery = _query.Trim();
         try
         {
-            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries);
+            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries, sort: _sort);
             ApplySort();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -258,7 +264,7 @@
 
     private async Task ToggleExpandedAsync(LibraryMediaType type)
     {
-        if (_isSearching || _expandingType is not null || _openingHydrus is not null)
+        if (_isSearching || _isSorting || _expandingType is not null || _openingHydrus is not null)
         {
             return;
         }
@@ -272,21 +278,7 @@
         {
             if (_expandedGroups is null)
             {
-                var unavailable = _groups.Where(group => group.BackendUnreachable)
-                    .Select(group => (group.Provider, group.InstanceId)).ToHashSet();
-                var groups = await LibrarySearch.SearchAsync(
-                    _instances.Where(instance => !unavailable.Contains(("Stash", instance.Id))).ToArray(),
-                    _hydrusInstances.Where(instance => !unavailable.Contains(("Hydrus", instance.Id))).ToArray(),
-                    _submittedQuery, _lifetime.Token, limit: 25, localLibraries: _localLibraries);
-                var refreshed = groups.ToDictionary(group => (group.Provider, group.InstanceId, group.Category));
-                _expandedGroups = _groups.Select(original =>
-                {
-                    if (!refreshed.TryGetValue((original.Provider, original.InstanceId, original.Category), out var group))
-                    {
-                        return original;
-                    }
-                    return group.Error is null && !group.BackendUnreachable ? group : group with { Items = original.Items };
-                }).ToArray();
+                _expandedGroups = await RefetchAsync(_groups, 25);
                 ApplySort();
             }
             _expandedTypes.Add(type);
@@ -300,6 +292,54 @@
         }
     }
 
+    private async Task ChangeSortAsync()
+    {
+        if (_isSearching || _isSorting || _expandingType is not null || _openingHydrus is not null)
+        {
+            return;
+        }
+
+        _isSorting = true;
+        try
+        {
+            if (_expandedGroups is null)
+            {
+                _groups = await RefetchAsync(_groups, 5);
+            }
+            else
+            {
+                _expandedGroups = await RefetchAsync(_expandedGroups, 25);
+            }
+            ApplySort();
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            _isSorting = false;
+        }
+    }
+
+    private async Task<IReadOnlyList<LibraryGroup>> RefetchAsync(IReadOnlyList<LibraryGroup> current, int limit)
+    {
+        var unavailable = current.Where(group => group.BackendUnreachable)
+            .Select(group => (group.Provider, group.InstanceId)).ToHashSet();
+        var groups = await LibrarySearch.SearchAsync(
+            _instances.Where(instance => !unavailable.Contains(("Stash", instance.Id))).ToArray(),
+            _hydrusInstances.Where(instance => !unavailable.Contains(("Hydrus", instance.Id))).ToArray(),
+            _submittedQuery, _lifetime.Token, limit: limit, localLibraries: _localLibraries, sort: _sort);
+        var refreshed = groups.ToDictionary(group => (group.Provider, group.InstanceId, group.Category));
+        return current.Select(original =>
+        {
+            if (!refreshed.TryGetValue((original.Provider, original.InstanceId, original.Category), out var group))
+            {
+                return original;
+            }
+            return group.Error is null && !group.BackendUnreachable ? group : group with { Items = original.Items };
+        }).ToArray();
+    }
+
     private void ApplySort()
     {
         _typeGroups = LibrarySearchService.GroupByType(_expandedGroups ?? _groups)
@@ -308,7 +348,7 @@
 
     private async Task OpenHydrusAsync(Guid instanceId)
     {
-        if (_openingHydrus is not null || _isSearching || _expandingType is not null)
+        if (_openingHydrus is not null || _isSearching || _isSorting || _expandingType is not null)
         {
             return;
         }

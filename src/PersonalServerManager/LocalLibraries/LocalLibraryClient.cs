@@ -26,22 +26,23 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
     private static readonly string[] ComicFormats = ["CBZ", "CBR", "CB7", "CBT", "PDF", "EPUB"];
 
     public async Task<IReadOnlyList<LibraryItem>> SearchAsync(LocalLibraryInstance instance, string query, int limit,
-        CancellationToken cancellationToken = default, int offset = 0)
+        CancellationToken cancellationToken = default, int offset = 0, LibrarySort sort = LibrarySort.Default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (limit is < 1 or > 25) throw new ArgumentOutOfRangeException(nameof(limit));
         if (offset is < 0 or > MaximumEntries) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (!Enum.IsDefined(sort)) throw new ArgumentOutOfRangeException(nameof(sort));
         ArgumentNullException.ThrowIfNull(query);
         if (query.Length > 1024 || query.Any(char.IsControl)) throw new ArgumentException("Invalid search query.", nameof(query));
         if (!Enum.IsDefined(instance.Kind)) throw new InvalidDataException("Invalid library kind.");
         if (string.IsNullOrWhiteSpace(query)) return [];
         var root = LocalLibraryPaths.Root(instance.RootPath);
         if (instance.Kind == LocalLibraryKind.Notes)
-            return await SearchNotesAsync(instance, root, query.Trim(), limit, cancellationToken, offset);
+            return await SearchNotesAsync(instance, root, query.Trim(), limit, cancellationToken, offset, sort);
         try
         {
             return await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance) ?? instance,
-                root, query.Trim(), limit, cancellationToken, offset);
+                root, query.Trim(), limit, cancellationToken, offset, sort);
         }
         catch (SqliteException) when (cancellationToken.IsCancellationRequested)
         {
@@ -102,8 +103,10 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
     }
 
     private static async Task<IReadOnlyList<LibraryItem>> SearchNotesAsync(LocalLibraryInstance instance, string root,
-        string query, int limit, CancellationToken cancellationToken, int offset)
+        string query, int limit, CancellationToken cancellationToken, int offset, LibrarySort sort)
     {
+        // Without a sort, stop at the first page; otherwise every match must be collected before ordering.
+        var stopAt = sort == LibrarySort.Default ? offset + limit : int.MaxValue;
         var items = new List<LibraryItem>();
         long scannedBytes = 0;
         foreach (var path in EnumerateNotes(root, cancellationToken))
@@ -119,17 +122,12 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 var text = await ReadNoteAsync(root, path, cancellationToken);
                 if (text is null || (!Path.GetFileName(path).Contains(query, StringComparison.OrdinalIgnoreCase)
                     && !text.Contains(query, StringComparison.OrdinalIgnoreCase))) continue;
-                if (offset > 0)
-                {
-                    offset--;
-                    continue;
-                }
                 var id = NoteId(root, path);
                 items.Add(new LibraryItem(id, Path.GetFileName(path), "Note", ItemUrl(instance.Id, id),
                     MediaType: LibraryMediaType.Note, CreatedAt: fileInfo.CreationTimeUtc,
                     UpdatedAt: fileInfo.LastWriteTimeUtc, Path: Path.GetRelativePath(root, path),
                     ReaderUrl: new Uri($"/libraries/{instance.Id:D}/read/{id}", UriKind.Relative)));
-                if (items.Count == limit) break;
+                if (items.Count == stopAt) break;
             }
             catch (Exception exception) when (IsFileFailure(exception))
             {
@@ -137,7 +135,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return items;
+        return LibrarySearchService.SortItems(items, sort).Skip(offset).Take(limit).ToArray();
     }
 
     private static IEnumerable<string> EnumerateNotes(string root, CancellationToken cancellationToken)
@@ -205,7 +203,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
     }
 
     private static async Task<IReadOnlyList<LibraryItem>> SearchCalibreAsync(LocalLibraryInstance instance, string root,
-        string query, int limit, CancellationToken cancellationToken, int offset)
+        string query, int limit, CancellationToken cancellationToken, int offset, LibrarySort sort)
     {
         await using var database = await OpenDatabaseAsync(root, cancellationToken);
         var connection = database.Connection;
@@ -216,13 +214,23 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             await using var schemaReader = await schema.ExecuteReaderAsync(cancellationToken);
             while (await schemaReader.ReadAsync(cancellationToken)) columns.Add(schemaReader.GetString(1));
         }
+        var created = columns.Contains("timestamp") ? "b.timestamp" : "NULL";
+        var orderBy = sort switch
+        {
+            LibrarySort.TitleAscending => "b.title COLLATE NOCASE ASC, b.id",
+            LibrarySort.TitleDescending => "b.title COLLATE NOCASE DESC, b.id",
+            LibrarySort.DateNewest => $"{created} IS NULL, {created} DESC, b.id",
+            LibrarySort.DateOldest => $"{created} IS NULL, {created} ASC, b.id",
+            LibrarySort.Random => "random()",
+            _ => "b.id"
+        };
         using var command = connection.CreateCommand();
         command.CommandText = $$"""
             SELECT b.id, b.title, b.path,
                 COALESCE((SELECT group_concat(a.name, ', ') FROM authors a
                     JOIN books_authors_link ba ON ba.author = a.id WHERE ba.book = b.id), ''),
                 (SELECT substr(c.text, 1, $maximumCommentLength) FROM comments c WHERE c.book = b.id LIMIT 1),
-                {{(columns.Contains("timestamp") ? "b.timestamp" : "NULL")}},
+                {{created}},
                 {{(columns.Contains("last_modified") ? "b.last_modified" : "NULL")}}
             FROM books b
             WHERE b.title LIKE $query ESCAPE '\'
@@ -231,7 +239,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 OR EXISTS (SELECT 1 FROM tags t JOIN books_tags_link bt ON bt.tag = t.id
                     WHERE bt.book = b.id AND t.name LIKE $query ESCAPE '\')
                 OR EXISTS (SELECT 1 FROM comments c WHERE c.book = b.id AND c.text LIKE $query ESCAPE '\')
-            ORDER BY b.id
+            ORDER BY {{orderBy}}
             LIMIT $maximumEntries
             """;
         command.Parameters.AddWithValue("$maximumEntries", MaximumEntries);

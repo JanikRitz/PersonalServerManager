@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using PersonalServerManager.Search;
 
 namespace PersonalServerManager.Stash;
 
@@ -46,11 +47,19 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         string query,
         CancellationToken cancellationToken = default) => SearchAsync(instance, kind, query, 5, cancellationToken);
 
+    public Task<IReadOnlyList<StashSearchResult>> SearchAsync(
+        StashInstance instance,
+        StashSearchKind kind,
+        string query,
+        int limit,
+        CancellationToken cancellationToken = default) => SearchAsync(instance, kind, query, limit, LibrarySort.Default, cancellationToken);
+
     public async Task<IReadOnlyList<StashSearchResult>> SearchAsync(
         StashInstance instance,
         StashSearchKind kind,
         string query,
         int limit,
+        LibrarySort sort,
         CancellationToken cancellationToken = default)
     {
         if (limit is not (5 or 25))
@@ -73,10 +82,28 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         };
 
         var document = $"query Search($filter: FindFilterType) {{ {field}(filter: $filter) {{ count {collectionName} {{ {selection} created_at updated_at }} }} }}";
+        var filter = new Dictionary<string, object> { ["q"] = query, ["per_page"] = limit, ["page"] = 1 };
+        var named = kind is StashSearchKind.Performers or StashSearchKind.Studios or StashSearchKind.Tags or StashSearchKind.Groups;
+        (string Field, string Direction)? order = sort switch
+        {
+            LibrarySort.TitleAscending => (named ? "name" : "title", "ASC"),
+            LibrarySort.TitleDescending => (named ? "name" : "title", "DESC"),
+            LibrarySort.DateNewest => ("created_at", "DESC"),
+            LibrarySort.DateOldest => ("created_at", "ASC"),
+            LibrarySort.Random => ($"random_{Random.Shared.Next(1, 100_000_000).ToString(CultureInfo.InvariantCulture)}", "ASC"),
+            LibrarySort.Default => null,
+            _ => throw new ArgumentOutOfRangeException(nameof(sort))
+        };
+        if (order is { } value)
+        {
+            filter["sort"] = value.Field;
+            filter["direction"] = value.Direction;
+        }
+
         using var response = await SendAsync(
             instance,
             document,
-            new { filter = new { q = query, per_page = limit, page = 1 } },
+            new { filter },
             cancellationToken);
 
         using var payload = await ReadPayloadAsync(response, cancellationToken);

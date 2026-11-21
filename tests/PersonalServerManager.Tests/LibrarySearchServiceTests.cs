@@ -826,6 +826,72 @@ public sealed class LibrarySearchServiceTests
         }
     }
 
+    [Theory]
+    [InlineData(LibrarySort.Default)]
+    [InlineData(LibrarySort.TitleAscending)]
+    [InlineData(LibrarySort.TitleDescending)]
+    [InlineData(LibrarySort.DateNewest)]
+    [InlineData(LibrarySort.DateOldest)]
+    [InlineData(LibrarySort.Random)]
+    public async Task SearchAsync_ForwardsSortToStashAndHydrusFilesAndTags(LibrarySort sort)
+    {
+        var stash = new SortCapturingStashClient();
+        var hydrus = new SortCapturingHydrusClient();
+
+        var groups = await new LibrarySearchService(stash, hydrus)
+            .SearchAsync([StashInstance("Stash")], [HydrusInstance("Hydrus")], "query", sort: sort);
+
+        Assert.All(groups, group => Assert.Null(group.Error));
+        Assert.Equal(Enum.GetValues<StashSearchKind>().Length, stash.Sorts.Count);
+        Assert.All(stash.Sorts, actual => Assert.Equal(sort, actual));
+        Assert.Equal(sort, Assert.Single(hydrus.FileSorts));
+        Assert.Equal(sort, Assert.Single(hydrus.TagSorts));
+    }
+
+    private sealed class SortCapturingStashClient : IStashGraphQlClient
+    {
+        public ConcurrentBag<LibrarySort> Sorts { get; } = [];
+
+        public Task<IReadOnlyList<StashSearchResult>> SearchAsync(StashInstance instance, StashSearchKind kind, string query, int limit, LibrarySort sort, CancellationToken cancellationToken = default)
+        {
+            Sorts.Add(sort);
+            return Task.FromResult<IReadOnlyList<StashSearchResult>>([]);
+        }
+
+        public Task<IReadOnlyList<StashSearchResult>> SearchAsync(StashInstance instance, StashSearchKind kind, string query, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Service must use the sort-aware overload.");
+
+        public Task<StashObservation> ObserveAsync(StashInstance instance, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class SortCapturingHydrusClient : IHydrusClient
+    {
+        public ConcurrentBag<LibrarySort> FileSorts { get; } = [];
+        public ConcurrentBag<LibrarySort> TagSorts { get; } = [];
+
+        public Task<IReadOnlyList<HydrusFile>> SearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, int limit, LibrarySort sort, CancellationToken cancellationToken = default)
+        {
+            FileSorts.Add(sort);
+            return Task.FromResult<IReadOnlyList<HydrusFile>>([]);
+        }
+
+        public Task<IReadOnlyList<HydrusTag>> SearchTagsAsync(HydrusInstance instance, string query, int limit, LibrarySort sort, CancellationToken cancellationToken = default)
+        {
+            TagSorts.Add(sort);
+            return Task.FromResult<IReadOnlyList<HydrusTag>>([]);
+        }
+
+        public Task<IReadOnlyList<HydrusFile>> SearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Service must use the sort-aware overload.");
+
+        public Task<HydrusObservation> ObserveAsync(HydrusInstance instance, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<string> OpenSearchAsync(HydrusInstance instance, IReadOnlyList<string> tags, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
     private sealed class LimitAwareStashClient(
         Func<StashInstance, StashSearchKind, string, int, CancellationToken, Task<IReadOnlyList<StashSearchResult>>> search) : IStashGraphQlClient
     {

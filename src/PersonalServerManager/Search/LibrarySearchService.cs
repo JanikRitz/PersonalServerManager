@@ -34,11 +34,20 @@ public record LibraryTypeGroup(LibraryMediaType Type, IReadOnlyList<LibraryTypeI
 public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydrusClient hydrusClient,
     LocalLibraryClient? localClient = null)
 {
-    public static IReadOnlyList<LibraryTypeItem> SortItems(IReadOnlyList<LibraryTypeItem> items, LibrarySort sort)
+    public static IReadOnlyList<LibraryTypeItem> SortItems(IReadOnlyList<LibraryTypeItem> items, LibrarySort sort) =>
+        SortItems(items, entry => entry.Item, sort);
+
+    public static IReadOnlyList<LibraryItem> SortItems(IReadOnlyList<LibraryItem> items, LibrarySort sort) =>
+        SortItems(items, item => item, sort);
+
+    private static IReadOnlyList<T> SortItems<T>(IReadOnlyList<T> items, Func<T, LibraryItem> select, LibrarySort sort)
     {
-        static string Title(LibraryTypeItem entry) => string.IsNullOrWhiteSpace(entry.Item.Title)
-            ? entry.Item.Path ?? string.Empty : entry.Item.Title;
-        static DateTimeOffset? Date(LibraryTypeItem entry) => entry.Item.CreatedAt ?? entry.Item.UpdatedAt;
+        string Title(T entry)
+        {
+            var item = select(entry);
+            return string.IsNullOrWhiteSpace(item.Title) ? item.Path ?? string.Empty : item.Title;
+        }
+        DateTimeOffset? Date(T entry) => select(entry).CreatedAt ?? select(entry).UpdatedAt;
 
         return sort switch
         {
@@ -73,11 +82,17 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
         string query,
         CancellationToken cancellationToken = default,
         int limit = 5,
-        IReadOnlyList<LocalLibraryInstance>? localLibraries = null)
+        IReadOnlyList<LocalLibraryInstance>? localLibraries = null,
+        LibrarySort sort = LibrarySort.Default)
     {
         if (limit is not (5 or 25))
         {
             throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        if (!Enum.IsDefined(sort))
+        {
+            throw new ArgumentOutOfRangeException(nameof(sort));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -91,7 +106,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             tasks.Add(SearchBackendAsync(backend => Enum.GetValues<StashSearchKind>().Select(kind =>
                 SearchGroupAsync(instance.Id, instance.Name, "Stash", kind.ToString(),
                     new Uri(instance.WebUiUrl, $"{(kind == StashSearchKind.Markers ? "scenes/markers" : kind.ToString().ToLowerInvariant())}?q={Uri.EscapeDataString(capturedQuery)}"),
-                    async token => (await stashClient.SearchAsync(instance, kind, capturedQuery, limit, token))
+                    async token => (await stashClient.SearchAsync(instance, kind, capturedQuery, limit, sort, token))
                         .Take(limit)
                         .Select(item => new LibraryItem(item.Id, item.Title, kind.ToString(), item.ItemUrl,
                             PreviewService.CreateLink("stash", instance.Id, kind.ToString(), item.Id), kind switch
@@ -112,7 +127,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             tasks.Add(SearchBackendAsync(backend =>
             [
                 SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Files", null,
-                async token => (await hydrusClient.SearchAsync(instance, tags, limit, token))
+                async token => (await hydrusClient.SearchAsync(instance, tags, limit, sort, token))
                     .Select(item => (Item: item, Type: HydrusMediaType(item.Mime)))
                     .Where(entry => entry.Type.HasValue)
                     .Take(limit)
@@ -122,7 +137,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                         CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path))
                     .ToArray(), backend),
                 SearchGroupAsync(instance.Id, instance.Name, "Hydrus", "Tags", null,
-                async token => (await hydrusClient.SearchTagsAsync(instance, capturedQuery, limit, token))
+                async token => (await hydrusClient.SearchTagsAsync(instance, capturedQuery, limit, sort, token))
                     .Take(limit)
                     .Select(tag => new LibraryItem(tag.Name, tag.Name, tag.Count.ToString(CultureInfo.InvariantCulture),
                         new Uri($"/?q={Uri.EscapeDataString(tag.Name)}", UriKind.Relative), MediaType: LibraryMediaType.Tag))
@@ -143,7 +158,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             tasks.Add(Task.WhenAll(SearchGroupAsync(instance.Id, instance.Name,
                 instance.Kind == LocalLibraryKind.Notes ? "Notes" : "Calibre", category,
                 new Uri($"/libraries/{instance.Id:D}?q={Uri.EscapeDataString(capturedQuery)}", UriKind.Relative),
-                async token => (await client.SearchAsync(instance, capturedQuery, limit, token)).Take(limit).ToArray())));
+                async token => (await client.SearchAsync(instance, capturedQuery, limit, token, sort: sort)).Take(limit).ToArray())));
         }
 
         var groups = await Task.WhenAll(tasks);

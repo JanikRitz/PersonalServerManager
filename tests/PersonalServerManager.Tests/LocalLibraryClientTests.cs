@@ -317,6 +317,50 @@ public sealed class LocalLibraryClientTests : IDisposable
         Assert.Equal(new string('a', 3999), Assert.Single(await _client.SearchAsync(instance, "fixture", 25)).Description);
     }
 
+    [Theory]
+    [InlineData(LibrarySort.Default, new[] { "3", "4", "5", "6", "7" })]
+    [InlineData(LibrarySort.TitleAscending, new[] { "9", "7", "3", "5", "4" })]
+    [InlineData(LibrarySort.TitleDescending, new[] { "8", "6", "4", "5", "3" })]
+    [InlineData(LibrarySort.DateNewest, new[] { "9", "6", "4", "5", "3" })]
+    [InlineData(LibrarySort.DateOldest, new[] { "8", "7", "3", "5", "4" })]
+    public async Task CalibreSortsAllMatchesBeforeApplyingLimit(LibrarySort sort, string[] expected)
+    {
+        await CreateDatabaseAsync();
+        await ExecuteAsync("""
+            ALTER TABLE books ADD COLUMN timestamp TEXT;
+            INSERT INTO books(id, title, path, timestamp) VALUES
+                (3, 'Sorted Charlie', 'Writer/Fixture (1)', '2020-03-01T00:00:00+00:00'),
+                (4, 'Sorted Echo', 'Writer/Fixture (1)', '2020-05-01T00:00:00+00:00'),
+                (5, 'Sorted Delta', 'Writer/Fixture (1)', '2020-04-01T00:00:00+00:00'),
+                (6, 'Sorted Foxtrot', 'Writer/Fixture (1)', '2020-06-01T00:00:00+00:00'),
+                (7, 'Sorted Bravo', 'Writer/Fixture (1)', '2020-02-01T00:00:00+00:00'),
+                (8, 'Sorted Golf', 'Writer/Fixture (1)', '2020-01-01T00:00:00+00:00'),
+                (9, 'Sorted Alpha', 'Writer/Fixture (1)', '2020-07-01T00:00:00+00:00');
+            INSERT INTO data(book, name, format) SELECT id, 'fixture', 'EPUB' FROM books WHERE id >= 3;
+            """);
+
+        var items = await _client.SearchAsync(Instance(LocalLibraryKind.CalibreText), "sorted", 5, sort: sort);
+
+        Assert.Equal(expected, items.Select(item => item.Id));
+    }
+
+    [Fact]
+    public async Task NotesTitleSortCoversMatchesBeyondTheFirstPage()
+    {
+        for (var index = 1; index <= 5; index++)
+            await File.WriteAllTextAsync(Path.Combine(_root, $"m{index}.txt"), "needle");
+        var nested = Directory.CreateDirectory(Path.Combine(_root, "sub")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(nested, "a1.txt"), "needle");
+        await File.WriteAllTextAsync(Path.Combine(nested, "a2.txt"), "needle");
+        var instance = Instance();
+
+        var sorted = await _client.SearchAsync(instance, "needle", 5, sort: LibrarySort.TitleAscending);
+        var unsorted = await _client.SearchAsync(instance, "needle", 5);
+
+        Assert.Equal(new[] { "a1.txt", "a2.txt", "m1.txt", "m2.txt", "m3.txt" }, sorted.Select(item => item.Title));
+        Assert.Equal(new[] { "m1.txt", "m2.txt", "m3.txt", "m4.txt", "m5.txt" }, unsorted.Select(item => item.Title));
+    }
+
     private async Task SetCommentAsync(string? text)
     {
         await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder

@@ -1,12 +1,15 @@
 using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
+using PersonalServerManager.Search;
 
 namespace PersonalServerManager.Hydrus;
 
 public sealed class HydrusClient : IHydrusClient, IDisposable
 {
     private const int MaximumResponseBytes = 256 * 1024;
+    // Hydrus has no tag-search limit and returns every match, so short queries can be several megabytes.
+    private const int MaximumTagResponseBytes = 16 * 1024 * 1024;
     private const string ResponseTooLarge = "Hydrus response exceeded the size limit.";
     private static readonly TimeSpan MaximumTimeout = TimeSpan.FromSeconds(8);
     private readonly HttpClient _httpClient;
@@ -66,10 +69,17 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         IReadOnlyList<string> tags,
         CancellationToken cancellationToken = default) => SearchAsync(instance, tags, 5, cancellationToken);
 
+    public Task<IReadOnlyList<HydrusFile>> SearchAsync(
+        HydrusInstance instance,
+        IReadOnlyList<string> tags,
+        int limit,
+        CancellationToken cancellationToken = default) => SearchAsync(instance, tags, limit, LibrarySort.Default, cancellationToken);
+
     public async Task<IReadOnlyList<HydrusFile>> SearchAsync(
         HydrusInstance instance,
         IReadOnlyList<string> tags,
         int limit,
+        LibrarySort sort,
         CancellationToken cancellationToken = default)
     {
         if (limit is not (5 or 25))
@@ -77,13 +87,22 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             throw new ArgumentOutOfRangeException(nameof(limit));
         }
 
+        // Hydrus file titles are synthetic, so title sorts keep the default order and are sorted locally.
+        var order = sort switch
+        {
+            LibrarySort.DateNewest => "&file_sort_type=2&file_sort_asc=false",
+            LibrarySort.DateOldest => "&file_sort_type=2&file_sort_asc=true",
+            LibrarySort.Random => "&file_sort_type=4",
+            LibrarySort.Default or LibrarySort.TitleAscending or LibrarySort.TitleDescending => "",
+            _ => throw new ArgumentOutOfRangeException(nameof(sort))
+        };
         ValidateTags(tags);
         await _searchGate.WaitAsync(cancellationToken);
         try
         {
             using var timeout = CreateTimeout(cancellationToken);
             using var search = await SendAsync(instance, HttpMethod.Get,
-                $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(tags.Append($"system:limit={limit}")))}&return_file_ids=true&return_hashes=false",
+                $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(tags.Append($"system:limit={limit}")))}&return_file_ids=true&return_hashes=false{order}",
                 null, timeout.Token, cancellationToken);
             var ids = ReadIds(search.RootElement, limit);
             if (ids.Length == 0)
@@ -113,15 +132,27 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         }
     }
 
+    public Task<IReadOnlyList<HydrusTag>> SearchTagsAsync(
+        HydrusInstance instance,
+        string query,
+        int limit,
+        CancellationToken cancellationToken = default) => SearchTagsAsync(instance, query, limit, LibrarySort.Default, cancellationToken);
+
     public async Task<IReadOnlyList<HydrusTag>> SearchTagsAsync(
         HydrusInstance instance,
         string query,
         int limit,
+        LibrarySort sort,
         CancellationToken cancellationToken = default)
     {
         if (limit is not (5 or 25))
         {
             throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        if (!Enum.IsDefined(sort))
+        {
+            throw new ArgumentOutOfRangeException(nameof(sort));
         }
 
         if (string.IsNullOrWhiteSpace(query) || query.Length > 1024)
@@ -133,14 +164,14 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         using var timeout = CreateTimeout(cancellationToken);
         using var payload = await SendAsync(instance, HttpMethod.Get,
             $"add_tags/search_tags?search={Uri.EscapeDataString(query)}&tag_display_type=display",
-            null, timeout.Token, cancellationToken);
+            null, timeout.Token, cancellationToken, MaximumTagResponseBytes);
         if (!payload.RootElement.TryGetProperty("tags", out var values) || values.ValueKind != JsonValueKind.Array)
         {
             throw new InvalidDataException("Hydrus returned an invalid tag list.");
         }
 
         var tags = new List<HydrusTag>();
-        foreach (var value in values.EnumerateArray().Take(limit))
+        foreach (var value in values.EnumerateArray())
         {
             if (value.ValueKind != JsonValueKind.Object ||
                 !value.TryGetProperty("value", out var nameValue) || nameValue.ValueKind != JsonValueKind.String ||
@@ -154,7 +185,15 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             tags.Add(new HydrusTag(name, count));
         }
 
-        return tags;
+        // Hydrus returns every matching tag, so sort the full list before applying the limit.
+        IEnumerable<HydrusTag> ordered = sort switch
+        {
+            LibrarySort.TitleAscending => tags.OrderBy(tag => tag.Name, StringComparer.CurrentCultureIgnoreCase),
+            LibrarySort.TitleDescending => tags.OrderByDescending(tag => tag.Name, StringComparer.CurrentCultureIgnoreCase),
+            LibrarySort.Random => tags.OrderBy(_ => Random.Shared.Next()),
+            _ => tags
+        };
+        return ordered.Take(limit).ToArray();
     }
 
     public async Task<string> OpenSearchAsync(
@@ -186,7 +225,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
 
     private async Task<JsonDocument> SendAsync(
         HydrusInstance instance, HttpMethod method, string path, object? body,
-        CancellationToken timeoutToken, CancellationToken cancellationToken)
+        CancellationToken timeoutToken, CancellationToken cancellationToken, int maximumBytes = MaximumResponseBytes)
     {
         ValidateEndpoint(instance.ApiEndpoint);
         if (instance.ApiKey is { } apiKey && (apiKey.Length > 1024 || apiKey.Any(character => character < ' ' || character > '~')))
@@ -215,7 +254,7 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 throw new HttpRequestException("Hydrus rejected the request.", null, response.StatusCode);
             }
 
-            if (response.Content.Headers.ContentLength > MaximumResponseBytes)
+            if (response.Content.Headers.ContentLength > maximumBytes)
             {
                 throw new InvalidDataException(ResponseTooLarge);
             }
@@ -225,14 +264,14 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             var chunk = new byte[8192];
             while (true)
             {
-                var read = await stream.ReadAsync(chunk.AsMemory(0, (int)Math.Min(chunk.Length, MaximumResponseBytes + 1 - buffer.Length)), timeoutToken);
+                var read = await stream.ReadAsync(chunk.AsMemory(0, (int)Math.Min(chunk.Length, maximumBytes + 1 - buffer.Length)), timeoutToken);
                 if (read == 0)
                 {
                     break;
                 }
 
                 buffer.Write(chunk, 0, read);
-                if (buffer.Length > MaximumResponseBytes)
+                if (buffer.Length > maximumBytes)
                 {
                     throw new InvalidDataException(ResponseTooLarge);
                 }

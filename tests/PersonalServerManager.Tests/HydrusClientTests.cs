@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.WebUtilities;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.Search;
 using Xunit;
 
 namespace PersonalServerManager.Tests;
@@ -135,8 +136,8 @@ public sealed class HydrusClientTests
         using var client = new HydrusClient(new StubHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StreamContent(knownLength
-                ? new MemoryStream(new byte[256 * 1024 + 1])
-                : new NonSeekableStream(new byte[256 * 1024 + 1]))
+                ? new MemoryStream(new byte[16 * 1024 * 1024 + 1])
+                : new NonSeekableStream(new byte[16 * 1024 * 1024 + 1]))
         }));
         await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchTagsAsync(Instance(), "tag", 5));
     }
@@ -166,6 +167,52 @@ public sealed class HydrusClientTests
         Assert.Equal(2, calls);
         Assert.Equal(limit, files.Count);
         Assert.Equal(limit, files[^1].Id);
+    }
+
+    [Theory]
+    [InlineData(LibrarySort.DateNewest, "&file_sort_type=2&file_sort_asc=false")]
+    [InlineData(LibrarySort.DateOldest, "&file_sort_type=2&file_sort_asc=true")]
+    [InlineData(LibrarySort.Random, "&file_sort_type=4")]
+    [InlineData(LibrarySort.Default, null)]
+    [InlineData(LibrarySort.TitleAscending, null)]
+    [InlineData(LibrarySort.TitleDescending, null)]
+    public async Task SearchAsync_SendsNativeFileSortOnlyForDateAndRandom(LibrarySort sort, string? expected)
+    {
+        var searches = 0;
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            if (!request.RequestUri!.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+            {
+                Assert.DoesNotContain("file_sort", request.RequestUri.Query);
+                return Json("""{"metadata":[{"file_id":1,"mime":"image/png"}]}""");
+            }
+
+            searches++;
+            var query = request.RequestUri.Query;
+            if (expected is null) Assert.DoesNotContain("file_sort_type", query);
+            else Assert.Contains(expected, query);
+            if (sort == LibrarySort.Random) Assert.DoesNotContain("file_sort_asc", query);
+            return Json("""{"file_ids":[1]}""");
+        }));
+
+        Assert.Single(await client.SearchAsync(Instance(), ["tag"], 5, sort));
+        Assert.Equal(1, searches);
+    }
+
+    [Theory]
+    [InlineData(LibrarySort.TitleAscending, new[] { "alpha", "bravo", "charlie", "delta", "echo" })]
+    [InlineData(LibrarySort.TitleDescending, new[] { "golf", "foxtrot", "echo", "delta", "charlie" })]
+    [InlineData(LibrarySort.Default, new[] { "delta", "golf", "alpha", "echo", "charlie" })]
+    public async Task SearchTagsAsync_SortsEveryReturnedTagBeforeApplyingLimit(LibrarySort sort, string[] expected)
+    {
+        using var client = new HydrusClient(new StubHandler((_, _) => Json(JsonSerializer.Serialize(new
+        {
+            tags = new[] { "delta", "golf", "alpha", "echo", "charlie", "foxtrot", "bravo" }.Select((value, index) => new { value, count = index })
+        }))));
+
+        var tags = await client.SearchTagsAsync(Instance(), "tag", 5, sort);
+
+        Assert.Equal(expected, tags.Select(tag => tag.Name));
     }
 
     [Theory]
