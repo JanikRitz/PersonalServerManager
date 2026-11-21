@@ -180,6 +180,43 @@ public sealed class PreviewServiceTests
     }
 
     [Theory]
+    [InlineData("scenes", "scene/42/webp", "image/webp")]
+    [InlineData("images", "image/42/preview", "video/webm")]
+    public async Task FetchAsync_UsesCanonicalAuthenticatedAnimatedPreview(string category, string expectedPath, string contentType)
+    {
+        var id = Guid.NewGuid();
+        var service = Service(new StubHandler(request =>
+        {
+            Assert.Equal("https://configured.example/prefix/" + expectedPath, request.RequestUri!.AbsoluteUri);
+            Assert.Equal("Bearer secret", request.Headers.Authorization?.ToString());
+            var response = Image();
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+            return response;
+        }), id);
+
+        Assert.Equal($"/previews/stash/{id:D}/{category}/42/animated", PreviewService.CreateLink("stash", id, category, "42", true)?.OriginalString);
+        var result = await service.FetchAsync("stash", id, category, "42", CancellationToken.None, true);
+        Assert.Equal(contentType, result!.ContentType);
+    }
+
+    [Theory]
+    [InlineData("scenes", "video/webm")]
+    [InlineData("images", "image/svg+xml")]
+    public async Task FetchAsync_RejectsUnexpectedAnimatedContent(string category, string contentType)
+    {
+        var id = Guid.NewGuid();
+        var service = Service(new StubHandler(_ =>
+        {
+            var response = Image();
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+            return response;
+        }), id);
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.FetchAsync("stash", id, category, "42", CancellationToken.None, true));
+        Assert.Null(PreviewService.CreateLink("stash", id, "markers", "42", true));
+        Assert.Null(await service.FetchAsync("hydrus", id, "files", "42", CancellationToken.None, true));
+    }
+
+    [Theory]
     [InlineData("stash", "scenes", "../42")]
     [InlineData("stash", "images", "42?url=https://evil.example")]
     [InlineData("stash", "files", "42")]

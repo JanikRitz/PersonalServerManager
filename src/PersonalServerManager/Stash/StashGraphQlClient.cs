@@ -70,8 +70,8 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         cancellationToken.ThrowIfCancellationRequested();
         var (field, collectionName, selection, urlSegment) = kind switch
         {
-            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot } files { path duration } rating100", "scenes"),
-            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail } files { path } rating100", "images"),
+            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot webp } files { path duration } rating100", "scenes"),
+            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail preview } files { path } visual_files { ... on ImageFile { path } ... on VideoFile { path } } rating100", "images"),
             StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path rating100 favorite", "performers"),
             StashSearchKind.Studios => ("findStudios", "studios", "id name image_path rating100 favorite", "studios"),
             StashSearchKind.Tags => ("findTags", "tags", "id name image_path favorite", "tags"),
@@ -212,11 +212,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
     {
         var id = item.GetProperty("id").GetString() ?? throw new InvalidDataException("Stash returned a result without an ID.");
         var named = kind is StashSearchKind.Performers or StashSearchKind.Studios or StashSearchKind.Tags or StashSearchKind.Groups;
-        var path = item.TryGetProperty("files", out var files) && files.ValueKind == JsonValueKind.Array
-            ? files.EnumerateArray().Where(file => file.ValueKind == JsonValueKind.Object)
-                .Select(file => file.TryGetProperty("path", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null)
-                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
-            : null;
+        var path = ReadFilePath(item, kind == StashSearchKind.Images ? "visual_files" : "files") ?? ReadFilePath(item, "files");
         var title = item.TryGetProperty(named ? "name" : "title", out var titleValue)
             && titleValue.ValueKind == JsonValueKind.String ? titleValue.GetString() : null;
         if (string.IsNullOrWhiteSpace(title)) title = kind == StashSearchKind.Markers ? "" : path ?? "(untitled)";
@@ -261,6 +257,8 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             Duration = kind == StashSearchKind.Scenes ? ReadFileDuration(item) : null,
             MarkerStart = kind == StashSearchKind.Markers ? ReadMarkerTime(item, "seconds") : null,
             MarkerEnd = kind == StashSearchKind.Markers ? ReadMarkerTime(item, "end_seconds") : null,
+            HasAnimatedPreview = kind is StashSearchKind.Scenes or StashSearchKind.Images &&
+                ResolveThumbnail(instance.WebUiUrl, kind, id, GetNestedString(item, "paths", kind == StashSearchKind.Scenes ? "webp" : "preview"), animated: true) is not null,
             Path = path,
             ContentCount = kind switch
             {
@@ -278,6 +276,13 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String &&
         DateTimeOffset.TryParse(value.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date)
             ? date : null;
+
+    private static string? ReadFilePath(JsonElement item, string property) =>
+        item.TryGetProperty(property, out var files) && files.ValueKind == JsonValueKind.Array
+            ? files.EnumerateArray().Where(file => file.ValueKind == JsonValueKind.Object)
+                .Select(file => file.TryGetProperty("path", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null)
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+            : null;
 
     private static TimeSpan? ReadDuration(JsonElement item, string property)
     {
@@ -324,15 +329,15 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             ? value.GetString()
             : null;
 
-    private static Uri? ResolveThumbnail(Uri baseUri, StashSearchKind kind, string id, string? value, string? sceneId = null)
+    private static Uri? ResolveThumbnail(Uri baseUri, StashSearchKind kind, string id, string? value, string? sceneId = null, bool animated = false)
     {
         if (string.IsNullOrWhiteSpace(value) || !long.TryParse(id, NumberStyles.None, CultureInfo.InvariantCulture, out var numericId) || numericId <= 0)
             return null;
 
         var path = kind switch
         {
-            StashSearchKind.Scenes => $"scene/{id}/screenshot",
-            StashSearchKind.Images => $"image/{id}/thumbnail",
+            StashSearchKind.Scenes => $"scene/{id}/{(animated ? "webp" : "screenshot")}",
+            StashSearchKind.Images => $"image/{id}/{(animated ? "preview" : "thumbnail")}",
             StashSearchKind.Performers => $"performer/{id}/image",
             StashSearchKind.Studios => $"studio/{id}/image",
             StashSearchKind.Tags => $"tag/{id}/image",

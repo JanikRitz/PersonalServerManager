@@ -125,6 +125,37 @@ public sealed class StashGraphQlClientTests
     }
 
     [Fact]
+    public async Task SearchAsync_MapsAnimatedImageVisualFilePath()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            Assert.Contains("visual_files { ... on ImageFile { path } ... on VideoFile { path } }", body);
+            return Json("""{"data":{"findImages":{"images":[{"id":"433868","title":"Animated image","files":[],"visual_files":[{"path":"/library/animated.gif"}]}]}}}""");
+        })));
+
+        var image = Assert.Single(await client.SearchAsync(Instance(null), StashSearchKind.Images, "animated"));
+
+        Assert.Equal("/library/animated.gif", image.Path);
+    }
+
+    [Fact]
+    public async Task SearchAsync_OnlyEnablesCanonicalAnimatedPreviews()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            Assert.Contains("paths { thumbnail preview }", body);
+            return Json("""{"data":{"findImages":{"images":[{"id":"42","paths":{"preview":"https://stash.example/prefix/image/42/preview?apikey=private"}},{"id":"43","paths":{"preview":null}},{"id":"44","paths":{"preview":"https://evil.example/image/44/preview"}}]}}}""");
+        })));
+        var instance = Instance(null) with { WebUiUrl = new Uri("https://stash.example/prefix/") };
+
+        var images = await client.SearchAsync(instance, StashSearchKind.Images, "query");
+
+        Assert.True(images[0].HasAnimatedPreview);
+        Assert.False(images[1].HasAnimatedPreview);
+        Assert.False(images[2].HasAnimatedPreview);
+    }
+
+    [Fact]
     public async Task SearchAsync_MapsResultsAndUsesInstanceAuthentication()
     {
         var handler = new StubHandler((request, body) =>

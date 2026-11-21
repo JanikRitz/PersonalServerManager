@@ -22,6 +22,8 @@ public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, 
     public TimeSpan? Duration { get; init; }
     public TimeSpan? MarkerStart { get; init; }
     public TimeSpan? MarkerEnd { get; init; }
+    public Uri? AnimatedPreviewUrl { get; init; }
+    public bool AnimatedPreviewIsVideo { get; init; }
     public bool IsFavorite { get; init; }
     public decimal? RatingOutOfFive { get; init; }
 }
@@ -141,6 +143,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                             Duration = item.Duration,
                             MarkerStart = item.MarkerStart,
                             MarkerEnd = item.MarkerEnd,
+                            AnimatedPreviewUrl = item.HasAnimatedPreview ? PreviewService.CreateLink("stash", instance.Id, kind.ToString(), item.Id, true) : null,
+                            AnimatedPreviewIsVideo = item.HasAnimatedPreview && kind == StashSearchKind.Images,
                             RatingOutOfFive = item.Rating100 / 20m,
                             IsFavorite = item.IsFavorite,
                             FileFormat = kind is StashSearchKind.Images or StashSearchKind.Scenes

@@ -158,7 +158,31 @@
                                             @if (item.PreviewUrl is not null)
                                             {
                                                 <img class="thumbnail" src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
-                                                <span class="thumbnail-zoom" aria-hidden="true"><img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.parentElement.hidden=true" /></span>
+                                                @if (item.AnimatedPreviewUrl is not null)
+                                                {
+                                                    @if (item.AnimatedPreviewIsVideo)
+                                                    {
+                                                        <video class="thumbnail" src="@item.AnimatedPreviewUrl" autoplay muted loop playsinline preload="metadata" aria-hidden="true" onerror="this.hidden=true"></video>
+                                                    }
+                                                    else
+                                                    {
+                                                        <img class="thumbnail" src="@item.AnimatedPreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
+                                                    }
+                                                }
+                                                <span class="thumbnail-zoom" aria-hidden="true">
+                                                    <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.parentElement.hidden=true" />
+                                                    @if (item.AnimatedPreviewUrl is not null)
+                                                    {
+                                                        @if (item.AnimatedPreviewIsVideo)
+                                                        {
+                                                            <video class="zoom-animation" src="@item.AnimatedPreviewUrl" autoplay muted loop playsinline preload="metadata" onerror="this.hidden=true"></video>
+                                                        }
+                                                        else
+                                                        {
+                                                            <img class="zoom-animation" src="@item.AnimatedPreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
+                                                        }
+                                                    }
+                                                </span>
                                             }
                                             @if (item.FileFormat is not null)
                                             {
