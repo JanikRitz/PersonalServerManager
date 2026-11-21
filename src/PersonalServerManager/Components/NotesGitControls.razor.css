@@ -1,0 +1,30 @@
+.notes-git-controls {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+    color: var(--ink, #172a2a);
+    font: 12px/1.45 "Segoe UI", sans-serif;
+    letter-spacing: 0;
+}
+
+.sync-copy { display: grid; flex: 1; min-width: 0; gap: 2px; overflow-wrap: anywhere; }
+.sync-mode, .sync-time { color: var(--muted, #526763); }
+.sync-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 36px;
+    width: 36px;
+    height: 36px;
+    padding: 7px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--teal, #176d62);
+    cursor: pointer;
+}
+.sync-button ::deep .mud-icon-root { width: 20px; height: 20px; }
+.sync-button:hover { border-color: var(--line, #d7dfd9); background: var(--paper, #edf5f2); }
+.sync-button:focus-visible { outline: 2px solid var(--teal, #176d62); outline-offset: 3px; }
+.sync-button:disabled { opacity: .6; cursor: wait; }

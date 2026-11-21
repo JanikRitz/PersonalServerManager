@@ -24,7 +24,7 @@ public sealed class JsonLocalLibraryStore(string filePath) : ILocalLibraryStore
     {
         cancellationToken.ThrowIfCancellationRequested();
         Validate(instance);
-        LocalLibraryPaths.Root(instance.RootPath);
+        if (!instance.IsExternal) LocalLibraryPaths.Root(instance.RootPath);
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -97,13 +97,16 @@ public sealed class JsonLocalLibraryStore(string filePath) : ILocalLibraryStore
     private static void Validate(LocalLibraryInstance? instance)
     {
         if (instance is null || instance.Id == Guid.Empty || string.IsNullOrWhiteSpace(instance.Name)
-            || instance.Name.Any(char.IsControl) || string.IsNullOrWhiteSpace(instance.RootPath)
+            || instance.Name.Any(char.IsControl) || instance.RootPath is null || (!instance.IsExternal && string.IsNullOrWhiteSpace(instance.RootPath))
             || instance.RootPath.Any(char.IsControl) || !Enum.IsDefined(instance.Kind) || !instance.HasValidReaderConfiguration())
         {
             throw new InvalidDataException("Invalid local library configuration. It was left untouched.");
         }
 
-        LocalLibraryPaths.NormalizeRoot(instance.RootPath);
+        if (instance.ManagedPort is < 1024 or > 65535 || (instance.AutoGitPull && instance.Kind != LocalLibraryKind.Notes))
+            throw new InvalidDataException("Invalid per-library settings.");
+        if (!instance.IsExternal) LocalLibraryPaths.NormalizeRoot(instance.RootPath);
+        if (instance.CalibreInstallationFolder is not null) LocalLibraryPaths.NormalizeRoot(instance.CalibreInstallationFolder);
     }
 
     private async Task WriteAsync(List<LocalLibraryInstance> stored, CancellationToken cancellationToken)

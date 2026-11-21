@@ -11,6 +11,7 @@ using PersonalServerManager.Stash;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.Search;
 using PersonalServerManager.LocalLibraries;
+using PersonalServerManager.Management;
 
 var builder = WebApplication.CreateBuilder(args);
 var allowInsecureHttp = builder.Configuration.GetValue<bool>("NetworkAccess:AllowInsecureHttp");
@@ -72,6 +73,10 @@ builder.Services.AddSingleton<ILocalLibraryStore>(_ => new JsonLocalLibraryStore
 builder.Services.AddSingleton(services => new ManagedCalibreServer(Path.Combine(dataDirectory, "calibre-server.json"),
     services.GetRequiredService<ILocalLibraryStore>(), services.GetRequiredService<ILogger<ManagedCalibreServer>>()));
 builder.Services.AddHostedService(services => services.GetRequiredService<ManagedCalibreServer>());
+builder.Services.AddSingleton<ManagedBackendService>();
+builder.Services.AddHostedService(services => services.GetRequiredService<ManagedBackendService>());
+builder.Services.AddSingleton<NotesGitSyncService>();
+builder.Services.AddHostedService(services => services.GetRequiredService<NotesGitSyncService>());
 builder.Services.AddSingleton<LocalLibraryClient>();
 builder.Services.AddHttpClient<PreviewService>(client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);

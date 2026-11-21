@@ -17,6 +17,11 @@
 .calibre-fields input[type="number"] { width: 7rem; }
 .calibre-fields .calibre-checkbox { display: flex; align-items: center; gap: 8px; min-height: 42px; }
 .calibre-checkbox input { width: 18px; min-height: 18px; flex: 0 0 18px; }
+.calibre-checkbox { display: flex; align-items: center; gap: 8px; }
+.mode-selector { display: flex; gap: 20px; border-bottom: 1px solid var(--line, #d7dfd9); padding-bottom: 12px; }
+.mode-selector label { display: flex; gap: 8px; align-items: center; }
+.mode-selector input { width: 18px; min-height: 18px; }
+.managed-badge { color: var(--teal, #176d62); font-size: 12px; }
 .calibre-actions { margin-top: 12px; align-items: center; }
 h2, h3 { margin: 0; color: var(--ink, #172a2a); font: 21px/1.2 Georgia, serif; overflow-wrap: anywhere; }
 h2:focus { outline: none; }

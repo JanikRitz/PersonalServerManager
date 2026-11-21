@@ -732,16 +732,17 @@ public sealed class LibrarySearchServiceTests
             LocalLibraryInstance[] libraries = [
                 new(Guid.NewGuid(), "Notes fixture", root, LocalLibraryKind.Notes),
                 new(Guid.NewGuid(), "Books fixture", root, LocalLibraryKind.CalibreText),
-                new(Guid.NewGuid(), "Comics fixture", root, LocalLibraryKind.CalibreComic)];
+                new(Guid.NewGuid(), "Comics fixture", root, LocalLibraryKind.CalibreComic),
+                new(Guid.NewGuid(), "Mixed fixture", root, LocalLibraryKind.Calibre)];
             var groups = await new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), new LocalLibraryClient())
                 .SearchAsync([], [], $"  {query}  ", limit: limit, localLibraries: libraries);
 
-            Assert.Equal(new[] { "Notes", "Calibre", "Calibre" }, groups.Select(group => group.Provider));
-            Assert.Equal(new[] { "Notes", "Ebooks", "Comics" }, groups.Select(group => group.Category));
-            Assert.Equal(new[] { LibraryMediaType.Note, LibraryMediaType.TextEbook, LibraryMediaType.Comic },
-                groups.Select(group => group.Items[0].MediaType));
+            Assert.Equal(new[] { "Notes", "Calibre", "Calibre", "Calibre" }, groups.Select(group => group.Provider));
+            Assert.Equal(new[] { "Notes", "Books", "Books", "Books" }, groups.Select(group => group.Category));
+            Assert.All(groups[0].Items, item => Assert.Equal(LibraryMediaType.Note, item.MediaType));
             Assert.Equal(limit, groups[0].Items.Count);
-            Assert.All(groups.Skip(1), group => Assert.Single(group.Items));
+            Assert.All(groups.Skip(1), group => Assert.Equal(new[] { LibraryMediaType.TextEbook, LibraryMediaType.Comic },
+                group.Items.Select(item => item.MediaType)));
             foreach (var group in groups)
             {
                 Assert.Null(group.Error);

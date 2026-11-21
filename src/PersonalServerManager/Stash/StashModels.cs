@@ -17,7 +17,13 @@ public sealed record StashInstance(
     string Name,
     Uri GraphQlEndpoint,
     Uri WebUiUrl,
-    string? ApiKey);
+    string? ApiKey,
+    string? InstallationFolder = null,
+    int Port = 9999,
+    bool StartWithApp = false)
+{
+    public bool IsManaged => !string.IsNullOrWhiteSpace(InstallationFolder);
+}
 
 public sealed record StashSearchResult(
     string Id,

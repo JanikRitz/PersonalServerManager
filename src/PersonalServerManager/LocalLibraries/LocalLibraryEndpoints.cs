@@ -59,7 +59,15 @@ public static class LocalLibraryEndpoints
         {
             return Results.StatusCode(499);
         }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or SqliteException)
+        catch (HttpRequestException)
+        {
+            return Results.StatusCode(502);
+        }
+        catch (OperationCanceledException)
+        {
+            return Results.StatusCode(504);
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or SqliteException or System.Text.Json.JsonException)
         {
             return Results.NotFound();
         }

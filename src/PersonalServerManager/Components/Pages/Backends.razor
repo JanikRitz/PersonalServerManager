@@ -3,14 +3,16 @@
 @using PersonalServerManager.Stash
 @using PersonalServerManager.Hydrus
 @using PersonalServerManager.LocalLibraries
+@using PersonalServerManager.Management
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
 @inject IStashGraphQlClient StashClient
 @inject IHydrusInstanceStore HydrusStore
 @inject ILocalLibraryStore LocalStore
+@inject ManagedBackendService ManagedBackends
 @inject IJSRuntime JavaScript
 
-<PageTitle>Backends | Personal Server Manager</PageTitle>
+<PageTitle>Server Management | Personal Server Manager</PageTitle>
 
 <div class="workspace">
     <header class="topbar">
@@ -24,10 +26,9 @@
 
     <main>
         <div class="page-heading">
-            <h1>Backends</h1>
+            <h1>Server Management</h1>
             <div class="heading-meta">
                 <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count).ToString("00")) <span>INSTANCES</span></span>
-                <span class="last-refresh" role="status">@(_lastRefresh is null ? "Awaiting first Stash check" : $"Stash checked {_lastRefresh.Value.ToLocalTime():HH:mm:ss}")</span>
             </div>
         </div>
         @if (_pageError is not null)
@@ -63,6 +64,7 @@
                                 <button class="instance-row @(instance.Id == _selectedInstanceId ? "selected" : string.Empty)" type="button" aria-pressed="@(instance.Id == _selectedInstanceId)" @onclick="() => SelectInstance(instance.Id)">
                                     <span class="status-indicator @(observation is null ? "unknown" : observation.IsReachable ? "online" : "offline")" aria-hidden="true"></span>
                                     <span class="instance-copy"><strong>@instance.Name</strong><small>@instance.GraphQlEndpoint.Host</small></span>
+                                    @if (instance.IsManaged) { <span class="managed-badge">Managed</span> }
                                     <span class="row-status">@(observation is null ? "Checking..." : observation.IsReachable ? "Available" : "Unavailable")</span>
                                     <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" />
                                 </button>
@@ -81,6 +83,10 @@
                             <dt>Stash interface</dt><dd>@_selectedInstance.WebUiUrl.AbsoluteUri</dd>
                             <dt>Observation</dt><dd role="status">@(observation?.Message ?? "First check pending")</dd>
                         </dl>
+                        @if (_selectedInstance.IsManaged)
+                        {
+                            <ManagedBackendControls @key="_selectedInstance.Id" InstanceId="@_selectedInstance.Id" StartWithApp="@_selectedInstance.StartWithApp" StartWithAppChanged="SaveStashAutostartAsync" />
+                        }
                         <div class="detail-actions">
                             <a class="outline-action" href="@_selectedInstance.WebUiUrl" target="_blank" rel="noopener noreferrer">Open Stash<MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
                             <button class="text-action" type="button" disabled="@_isSaving" @onclick="() => EditInstance(_selectedInstance)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" />Edit</button>
@@ -91,8 +97,9 @@
             </section>
 
             <div class="hydrus-section"><HydrusInstances Changed="ReloadHydrusAsync" /></div>
+            <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Calibre" Changed="ReloadLocalAsync" /></div>
+            <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Notes" Changed="ReloadLocalAsync" /></div>
         </div>
-        <LocalLibraries Changed="ReloadLocalAsync" />
     </main>
 
     <footer><span>PERSONAL SERVER MANAGER</span><span>LIBRARY CONNECTIONS</span></footer>
@@ -109,8 +116,20 @@
                 <form class="editor-form" @onsubmit="SaveInstanceAsync" @onsubmit:preventDefault="true">
                     <fieldset disabled="@_isSaving">
                         <label>Instance name<input @bind="_draftName" maxlength="60" required placeholder="e.g. Main library" /></label>
-                        <label>GraphQL endpoint<input @bind="_draftGraphQlUrl" type="url" required placeholder="http://localhost:9999/graphql" /></label>
-                        <label>Stash interface URL<input @bind="_draftWebUrl" type="url" required placeholder="http://localhost:9999/" /></label>
+                        <div class="mode-selector" role="radiogroup" aria-label="Stash mode">
+                            <label><input type="radio" name="stash-mode" checked="@(!_draftManaged)" @onchange="() => _draftManaged = false" />External</label>
+                            <label><input type="radio" name="stash-mode" checked="@_draftManaged" @onchange="() => _draftManaged = true" />Managed</label>
+                        </div>
+                        @if (_draftManaged)
+                        {
+                            <label>Stash installation folder<input @bind="_draftInstallation" required placeholder="C:\Servers\Stash" /></label>
+                            <label>Port<input @bind="_draftPort" type="number" min="1024" max="65535" required /></label>
+                            <label class="checkbox-label"><input type="checkbox" @bind="_draftAutostart" />Start with Personal Server Manager</label>
+                        }
+                        else
+                        {
+                            <label>Stash base URL<input @bind="_draftWebUrl" type="url" required placeholder="http://localhost:9999/" /></label>
+                        }
                         <label>API key <span class="field-note">@(_editingId is null ? "Optional" : "Leave blank to keep the current key")</span><input @bind="_draftApiKey" type="password" autocomplete="new-password" /></label>
                         <p class="security-note">API keys are encrypted on this Windows account. Use HTTPS for Stash endpoints that cross an untrusted network.</p>
                         <div class="editor-actions"><button class="cancel-button" type="button" @onclick="CancelEdit">Cancel</button><button class="save-button" type="submit">@(_isSaving ? "Saving..." : "Save instance")</button></div>
@@ -134,6 +153,10 @@
     private string _draftGraphQlUrl = string.Empty;
     private string _draftWebUrl = string.Empty;
     private string _draftApiKey = string.Empty;
+    private bool _draftManaged;
+    private string _draftInstallation = string.Empty;
+    private int _draftPort = 9999;
+    private bool _draftAutostart;
     private string? _pageError;
     private string? _hydrusError;
     private string? _localError;
@@ -247,17 +270,30 @@
         _draftWebUrl = "http://localhost:9999/";
         _draftApiKey = string.Empty;
         _editorError = null;
+        _draftManaged = false;
+        _draftInstallation = string.Empty;
+        _draftPort = 9999;
+        _draftAutostart = false;
         _isEditing = true;
     }
 
     private void EditInstance(StashInstance instance)
     {
+        if (ManagedBackends.GetStatus(instance.Id).IsRunning)
+        {
+            _pageError = "Stop Stash before editing its configuration.";
+            return;
+        }
         _editingId = instance.Id;
         _draftName = instance.Name;
         _draftGraphQlUrl = instance.GraphQlEndpoint.AbsoluteUri;
         _draftWebUrl = instance.WebUiUrl.AbsoluteUri;
         _draftApiKey = string.Empty;
         _editorError = null;
+        _draftManaged = instance.IsManaged;
+        _draftInstallation = instance.InstallationFolder ?? string.Empty;
+        _draftPort = instance.Port;
+        _draftAutostart = instance.StartWithApp;
         _isEditing = true;
     }
 
@@ -267,8 +303,9 @@
         {
             return;
         }
+        var baseUrl = _draftManaged ? $"http://127.0.0.1:{_draftPort}/" : _draftWebUrl;
         if (string.IsNullOrWhiteSpace(_draftName) || _draftName.Trim().Length > 60 ||
-            !TryParseEndpoint(_draftGraphQlUrl, out var graphQlUrl) || !TryParseEndpoint(_draftWebUrl, out var webUrl))
+            !TryParseEndpoint(baseUrl, out var webUrl))
         {
             _editorError = "Enter a name (up to 60 characters) and valid HTTP or HTTPS URLs without embedded credentials.";
             return;
@@ -278,7 +315,11 @@
         _editorError = null;
         try
         {
-            var instance = new StashInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), graphQlUrl!, webUrl!, _draftApiKey);
+            if (_editingId is { } existingId && ManagedBackends.GetStatus(existingId).IsRunning)
+                throw new InvalidDataException("Stop Stash before editing its configuration.");
+            var normalizedBase = new Uri(webUrl!.AbsoluteUri.TrimEnd('/') + "/");
+            var instance = new StashInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), new Uri(normalizedBase, "graphql"), normalizedBase, _draftApiKey,
+                _draftManaged ? _draftInstallation.Trim() : null, _draftPort, _draftManaged && _draftAutostart);
             await InstanceStore.SaveAsync(instance, _token);
             _draftApiKey = string.Empty;
             await LoadInstancesAsync();
@@ -310,6 +351,9 @@
             {
                 return;
             }
+            await ManagedBackends.StopInstanceAsync(instance.Id);
+            if (ManagedBackends.GetStatus(instance.Id).IsRunning)
+                throw new InvalidDataException("Stash could not stop. Retry Stop before removing the instance.");
             await InstanceStore.RemoveAsync(instance.Id, _token);
             _observations.Remove(instance.Id);
             await LoadInstancesAsync();
@@ -326,6 +370,20 @@
     }
 
     private void SelectInstance(Guid id) => _selectedInstanceId = id;
+
+    private async Task SaveStashAutostartAsync(bool enabled)
+    {
+        if (_selectedInstance is not { } instance) return;
+        try
+        {
+            await InstanceStore.SaveAsync(instance with { StartWithApp = enabled }, _token);
+            await LoadInstancesAsync();
+        }
+        catch (Exception exception) when (IsConfigurationFailure(exception))
+        {
+            _pageError = "Could not save the autostart setting.";
+        }
+    }
 
     private async Task ReloadHydrusAsync()
     {
@@ -377,6 +435,7 @@
         Uri.TryCreate(value.Trim(), UriKind.Absolute, out uri) &&
         (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) &&
         string.IsNullOrEmpty(uri.UserInfo) &&
+        string.IsNullOrEmpty(uri.Query) &&
         string.IsNullOrEmpty(uri.Fragment);
 
     private static bool IsConfigurationFailure(Exception exception) => exception is

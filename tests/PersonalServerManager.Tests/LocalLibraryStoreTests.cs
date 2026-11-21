@@ -11,6 +11,44 @@ public sealed class LocalLibraryStoreTests : IDisposable
     private readonly string _root = Directory.CreateTempSubdirectory("psm-local-store-").FullName;
 
     [Fact]
+    public async Task LegacyJsonPreservesIdsKindsAndDefaultsWithoutEnablingAutostart()
+    {
+        var path = Path.Combine(_root, "instances.json");
+        var id = Guid.NewGuid();
+        var legacy = System.Text.Json.JsonSerializer.Serialize(new[] { new { id, name = "Legacy", rootPath = _root, kind = 2 } });
+        await File.WriteAllTextAsync(path, legacy);
+        var instance = Assert.Single(await new JsonLocalLibraryStore(path).GetAllAsync());
+        Assert.Equal(id, instance.Id);
+        Assert.Equal(LocalLibraryKind.CalibreComic, instance.Kind);
+        Assert.True(instance.IsManaged);
+        Assert.Equal(8080, instance.ManagedPort);
+        Assert.False(instance.StartWithApp);
+        Assert.False(instance.AutoGitPull);
+        Assert.Null(instance.CalibreInstallationFolder);
+        Assert.Equal(legacy, await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
+    public async Task ExternalAndPerLibrarySettingsRoundTripWithoutFolderAccess()
+    {
+        var store = new JsonLocalLibraryStore(Path.Combine(_root, "instances.json"));
+        var external = new LocalLibraryInstance(Guid.NewGuid(), "Remote", "", LocalLibraryKind.Calibre,
+            new Uri("https://calibre.example/base/"), "Library ID");
+        var managed = new LocalLibraryInstance(Guid.NewGuid(), "Managed", _root, LocalLibraryKind.Calibre,
+            ManagedPort: 9090, StartWithApp: true, CalibreInstallationFolder: _root);
+        var notes = new LocalLibraryInstance(Guid.NewGuid(), "Notes", _root, LocalLibraryKind.Notes, AutoGitPull: true);
+        await store.SaveAsync(external);
+        await store.SaveAsync(managed);
+        await store.SaveAsync(notes);
+        Assert.Contains(external, await store.GetAllAsync());
+        Assert.Contains(managed, await store.GetAllAsync());
+        Assert.Contains(notes, await store.GetAllAsync());
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(external with { AutoGitPull = true }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(managed with { ManagedPort = 80 }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(external with { ContentServerUrl = null, ContentServerLibraryId = null }));
+    }
+
+    [Fact]
     public async Task ManagedCalibrePersistsSettingsAndDoesNotTakeOverAnOccupiedPort()
     {
         var store = new JsonLocalLibraryStore(Path.Combine(_root, "instances.json"));

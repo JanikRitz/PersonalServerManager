@@ -1,0 +1,39 @@
+.managed-backend-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.managed-backend-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 5rem;
+    min-height: 1.75rem;
+    padding: 0.125rem 0.5rem;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    font-size: 0.8rem;
+}
+
+.managed-backend-badge.running { color: var(--mud-palette-success); }
+.managed-backend-badge.stopped { color: var(--mud-palette-text-secondary); }
+
+.managed-backend-autostart {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.875rem;
+}
+
+.managed-backend-autostart input { accent-color: var(--mud-palette-primary); }
+
+.managed-backend-message {
+    flex: 1 1 14rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--mud-palette-text-secondary);
+    font-size: 0.875rem;
+}

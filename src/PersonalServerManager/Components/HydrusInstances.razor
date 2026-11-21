@@ -1,9 +1,11 @@
 @using PersonalServerManager.Hydrus
 @using System.Security.Cryptography
 @using System.Text.Json
+@using PersonalServerManager.Management
 @implements IDisposable
 @inject IHydrusInstanceStore Store
 @inject IHydrusClient Client
+@inject ManagedBackendService ManagedBackends
 @inject IJSRuntime JavaScript
 
 <section class="hydrus-instances" aria-labelledby="@FieldId("heading")">
@@ -36,6 +38,10 @@
                     <strong>@instance.Name</strong>
                     <span class="instance-status" role="status">@StatusText(instance)</span>
                     <small>@instance.ApiEndpoint.Host</small>
+                    @if (instance.IsManaged)
+                    {
+                        <ManagedBackendControls InstanceId="@instance.Id" StartWithApp="@instance.StartWithApp" StartWithAppChanged="enabled => SaveAutostartAsync(instance, enabled)" />
+                    }
                 </div>
                 <div class="row-actions">
                     <button class="icon-button" type="button" title="Edit Hydrus instance" aria-label="@($"Edit Hydrus instance {instance.Name}")" disabled="@_busy" @onclick="() => EditInstance(instance)">
@@ -68,6 +74,16 @@
                     <fieldset disabled="@_busy">
                         <label for="@FieldId("name")">Hydrus instance name</label>
                         <input id="@FieldId("name")" @bind="_draftName" @bind:event="oninput" maxlength="60" required autofocus />
+                        <div class="mode-selector" role="radiogroup" aria-label="Hydrus mode">
+                            <label><input type="radio" name="@FieldId("mode")" checked="@(!_draftManaged)" @onchange="() => _draftManaged = false" /> External</label>
+                            <label><input type="radio" name="@FieldId("mode")" checked="@_draftManaged" @onchange="() => _draftManaged = true" /> Managed</label>
+                        </div>
+                        @if (_draftManaged)
+                        {
+                            <label for="@FieldId("installation")">Hydrus installation folder</label>
+                            <input id="@FieldId("installation")" @bind="_draftInstallation" required placeholder="C:\Servers\Hydrus" />
+                            <label class="checkbox-label"><input type="checkbox" @bind="_draftAutostart" /> Start with Personal Server Manager</label>
+                        }
                         <label for="@FieldId("url")">Client API URL</label>
                         <input id="@FieldId("url")" @bind="_draftUrl" @bind:event="oninput" type="url" required spellcheck="false" aria-describedby="@FieldId("url-help")" />
                         <small id="@FieldId("url-help")">Use HTTP or HTTPS without credentials, a query, or a fragment.</small>
@@ -101,6 +117,9 @@
     private string _draftName = string.Empty;
     private string _draftUrl = "http://127.0.0.1:45869/";
     private string _draftKey = string.Empty;
+    private bool _draftManaged;
+    private string _draftInstallation = string.Empty;
+    private bool _draftAutostart;
     private string? _error;
     private string? _editorError;
 
@@ -216,16 +235,27 @@
         _draftUrl = "http://127.0.0.1:45869/";
         _draftKey = string.Empty;
         _editorError = null;
+        _draftManaged = false;
+        _draftInstallation = string.Empty;
+        _draftAutostart = false;
         _editing = true;
     }
 
     private void EditInstance(HydrusInstance instance)
     {
+        if (ManagedBackends.GetStatus(instance.Id).IsRunning)
+        {
+            _error = "Stop Hydrus before editing its configuration.";
+            return;
+        }
         _editingId = instance.Id;
         _draftName = instance.Name;
         _draftUrl = instance.ApiEndpoint.AbsoluteUri;
         _draftKey = string.Empty;
         _editorError = null;
+        _draftManaged = instance.IsManaged;
+        _draftInstallation = instance.InstallationFolder ?? string.Empty;
+        _draftAutostart = instance.StartWithApp;
         _editing = true;
     }
 
@@ -292,7 +322,10 @@
         _busy = true;
         try
         {
-            var instance = new HydrusInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), endpoint, apiKey);
+            if (_editingId is { } existingId && ManagedBackends.GetStatus(existingId).IsRunning)
+                throw new InvalidDataException("Stop Hydrus before editing its configuration.");
+            var instance = new HydrusInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), endpoint, apiKey,
+                _draftManaged ? _draftInstallation.Trim() : null, _draftManaged && _draftAutostart);
             _draftKey = string.Empty;
             await Store.SaveAsync(instance, _token);
             CloseEditor();
@@ -327,6 +360,9 @@
                 return;
             }
 
+            await ManagedBackends.StopInstanceAsync(instance.Id);
+            if (ManagedBackends.GetStatus(instance.Id).IsRunning)
+                throw new InvalidDataException("Hydrus could not stop. Retry Stop before removing the instance.");
             await Store.RemoveAsync(instance.Id, _token);
             await ReloadAsync();
             await NotifyChangedAsync();
@@ -357,6 +393,20 @@
         catch (Exception exception) when (IsExpectedFailure(exception))
         {
             _error = "The instance configuration was saved, but the library could not refresh. Reload the page to retry.";
+        }
+    }
+
+    private async Task SaveAutostartAsync(HydrusInstance instance, bool enabled)
+    {
+        try
+        {
+            await Store.SaveAsync(instance with { StartWithApp = enabled }, _token);
+            _instances = await Store.GetAllAsync(_token);
+            await NotifyChangedAsync();
+        }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _error = "Could not save the autostart setting.";
         }
     }
 

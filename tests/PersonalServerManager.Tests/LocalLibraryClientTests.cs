@@ -147,7 +147,12 @@ public sealed class LocalLibraryClientTests : IDisposable
     {
         await CreateDatabaseAsync();
         var instance = Instance(LocalLibraryKind.CalibreComic);
-        var item = Assert.Single(await _client.SearchAsync(instance, "fixture", 25));
+        await ExecuteAsync("INSERT INTO data(book, name, format) VALUES (1, 'fixture', 'CBZ'), (1, 'fixture', 'CBR')");
+        var mixed = await _client.SearchAsync(instance, "fixture", 25);
+        Assert.Equal(2, mixed.Count);
+        var item = Assert.Single(mixed, item => item.MediaType == LibraryMediaType.Comic);
+        Assert.Equal("1", item.Id);
+        Assert.Equal("1:EPUB", Assert.Single(mixed, item => item.MediaType == LibraryMediaType.TextEbook).Id);
         Assert.Equal(LibraryMediaType.Comic, item.MediaType);
         await using (var file = await _client.OpenItemAsync(instance, item.Id))
         {
@@ -277,7 +282,7 @@ public sealed class LocalLibraryClientTests : IDisposable
         var item = Assert.Single(await _client.SearchAsync(Instance(kind), "fixture", 25));
         Assert.Equal("A & B \u00a9 \U0001F600\n\nSecond paragraph\nline\n\nLast paragraph", item.Description);
         Assert.Equal("Writer", item.Detail);
-        Assert.Equal(kind == LocalLibraryKind.CalibreComic ? LibraryMediaType.Comic : LibraryMediaType.TextEbook, item.MediaType);
+        Assert.Equal(LibraryMediaType.TextEbook, item.MediaType);
     }
 
     [Theory]
@@ -391,7 +396,7 @@ public sealed class LocalLibraryClientTests : IDisposable
             INSERT INTO books VALUES (1, 'Fixture %_ '' book', 'Writer/Fixture (1)'),
                 (2, 'Other ordinary book', 'Writer/Fixture (1)');
             INSERT INTO data VALUES (1, 1, 'fixture', 'PDF'), (2, 1, 'fixture', 'EPUB'),
-                (3, 1, 'fixture', 'CBR'), (4, 1, 'fixture', 'CBZ'), (5, 2, 'fixture', 'EPUB');
+                (5, 2, 'fixture', 'EPUB');
             INSERT INTO authors VALUES (1, 'Writer');
             INSERT INTO books_authors_link VALUES (1, 1);
             INSERT INTO tags VALUES (1, 'Topic');

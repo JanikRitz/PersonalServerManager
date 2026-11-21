@@ -20,7 +20,8 @@ public sealed class JsonStashInstanceStore(string filePath, IDataProtector prote
                     item.Name,
                     new Uri(item.GraphQlEndpoint),
                     new Uri(item.WebUiUrl),
-                    item.ProtectedApiKey is null ? null : protector.Unprotect(item.ProtectedApiKey)))
+                    item.ProtectedApiKey is null ? null : protector.Unprotect(item.ProtectedApiKey),
+                    item.InstallationFolder, item.Port, item.StartWithApp))
                 .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -32,6 +33,7 @@ public sealed class JsonStashInstanceStore(string filePath, IDataProtector prote
 
     public async Task SaveAsync(StashInstance instance, CancellationToken cancellationToken = default)
     {
+        Management.ManagedBackendService.ValidateStashInstance(instance);
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -46,7 +48,7 @@ public sealed class JsonStashInstanceStore(string filePath, IDataProtector prote
                 instance.Name,
                 instance.GraphQlEndpoint.AbsoluteUri,
                 instance.WebUiUrl.AbsoluteUri,
-                apiKey);
+                apiKey, instance.InstallationFolder, instance.Port, instance.StartWithApp);
 
             if (existing < 0)
             {
@@ -130,5 +132,8 @@ public sealed class JsonStashInstanceStore(string filePath, IDataProtector prote
         string Name,
         string GraphQlEndpoint,
         string WebUiUrl,
-        string? ProtectedApiKey);
+        string? ProtectedApiKey,
+        string? InstallationFolder = null,
+        int Port = 9999,
+        bool StartWithApp = false);
 }

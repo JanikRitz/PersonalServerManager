@@ -151,8 +151,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
             var category = instance.Kind switch
             {
                 LocalLibraryKind.Notes => "Notes",
-                LocalLibraryKind.CalibreText => "Ebooks",
-                LocalLibraryKind.CalibreComic => "Comics",
+                LocalLibraryKind.CalibreText or LocalLibraryKind.CalibreComic or LocalLibraryKind.Calibre => "Books",
                 _ => throw new ArgumentOutOfRangeException(nameof(localLibraries))
             };
             tasks.Add(Task.WhenAll(SearchGroupAsync(instance.Id, instance.Name,

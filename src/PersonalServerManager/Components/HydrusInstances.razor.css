@@ -39,6 +39,9 @@ h3 { font-size: 20px; }
 fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 label { display: block; margin: 16px 0 6px; font-size: 13px; font-weight: 600; }
 input { display: block; width: 100%; min-width: 0; min-height: 42px; padding: 9px 10px; border: 1px solid #9aafa8; border-radius: 4px; background: #fff; color: var(--hydrus-ink); font: inherit; }
+.mode-selector { display: flex; gap: 20px; }
+.mode-selector label, .checkbox-label { display: flex; align-items: center; gap: 8px; }
+input[type=radio], input[type=checkbox] { width: 16px; min-height: 16px; padding: 0; accent-color: var(--hydrus-teal); }
 fieldset small { display: block; margin-top: 6px; color: var(--hydrus-muted); font-size: 12px; overflow-wrap: anywhere; }
 .editor-actions { justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 .cancel-button, .save-button { min-height: 40px; padding: 8px 14px; border: 1px solid var(--hydrus-line); border-radius: 4px; background: #fff; color: var(--hydrus-teal); font: inherit; font-weight: 600; cursor: pointer; }

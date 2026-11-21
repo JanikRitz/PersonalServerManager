@@ -7,38 +7,11 @@
 
 <section class="local-libraries" aria-labelledby="@FieldId("heading")">
     <header class="library-heading">
-        <h2 id="@FieldId("heading")" tabindex="-1" @ref="_heading">Local libraries</h2>
-        <button class="icon-button" type="button" title="Add local library" aria-label="Add local library" disabled="@(_busy || _loading || _editing)" @onclick="AddLibrary">
+        <h2 id="@FieldId("heading")" tabindex="-1" @ref="_heading">@SectionTitle</h2>
+        <button class="icon-button" type="button" title="@($"Add {SectionTitle} library")" aria-label="@($"Add {SectionTitle} library")" disabled="@(_busy || _loading || _editing)" @onclick="AddLibrary">
             <MudIcon Icon="@Icons.Material.Filled.Add" aria-hidden="true" />
         </button>
     </header>
-    <section class="managed-calibre" aria-labelledby="@FieldId("calibre-heading")">
-        <div class="editor-heading">
-            <h3 id="@FieldId("calibre-heading")">Calibre Content Server</h3>
-            @if (_calibreStatus.Url is not null)
-            {
-                <a class="icon-button" href="@_calibreStatus.Url" target="_blank" rel="noopener noreferrer" title="Open managed Calibre" aria-label="Open managed Calibre"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" /></a>
-            }
-        </div>
-        <p role="status">@(_calibreBusy ? "Updating Calibre..." : _calibreStatus.Message)</p>
-        @if (_calibreError is not null)
-        {
-            <p class="error-message" role="alert">@_calibreError</p>
-        }
-        <form @onsubmit="SaveCalibreAsync" @onsubmit:preventDefault="true">
-            <fieldset disabled="@(_calibreBusy || _loading || _calibreStatus.Url is not null)">
-                <div class="calibre-fields">
-                    <label>Loopback port <input type="number" min="1024" max="65535" required @bind="_calibrePort" /></label>
-                    <label class="calibre-checkbox"><input type="checkbox" @bind="_calibreAutostart" /> Start with Personal Server Manager</label>
-                    <button class="cancel-button" type="submit">Save server settings</button>
-                </div>
-            </fieldset>
-        </form>
-        <div class="calibre-actions">
-            <button class="save-button" type="button" @onclick="ToggleCalibreAsync" disabled="@(_calibreBusy || _loading)">@(_calibreStatus.Url is null ? "Start Calibre" : "Stop Calibre")</button>
-            <button class="icon-button" type="button" @onclick="RefreshCalibreStatus" disabled="@_calibreBusy" title="Refresh Calibre status" aria-label="Refresh Calibre status"><MudIcon Icon="@Icons.Material.Filled.Refresh" /></button>
-        </div>
-    </section>
     @if (_error is not null)
     {
         <p class="error-message" role="alert">@_error</p>
@@ -48,26 +21,43 @@
     {
         <p class="empty-message" role="status">Loading local libraries...</p>
     }
-    else if (_instances.Count == 0 && _error is null)
+    else if (!VisibleInstances.Any() && _error is null)
     {
-        <p class="empty-message">No local libraries configured.</p>
+        <p class="empty-message">No @SectionTitle.ToLowerInvariant() libraries configured.</p>
     }
-    <ul class="library-list" aria-label="Local libraries">
-        @foreach (var instance in _instances)
+    <ul class="library-list" aria-label="@($"{SectionTitle} libraries")">
+        @foreach (var instance in VisibleInstances)
         {
             var available = _availability.GetValueOrDefault(instance.Id) == "Available";
+            var status = Calibre.GetStatus(instance.Id);
+            var readerInstance = Calibre.WithReaderConnection(instance);
             <li @key="instance.Id" class="library-row">
                 <span class="status-dot @(available ? "online" : "offline")" aria-hidden="true"></span>
                 <div class="instance-copy">
                     <strong>@instance.Name</strong>
                     <span class="instance-kind">@KindLabel(instance.Kind)</span>
                     <span class="instance-status" role="status">@_availability.GetValueOrDefault(instance.Id, "Unavailable")</span>
-                    <small class="root-path">@instance.RootPath</small>
+                    <small class="root-path">@(instance.IsExternal ? instance.ContentServerUrl?.AbsoluteUri : instance.RootPath)</small>
+                    @if (instance.IsManaged)
+                    {
+                        <span class="managed-badge" role="status">Managed · @status.Message · Port @instance.ManagedPort</span>
+                        <label class="calibre-checkbox"><input type="checkbox" checked="@instance.StartWithApp" disabled="@(_busy || _calibreBusy)" @onchange="args => SaveAutostartAsync(instance, args.Value is true)" /> Start with Personal Server Manager</label>
+                    }
+                    @if (instance.Kind == LocalLibraryKind.Notes)
+                    {
+                        <NotesGitControls InstanceId="@instance.Id" Enabled="@instance.AutoGitPull" />
+                    }
                 </div>
                 <div class="row-actions">
-                    @if (instance.ContentServerUrl is not null)
+                    @if (instance.IsManaged)
                     {
-                        <a class="icon-button" href="@instance.ContentServerUrl" target="_blank" rel="noopener noreferrer" title="Open Calibre Content Server" aria-label="@($"Open Calibre Content Server for {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" /></a>
+                        <button class="icon-button" type="button" title="Start Calibre" aria-label="@($"Start Calibre {instance.Name}")" disabled="@(_busy || _calibreBusy || status.IsRunning)" @onclick="() => ToggleCalibreAsync(instance)"><MudIcon Icon="@Icons.Material.Filled.PlayArrow" /></button>
+                        <button class="icon-button" type="button" title="Stop Calibre" aria-label="@($"Stop Calibre {instance.Name}")" disabled="@(_busy || _calibreBusy || !status.IsRunning)" @onclick="() => ToggleCalibreAsync(instance)"><MudIcon Icon="@Icons.Material.Filled.Stop" /></button>
+                        <button class="icon-button" type="button" title="Refresh Calibre status" aria-label="@($"Refresh Calibre {instance.Name}")" @onclick="RefreshAvailability"><MudIcon Icon="@Icons.Material.Filled.Refresh" /></button>
+                    }
+                    @if (readerInstance.ContentServerUrl is not null)
+                    {
+                        <a class="icon-button" href="@readerInstance.ContentServerUrl" target="_blank" rel="noopener noreferrer" title="Open Calibre Content Server" aria-label="@($"Open Calibre Content Server for {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" /></a>
                     }
                     <button class="icon-button" type="button" title="Edit local library" aria-label="@($"Edit local library {instance.Name}")" disabled="@(_busy || _loading || _editing)" @onclick="() => EditLibrary(instance)">
                         <MudIcon Icon="@Icons.Material.Filled.Edit" aria-hidden="true" />
@@ -86,7 +76,7 @@
             <dialog open class="library-dialog" aria-modal="true" aria-labelledby="@FieldId("editor-title")">
                 <span class="focus-guard" tabindex="0" @onfocus="FocusLastAsync"></span>
                 <header class="editor-heading">
-                    <h3 id="@FieldId("editor-title")">@(_editingId is null ? "Add local library" : "Edit local library")</h3>
+                    <h3 id="@FieldId("editor-title")">@($"{(_editingId is null ? "Add" : "Edit")} {SectionTitle} library")</h3>
                     <button class="icon-button" type="button" title="Close local library editor" aria-label="Close local library editor" aria-disabled="@_busy" @ref="_closeButton" @onclick="CancelEdit">
                         <MudIcon Icon="@Icons.Material.Filled.Close" aria-hidden="true" />
                     </button>
@@ -97,22 +87,46 @@
                 }
                 <form @onsubmit="SaveAsync" @onsubmit:preventDefault="true" aria-busy="@_busy">
                     <fieldset disabled="@_busy">
+                        @if (FilterKind is null)
+                        {
                         <label for="@FieldId("kind")">Library kind</label>
                         <select id="@FieldId("kind")" @bind="_draftKind">
                             <option value="@LocalLibraryKind.Notes">Notes</option>
-                            <option value="@LocalLibraryKind.CalibreText">Calibre ebooks</option>
-                            <option value="@LocalLibraryKind.CalibreComic">Calibre comics</option>
+                            <option value="@LocalLibraryKind.Calibre">Calibre</option>
                         </select>
+                        }
                         <label for="@FieldId("name")">Library name</label>
                         <input id="@FieldId("name")" @ref="_nameInput" @bind="_draftName" @bind:event="oninput" maxlength="60" required autofocus />
-                        <label for="@FieldId("path")">Absolute server folder path</label>
-                        <input id="@FieldId("path")" @bind="_draftPath" @bind:event="oninput" placeholder="@PathPlaceholder" required spellcheck="false" autocomplete="off" />
                         @if (_draftKind != LocalLibraryKind.Notes)
                         {
-                            <label for="@FieldId("server-url")">Content Server URL (optional)</label>
-                            <input id="@FieldId("server-url")" type="url" @bind="_draftServerUrl" placeholder="http://localhost:8080/" spellcheck="false" autocomplete="off" />
+                            <div class="mode-selector" role="radiogroup" aria-label="Calibre mode">
+                                <label><input type="radio" name="@FieldId("mode")" checked="@(!_draftExternal)" @onchange="() => ChangeMode(false)" /> Managed</label>
+                                <label><input type="radio" name="@FieldId("mode")" checked="@_draftExternal" @onchange="() => ChangeMode(true)" /> External</label>
+                            </div>
+                        }
+                        @if (_draftKind == LocalLibraryKind.Notes || !_draftExternal)
+                        {
+                        <label for="@FieldId("path")">Absolute server folder path</label>
+                        <input id="@FieldId("path")" @bind="_draftPath" @bind:event="oninput" placeholder="@PathPlaceholder" required spellcheck="false" autocomplete="off" />
+                        }
+                        @if (_draftKind == LocalLibraryKind.Notes)
+                        {
+                            <label class="calibre-checkbox"><input type="checkbox" @bind="_draftAutoGitPull" /> Auto Git pull</label>
+                        }
+                        else if (_draftExternal || !string.IsNullOrWhiteSpace(_draftServerUrl))
+                        {
+                            <label for="@FieldId("server-url")">Content Server URL</label>
+                            <input id="@FieldId("server-url")" type="url" @bind="_draftServerUrl" placeholder="http://localhost:8080/" required spellcheck="false" autocomplete="off" />
                             <label for="@FieldId("server-library")">Content Server library ID</label>
-                            <input id="@FieldId("server-library")" @bind="_draftServerLibrary" placeholder="@(_draftKind == LocalLibraryKind.CalibreComic ? "SFW_Comics" : "Calibre_Text")" maxlength="200" spellcheck="false" autocomplete="off" />
+                            <input id="@FieldId("server-library")" @bind="_draftServerLibrary" maxlength="200" required spellcheck="false" autocomplete="off" />
+                        }
+                        @if (_draftKind != LocalLibraryKind.Notes && !_draftExternal)
+                        {
+                            <label for="@FieldId("port")">Loopback port</label>
+                            <input id="@FieldId("port")" type="number" min="1024" max="65535" required @bind="_draftPort" />
+                            <label for="@FieldId("installation")">Calibre installation folder (optional)</label>
+                            <input id="@FieldId("installation")" @bind="_draftInstallation" placeholder="C:\Program Files\Calibre2" spellcheck="false" autocomplete="off" />
+                            <label class="calibre-checkbox"><input type="checkbox" @bind="_draftAutostart" /> Start with Personal Server Manager</label>
                         }
                         <div class="editor-actions">
                             <button class="cancel-button" type="button" @onclick="CancelEdit">Cancel</button>
@@ -128,6 +142,10 @@
 
 @code {
     [Parameter] public EventCallback Changed { get; set; }
+    [Parameter] public LocalLibraryKind? FilterKind { get; set; }
+    private string SectionTitle => FilterKind == LocalLibraryKind.Notes ? "Notes" : FilterKind is null ? "Local libraries" : "Calibre";
+    private IEnumerable<LocalLibraryInstance> VisibleInstances => _instances.Where(instance => FilterKind is null ||
+        (FilterKind == LocalLibraryKind.Notes ? instance.Kind == LocalLibraryKind.Notes : instance.IsCalibre));
 
     private readonly CancellationTokenSource _lifetime = new();
     private readonly string _id = $"local-library-{Guid.NewGuid():N}";
@@ -152,26 +170,25 @@
     private string? _draftServerLibrary;
     private string? _error;
     private string? _editorError;
-    private ManagedCalibreStatus _calibreStatus = new("Stopped");
-    private int _calibrePort = 8080;
-    private bool _calibreAutostart;
+    private bool _draftExternal;
+    private int _draftPort = 8080;
+    private bool _draftAutostart;
+    private bool _draftAutoGitPull;
+    private string? _draftInstallation;
     private bool _calibreBusy;
-    private string? _calibreError;
 
     private string FieldId(string suffix) => $"{_id}-{suffix}";
 
     private string PathPlaceholder => _draftKind switch
     {
-        LocalLibraryKind.CalibreText => @"M:\CALIBRE\Calibre Text",
-        LocalLibraryKind.CalibreComic => @"M:\CALIBRE\SFW Comics",
+        LocalLibraryKind.Calibre => @"M:\CALIBRE\Books",
         _ => @"C:\ProgrammingProjects\StoryWriting"
     };
 
     private static string KindLabel(LocalLibraryKind kind) => kind switch
     {
         LocalLibraryKind.Notes => "Notes",
-        LocalLibraryKind.CalibreText => "Calibre ebooks",
-        LocalLibraryKind.CalibreComic => "Calibre comics",
+        LocalLibraryKind.Calibre or LocalLibraryKind.CalibreText or LocalLibraryKind.CalibreComic => "Calibre",
         _ => "Unknown kind"
     };
 
@@ -179,42 +196,42 @@
     {
         _token = _lifetime.Token;
         await ReloadAsync();
-        try
-        {
-            var settings = await Calibre.GetSettingsAsync(_token);
-            _calibrePort = settings.Port;
-            _calibreAutostart = settings.StartWithApp;
-        }
-        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
-        catch (Exception exception) when (IsExpectedFailure(exception))
-        {
-            _calibreError = "Calibre settings could not be loaded.";
-        }
-        RefreshCalibreStatus();
     }
 
-    private void RefreshCalibreStatus() => _calibreStatus = Calibre.GetStatus();
-
-    private Task SaveCalibreAsync() => ChangeCalibreAsync(() => Calibre.SaveSettingsAsync(new(_calibrePort, _calibreAutostart), _token));
-
-    private Task ToggleCalibreAsync() => ChangeCalibreAsync(_calibreStatus.Url is null
-        ? () => Calibre.StartServerAsync(_token) : Calibre.StopServerAsync);
-
-    private async Task ChangeCalibreAsync(Func<Task> change)
+    private async Task ToggleCalibreAsync(LocalLibraryInstance instance)
     {
         if (_calibreBusy) return;
         _calibreBusy = true;
-        _calibreError = null;
-        try { await change(); }
+        _error = null;
+        try
+        {
+            if (!Calibre.GetStatus(instance.Id).IsRunning) await Calibre.StartServerAsync(instance.Id, _token);
+            else await Calibre.StopServerAsync(instance.Id);
+            await NotifyChangedAsync();
+        }
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
         catch (Exception exception) when (IsExpectedFailure(exception) || exception is System.ComponentModel.Win32Exception or OperationCanceledException)
         {
-            _calibreError = exception is InvalidDataException ? exception.Message : "The Calibre server could not be updated.";
+            _error = exception is InvalidDataException ? exception.Message : "The Calibre server could not be updated.";
         }
         finally
         {
-            RefreshCalibreStatus();
+            RefreshAvailability();
             _calibreBusy = false;
+        }
+    }
+
+    private async Task SaveAutostartAsync(LocalLibraryInstance instance, bool enabled)
+    {
+        try
+        {
+            await Store.SaveAsync(instance with { StartWithApp = enabled }, _token);
+            await ReloadAsync();
+            await NotifyChangedAsync();
+        }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _error = "Could not save the autostart setting.";
         }
     }
 
@@ -265,7 +282,7 @@
         _availability.Clear();
         foreach (var instance in _instances)
         {
-            _availability[instance.Id] = ValidateRoot(instance.RootPath, instance.Kind) ?? "Available";
+            _availability[instance.Id] = instance.IsExternal ? "External" : ValidateRoot(instance.RootPath, instance.Kind) ?? "Available";
         }
     }
 
@@ -309,21 +326,40 @@
     private void AddLibrary()
     {
         _editingId = null;
-        _draftKind = LocalLibraryKind.Notes;
+        _draftKind = FilterKind == LocalLibraryKind.Notes || FilterKind is null ? LocalLibraryKind.Notes : LocalLibraryKind.Calibre;
         _draftName = string.Empty;
         _draftPath = string.Empty;
         _draftServerUrl = _draftServerLibrary = null;
+        _draftExternal = _draftAutostart = _draftAutoGitPull = false;
+        _draftPort = 8080;
+        _draftInstallation = null;
         OpenEditor();
+    }
+
+    private void ChangeMode(bool external)
+    {
+        _draftExternal = external;
+        if (!external) _draftServerUrl = _draftServerLibrary = null;
     }
 
     private void EditLibrary(LocalLibraryInstance instance)
     {
+        if (Calibre.GetStatus(instance.Id).IsRunning)
+        {
+            _error = "Stop Calibre before editing its configuration.";
+            return;
+        }
         _editingId = instance.Id;
-        _draftKind = instance.Kind;
+        _draftKind = instance.IsCalibre ? LocalLibraryKind.Calibre : LocalLibraryKind.Notes;
         _draftName = instance.Name;
         _draftPath = instance.RootPath;
         _draftServerUrl = instance.ContentServerUrl?.AbsoluteUri;
         _draftServerLibrary = instance.ContentServerLibraryId;
+        _draftExternal = instance.IsExternal;
+        _draftPort = instance.ManagedPort;
+        _draftAutostart = instance.StartWithApp;
+        _draftInstallation = instance.CalibreInstallationFolder;
+        _draftAutoGitPull = instance.AutoGitPull;
         OpenEditor();
     }
 
@@ -377,8 +413,9 @@
             return;
         }
 
-        var path = _draftPath.Trim();
-        _editorError = ValidateRoot(path, _draftKind);
+        var external = _draftKind != LocalLibraryKind.Notes && _draftExternal;
+        var path = external ? "" : _draftPath.Trim();
+        _editorError = external ? null : ValidateRoot(path, _draftKind);
         if (_editorError is not null)
         {
             return;
@@ -395,7 +432,11 @@
             }
             serverLibrary = string.IsNullOrWhiteSpace(_draftServerLibrary) ? null : _draftServerLibrary.Trim();
         }
-        var instance = new LocalLibraryInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), Path.GetFullPath(path), _draftKind, serverUrl, serverLibrary);
+        var existing = _instances.FirstOrDefault(instance => instance.Id == _editingId);
+        var kind = existing?.IsCalibre == true && _draftKind != LocalLibraryKind.Notes ? existing.Kind : _draftKind;
+        var instance = new LocalLibraryInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), external ? "" : Path.GetFullPath(path), kind, serverUrl, serverLibrary,
+            _draftPort, _draftAutostart, string.IsNullOrWhiteSpace(_draftInstallation) ? null : _draftInstallation.Trim(),
+            _draftKind == LocalLibraryKind.Notes && _draftAutoGitPull);
         if (!instance.HasValidReaderConfiguration())
         {
             _editorError = "Enter both a Content Server library ID and an HTTP or HTTPS URL without credentials, a query, or a fragment.";
@@ -405,6 +446,8 @@
         _busy = true;
         try
         {
+            if (existing is not null && Calibre.GetStatus(existing.Id).IsRunning)
+                throw new InvalidDataException("Stop Calibre before editing its configuration.");
             await Store.SaveAsync(instance, _token);
             if (_disposed)
             {
@@ -443,6 +486,9 @@
                 return;
             }
 
+            await Calibre.StopServerAsync(instance.Id);
+            if (Calibre.GetStatus(instance.Id).IsRunning)
+                throw new InvalidDataException("Calibre could not stop. Retry Stop before removing the library.");
             await Store.RemoveAsync(instance.Id, _token);
             if (_disposed)
             {
@@ -484,7 +530,7 @@
     }
 
     private static bool IsExpectedFailure(Exception exception) => exception is
-        IOException or UnauthorizedAccessException or System.Security.SecurityException or
+        IOException or InvalidDataException or UnauthorizedAccessException or System.Security.SecurityException or
         JsonException or ArgumentException or InvalidOperationException or NotSupportedException or OperationCanceledException;
 
     public void Dispose()

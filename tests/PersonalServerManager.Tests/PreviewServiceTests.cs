@@ -10,7 +10,9 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using PersonalServerManager.Components.Pages;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Search;
 using PersonalServerManager.Stash;
 using Xunit;
@@ -19,6 +21,97 @@ namespace PersonalServerManager.Tests;
 
 public sealed class PreviewServiceTests
 {
+    [Theory]
+    [InlineData("http")]
+    [InlineData("timeout")]
+    [InlineData("json")]
+    [InlineData("missing-field")]
+    [InlineData("wrong-type")]
+    [InlineData("invalid-id")]
+    public async Task LocalLibraryBrowse_ExternalSearchFailureShowsConnectionError(string failure)
+    {
+        var instance = new LocalLibraryInstance(Guid.NewGuid(), "External Calibre", "", LocalLibraryKind.Calibre,
+            new Uri("https://configured.example/"), "books");
+        using var http = new HttpClient(new StubHandler(_ => failure switch
+        {
+            "http" => throw new HttpRequestException("Unavailable"),
+            "timeout" => throw new TaskCanceledException("Timed out"),
+            _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(failure switch
+            {
+                "missing-field" => "{}",
+                "wrong-type" => "{\"book_ids\":false}",
+                "invalid-id" => "{\"book_ids\":[1.5]}",
+                _ => "not json"
+            }) }
+        }));
+        using var browse = new LocalLibraryBrowse();
+        var type = typeof(LocalLibraryBrowse);
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        type.GetProperty(nameof(LocalLibraryBrowse.InstanceId))!.SetValue(browse, instance.Id);
+        type.GetProperty(nameof(LocalLibraryBrowse.Query))!.SetValue(browse, "book");
+        type.GetProperty("Store", flags)!.SetValue(browse, new LocalStore(instance));
+        type.GetProperty("Client", flags)!.SetValue(browse, new LocalLibraryClient(httpClient: http));
+
+        await (Task)type.GetMethod("OnParametersSetAsync", flags)!.Invoke(browse, null)!;
+
+        Assert.Equal("This library could not be searched. Check its connection and access permissions.",
+            type.GetField("_error", flags)!.GetValue(browse));
+        Assert.Equal(false, type.GetField("_loading", flags)!.GetValue(browse));
+        Assert.Empty((IReadOnlyList<LibraryItem>)type.GetField("_items", flags)!.GetValue(browse)!);
+    }
+
+    private sealed class LocalStore(LocalLibraryInstance instance) : ILocalLibraryStore
+    {
+        public Task<IReadOnlyList<LocalLibraryInstance>> GetAllAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<LocalLibraryInstance>>([instance]);
+        public Task SaveAsync(LocalLibraryInstance value, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task RemoveAsync(Guid id, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    [Theory]
+    [InlineData(LocalLibraryKind.Calibre)]
+    [InlineData(LocalLibraryKind.CalibreText)]
+    [InlineData(LocalLibraryKind.CalibreComic)]
+    public async Task LocalCalibreBrowseAndSearch_PreserveMixedFormatLinks(LocalLibraryKind kind)
+    {
+        var instance = new LocalLibraryInstance(Guid.NewGuid(), "External Calibre", "", kind,
+            new Uri("https://configured.example/prefix/"), "books");
+        using var http = new HttpClient(new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(request.RequestUri!.AbsolutePath.Contains("/ajax/search/")
+                ? "{\"book_ids\":[42],\"total_num\":1}"
+                : "{\"42\":{\"title\":\"Mixed book\",\"formats\":[\"EPUB\",\"CBZ\"]}}")
+        }));
+        var client = new LocalLibraryClient(httpClient: http);
+        using var browse = new LocalLibraryBrowse();
+        var type = typeof(LocalLibraryBrowse);
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        type.GetProperty(nameof(LocalLibraryBrowse.InstanceId))!.SetValue(browse, instance.Id);
+        type.GetProperty(nameof(LocalLibraryBrowse.Query))!.SetValue(browse, "book");
+        type.GetProperty("Store", flags)!.SetValue(browse, new LocalStore(instance));
+        type.GetProperty("Client", flags)!.SetValue(browse, client);
+        await (Task)type.GetMethod("OnParametersSetAsync", flags)!.Invoke(browse, null)!;
+        var items = (IReadOnlyList<LibraryItem>)type.GetField("_items", flags)!.GetValue(browse)!;
+        Assert.Null(type.GetField("_error", flags)!.GetValue(browse));
+
+        var group = Assert.Single(await new LibrarySearchService(new StashGraphQlClient(http), new HydrusClient(), client)
+            .SearchAsync([], [], "book", localLibraries: [instance]));
+        Assert.Equal("Calibre", group.Provider);
+        Assert.Equal("Books", group.Category);
+        Assert.Null(group.Error);
+        Assert.Equal(items, group.Items);
+        Assert.Equal(2, items.Select(item => item.Id).Distinct().Count());
+        foreach (var item in items)
+        {
+            var format = item.MediaType == LibraryMediaType.Comic ? "CBZ" : "EPUB";
+            Assert.Equal(kind == LocalLibraryKind.CalibreComic ? format == "CBZ" ? "42" : "42:EPUB"
+                : format == "EPUB" ? "42" : "42:CBZ", item.Id);
+            Assert.Equal($"/libraries/{instance.Id:D}/items/{item.Id}", item.ItemUrl!.OriginalString);
+            Assert.Equal($"/libraries/{instance.Id:D}/covers/42", item.PreviewUrl!.OriginalString);
+            Assert.Contains($"book_id=42&fmt={format.ToLowerInvariant()}", item.ReaderUrl!.AbsoluteUri);
+        }
+    }
+
     [Theory]
     [InlineData("video/mp4", 206)]
     [InlineData("text/html", 502)]

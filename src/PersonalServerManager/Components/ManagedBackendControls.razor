@@ -1,0 +1,81 @@
+@using PersonalServerManager.Management
+@implements IAsyncDisposable
+@inject ManagedBackendService BackendService
+
+<div class="managed-backend-controls" aria-busy="@_busy">
+    <span class="managed-backend-badge">Managed</span>
+    <span class="managed-backend-badge @(_status.IsRunning ? "running" : "stopped")">
+        @(_status.IsRunning ? "Running" : "Stopped")
+    </span>
+    <MudIconButton Icon="@Icons.Material.Filled.PlayArrow" title="Start backend" aria-label="Start backend"
+                   Disabled="@(_busy || _status.IsRunning)" OnClick="StartAsync" Size="Size.Small" />
+    <MudIconButton Icon="@Icons.Material.Filled.Stop" title="Stop backend" aria-label="Stop backend"
+                   Disabled="@(_busy || !_status.IsRunning)" OnClick="StopAsync" Size="Size.Small" />
+    <label class="managed-backend-autostart">
+        <input type="checkbox" checked="@StartWithApp" disabled="@(_busy || !StartWithAppChanged.HasDelegate)"
+               @onchange="ChangeAutostartAsync" />
+        Start with Personal Server Manager
+    </label>
+    <span class="managed-backend-message" role="status" aria-live="polite">@_status.Message</span>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid InstanceId { get; set; }
+    [Parameter] public bool StartWithApp { get; set; }
+    [Parameter] public EventCallback<bool> StartWithAppChanged { get; set; }
+
+    private ManagedBackendStatus _status = new("Stopped", false);
+    private bool _busy;
+    private readonly CancellationTokenSource _lifetime = new();
+    private Task? _refreshTask;
+
+    protected override void OnParametersSet() => _status = BackendService.GetStatus(InstanceId);
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) _refreshTask = RefreshAsync();
+        return Task.CompletedTask;
+    }
+
+    private async Task RefreshAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_lifetime.Token))
+                await InvokeAsync(() =>
+                {
+                    var status = BackendService.GetStatus(InstanceId);
+                    if (status == _status) return;
+                    _status = status;
+                    StateHasChanged();
+                });
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+    }
+
+    private Task StartAsync() => RunAsync(() => BackendService.StartInstanceAsync(InstanceId, _lifetime.Token));
+    private Task StopAsync() => RunAsync(() => BackendService.StopInstanceAsync(InstanceId));
+
+    private async Task RunAsync(Func<Task> action)
+    {
+        _busy = true;
+        try { await action(); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        finally
+        {
+            _busy = false;
+            _status = BackendService.GetStatus(InstanceId);
+        }
+    }
+
+    private Task ChangeAutostartAsync(ChangeEventArgs args) =>
+        RunAsync(() => StartWithAppChanged.InvokeAsync(args.Value is true));
+
+    public async ValueTask DisposeAsync()
+    {
+        await _lifetime.CancelAsync();
+        if (_refreshTask is not null) await _refreshTask;
+        _lifetime.Dispose();
+    }
+}

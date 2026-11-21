@@ -1,6 +1,10 @@
 namespace PersonalServerManager.Hydrus;
 
-public sealed record HydrusInstance(Guid Id, string Name, Uri ApiEndpoint, string? ApiKey);
+public sealed record HydrusInstance(Guid Id, string Name, Uri ApiEndpoint, string? ApiKey,
+    string? InstallationFolder = null, bool StartWithApp = false)
+{
+    public bool IsManaged => !string.IsNullOrWhiteSpace(InstallationFolder);
+}
 
 public sealed record HydrusFile(long Id, string Title, string Mime)
 {

@@ -7,6 +7,34 @@ namespace PersonalServerManager.Tests;
 public sealed class JsonStashInstanceStoreTests
 {
     [Fact]
+    public async Task OptionalManagementFieldsRoundTripAndLegacyEndpointsRemainUnchanged()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var path = Path.Combine(directory, "instances.json");
+            var store = new JsonStashInstanceStore(path, new EphemeralDataProtectionProvider().CreateProtector("test"));
+            await File.WriteAllTextAsync(Path.Combine(directory, "stash-win.exe"), string.Empty);
+            var instance = CreateInstance(null) with { InstallationFolder = directory, Port = 9999, StartWithApp = true,
+                GraphQlEndpoint = new Uri("http://127.0.0.1:9999/graphql"), WebUiUrl = new Uri("http://127.0.0.1:9999/") };
+            await store.SaveAsync(instance);
+            Assert.Equal(instance, Assert.Single(await store.GetAllAsync()));
+            await File.WriteAllTextAsync(path, System.Text.Json.JsonSerializer.Serialize(new[] { new
+            {
+                instance.Id, instance.Name, GraphQlEndpoint = "https://example.test/custom/graphql",
+                WebUiUrl = "https://example.test/custom/", ProtectedApiKey = (string?)null
+            } }));
+            var legacy = Assert.Single(await store.GetAllAsync());
+            Assert.False(legacy.IsManaged);
+            Assert.Equal(9999, legacy.Port);
+            Assert.False(legacy.StartWithApp);
+            await store.SaveAsync(legacy);
+            Assert.Equal(legacy, Assert.Single(await store.GetAllAsync()));
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public async Task SaveAsync_ProtectsApiKeyAndRetainsItWhenAnEditLeavesItBlank()
     {
         var directory = CreateTemporaryDirectory();

@@ -15,7 +15,8 @@ public sealed class JsonHydrusInstanceStore(string filePath, IDataProtector prot
         {
             var stored = await ReadAsync(cancellationToken);
             return stored.Select(item => new HydrusInstance(item.Id, item.Name, new Uri(item.ApiEndpoint),
-                    item.ProtectedApiKey is null ? null : protector.Unprotect(item.ProtectedApiKey)))
+                    item.ProtectedApiKey is null ? null : protector.Unprotect(item.ProtectedApiKey),
+                    item.InstallationFolder, item.StartWithApp))
                 .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray();
         }
         finally
@@ -33,8 +34,17 @@ public sealed class JsonHydrusInstanceStore(string filePath, IDataProtector prot
             var stored = await ReadAsync(cancellationToken);
             var existing = stored.FindIndex(item => item.Id == instance.Id);
             var previousApiKey = existing < 0 ? null : stored[existing].ProtectedApiKey;
+            if (instance.IsManaged)
+            {
+                Management.ManagedBackendService.ValidateHydrusInstance(instance with
+                {
+                    ApiKey = string.IsNullOrWhiteSpace(instance.ApiKey) && previousApiKey is not null
+                        ? protector.Unprotect(previousApiKey) : instance.ApiKey
+                });
+            }
             var apiKey = string.IsNullOrWhiteSpace(instance.ApiKey) ? previousApiKey : protector.Protect(instance.ApiKey);
-            var replacement = new StoredInstance(instance.Id, instance.Name, instance.ApiEndpoint.AbsoluteUri, apiKey);
+            var replacement = new StoredInstance(instance.Id, instance.Name, instance.ApiEndpoint.AbsoluteUri, apiKey,
+                instance.InstallationFolder, instance.StartWithApp);
             if (existing < 0)
             {
                 stored.Add(replacement);
@@ -125,5 +135,6 @@ public sealed class JsonHydrusInstanceStore(string filePath, IDataProtector prot
         }
     }
 
-    private sealed record StoredInstance(Guid Id, string Name, string ApiEndpoint, string? ProtectedApiKey);
+    private sealed record StoredInstance(Guid Id, string Name, string ApiEndpoint, string? ProtectedApiKey,
+        string? InstallationFolder = null, bool StartWithApp = false);
 }
