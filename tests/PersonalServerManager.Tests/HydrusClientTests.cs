@@ -336,6 +336,21 @@ public sealed class HydrusClientTests
     }
 
     [Fact]
+    public async Task SearchAsync_MapsVideoAndAnimatedImageDurationsFromMilliseconds()
+    {
+        var calls = 0;
+        using var client = new HydrusClient(new StubHandler((_, _) => ++calls == 1
+            ? Json("""{"file_ids":[1,2,3]}""")
+            : Json("""{"metadata":[{"file_id":1,"mime":"video/webm","duration":1250},{"file_id":2,"mime":"image/gif","duration":625},{"file_id":3,"mime":"image/png","duration":0}]}""")));
+
+        var files = await client.SearchAsync(Instance(), ["tag"]);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(1250), files[0].Duration);
+        Assert.Equal(TimeSpan.FromMilliseconds(625), files[1].Duration);
+        Assert.Null(files[2].Duration);
+    }
+
+    [Fact]
     public async Task SearchAsync_OnlyMarksPositiveRatingsOnTheDefaultFavouriteService()
     {
         var calls = 0;

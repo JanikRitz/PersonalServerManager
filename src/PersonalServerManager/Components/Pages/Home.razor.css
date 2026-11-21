@@ -71,12 +71,12 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--teal); outline-
 .thumbnail-link { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--line); border-radius: 4px; background: #e8ede8; color: #8a9b91; }
 .thumbnail-placeholder { position: absolute; display: grid; place-items: center; inset: 0; }
 .thumbnail { position: absolute; inset: 0; display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
-.format-badge, .source-badge, .rating-badge, .content-count-badge { position: absolute; padding: 2px 5px; border-radius: 4px; background: #17251f; color: #fff; font: 600 10px/1.4 "Segoe UI", sans-serif; }
+.format-badge, .source-badge, .rating-badge, .content-count-badge, .duration-badge { position: absolute; padding: 2px 5px; border-radius: 4px; background: #17251f; color: #fff; font: 600 10px/1.4 "Segoe UI", sans-serif; }
 .rating-badge { top: 6px; left: 6px; color: #ffd36a; white-space: nowrap; }
 .format-badge { top: 6px; right: 6px; }
 .source-badge { bottom: 6px; left: 6px; max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-badge.with-content-badge { max-width: calc(100% - 56px); }
-.content-count-badge { right: 6px; bottom: 6px; min-width: 22px; text-align: center; }
+.content-count-badge, .duration-badge { right: 6px; bottom: 6px; min-width: 22px; text-align: center; }
 .thumbnail[hidden], .thumbnail-zoom[hidden] { display: none; }
 .thumbnail-zoom { display: none; position: fixed; z-index: 20; right: 24px; bottom: 24px; max-width: calc(100vw - 48px); max-height: calc(100dvh - 100px); padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: #fff; box-shadow: 0 12px 48px #132a2440; pointer-events: none; }
 .thumbnail-zoom img { display: block; width: auto; height: auto; max-width: min(720px, calc(100vw - 66px)); max-height: calc(100dvh - 118px); object-fit: contain; }

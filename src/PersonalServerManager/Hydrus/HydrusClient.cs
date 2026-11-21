@@ -439,7 +439,8 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 IsFavorite = value.TryGetProperty("ratings", out var ratings) && ratings.ValueKind == JsonValueKind.Object &&
                     ratings.TryGetProperty(DefaultFavouritesServiceKey, out var favorite) && favorite.ValueKind == JsonValueKind.True,
                 CreatedAt = createdAt,
-                UpdatedAt = ReadTimestamp(value, "time_modified")
+                UpdatedAt = ReadTimestamp(value, "time_modified"),
+                Duration = ReadDuration(value, "duration")
             });
         }
 
@@ -452,5 +453,15 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
             value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var seconds)) return null;
         try { return DateTimeOffset.FromUnixTimeSeconds(seconds); }
         catch (ArgumentOutOfRangeException) { return null; }
+    }
+
+    private static TimeSpan? ReadDuration(JsonElement item, string property)
+    {
+        if (!item.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Number ||
+            !value.TryGetDouble(out var milliseconds) || !double.IsFinite(milliseconds) || milliseconds <= 0 ||
+            milliseconds > TimeSpan.MaxValue.TotalMilliseconds)
+            return null;
+
+        return TimeSpan.FromMilliseconds(milliseconds);
     }
 }

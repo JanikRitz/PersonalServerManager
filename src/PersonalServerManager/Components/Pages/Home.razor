@@ -134,6 +134,10 @@
                                         group.Type == LibraryMediaType.Comic && item.FileSizeBytes is { } fileSize
                                             ? $"File size: {fileSize:N0} bytes" : null;
                                     if (contentBadgeLabel is not null) descriptions += $" {badgeId}-count";
+                                    var durationBadgeLabel = item.Duration is { } duration &&
+                                        group.Type is LibraryMediaType.Video or LibraryMediaType.Image
+                                            ? $"Duration: {FormatDuration(duration)}" : null;
+                                    if (durationBadgeLabel is not null) descriptions += $" {badgeId}-duration";
                                     <li class="media-tile" @key="(entry.Source.InstanceId, entry.Source.Category, item.Id)">
                                         <a class="thumbnail-link" href="@(item.ReaderUrl ?? item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ReaderUrl is not null ? $"Read {item.Title}" : item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")" aria-describedby="@descriptions">
                                             <span class="thumbnail-placeholder" aria-hidden="true"><MudIcon Icon="@TypeIcon(group.Type)" /></span>
@@ -150,6 +154,10 @@
                                             @if (contentBadgeText is not null)
                                             {
                                                 <span class="content-count-badge" id="@($"{badgeId}-count")" aria-label="@contentBadgeLabel" title="@contentBadgeLabel">@contentBadgeText</span>
+                                            }
+                                            @if (durationBadgeLabel is not null)
+                                            {
+                                                <span class="duration-badge" id="@($"{badgeId}-duration")" aria-label="@durationBadgeLabel" title="@durationBadgeLabel">@FormatDuration(item.Duration!.Value)</span>
                                             }
                                             @if (ratingLabel is not null)
                                             {
@@ -238,6 +246,17 @@
             unit++;
         }
         return $"{size:0.#} {units[unit]}";
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        if (duration.TotalSeconds < 1)
+            return $"{duration.TotalSeconds:0.#}s";
+
+        var rounded = TimeSpan.FromSeconds(Math.Round(duration.TotalSeconds));
+        return rounded.TotalHours >= 1
+            ? $"{(int)rounded.TotalHours}:{rounded.Minutes:00}:{rounded.Seconds:00}"
+            : $"{(int)rounded.TotalMinutes}:{rounded.Seconds:00}";
     }
 
     private static string TypeIcon(LibraryMediaType type) => type switch

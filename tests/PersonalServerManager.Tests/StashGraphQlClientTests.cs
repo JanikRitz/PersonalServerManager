@@ -105,8 +105,8 @@ public sealed class StashGraphQlClientTests
     {
         var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
         {
-            Assert.Contains("files { path } rating100 created_at updated_at", body);
-            return Json("""{"data":{"findScenes":{"scenes":[{"id":"42","title":null,"files":[{"path":"/library/scene.mp4"}],"rating100":85,"created_at":"2020-01-02T03:04:05Z","updated_at":"2022-05-06T07:08:09Z"},{"id":"43","title":"Other","rating100":0,"created_at":"invalid","updated_at":null}]}}}""");
+            Assert.Contains("files { path duration } rating100 created_at updated_at", body);
+            return Json("""{"data":{"findScenes":{"scenes":[{"id":"42","title":null,"files":[{"path":"/library/scene.mp4","duration":62.5}],"rating100":85,"created_at":"2020-01-02T03:04:05Z","updated_at":"2022-05-06T07:08:09Z"},{"id":"43","title":"Other","rating100":0,"created_at":"invalid","updated_at":null}]}}}""");
         })));
 
         var results = await client.SearchAsync(Instance(null), StashSearchKind.Scenes, "query");
@@ -114,7 +114,9 @@ public sealed class StashGraphQlClientTests
         Assert.Equal("/library/scene.mp4", results[0].Title);
         Assert.Equal("/library/scene.mp4", results[0].Path);
         Assert.Equal(85, results[0].Rating100);
+        Assert.Equal(TimeSpan.FromSeconds(62.5), results[0].Duration);
         Assert.Null(results[1].Rating100);
+        Assert.Null(results[1].Duration);
         Assert.Equal(DateTimeOffset.Parse("2020-01-02T03:04:05Z"), results[0].CreatedAt);
         Assert.Equal(DateTimeOffset.Parse("2022-05-06T07:08:09Z"), results[0].UpdatedAt);
         Assert.Null(results[1].CreatedAt);

@@ -11,6 +11,7 @@ public sealed record HydrusFile(long Id, string Title, string Mime)
     public bool IsFavorite { get; init; }
     public DateTimeOffset? CreatedAt { get; init; }
     public DateTimeOffset? UpdatedAt { get; init; }
+    public TimeSpan? Duration { get; init; }
     public string? Path { get; init; }
 }
 

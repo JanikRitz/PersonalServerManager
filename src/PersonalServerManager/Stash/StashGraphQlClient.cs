@@ -70,7 +70,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         cancellationToken.ThrowIfCancellationRequested();
         var (field, collectionName, selection, urlSegment) = kind switch
         {
-            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot } files { path } rating100", "scenes"),
+            StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot } files { path duration } rating100", "scenes"),
             StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail } files { path } rating100", "images"),
             StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path rating100 favorite", "performers"),
             StashSearchKind.Studios => ("findStudios", "studios", "id name image_path rating100 favorite", "studios"),
@@ -258,6 +258,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         {
             CreatedAt = ReadDate(item, "created_at"),
             UpdatedAt = ReadDate(item, "updated_at"),
+            Duration = kind == StashSearchKind.Scenes ? ReadFileDuration(item) : null,
             Path = path,
             ContentCount = kind switch
             {
@@ -275,6 +276,31 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String &&
         DateTimeOffset.TryParse(value.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date)
             ? date : null;
+
+    private static TimeSpan? ReadDuration(JsonElement item, string property)
+    {
+        if (!item.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Number ||
+            !value.TryGetDouble(out var seconds) || !double.IsFinite(seconds) || seconds <= 0 ||
+            seconds > TimeSpan.MaxValue.TotalSeconds)
+            return null;
+
+        return TimeSpan.FromSeconds(seconds);
+    }
+
+    private static TimeSpan? ReadFileDuration(JsonElement item)
+    {
+        if (!item.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var file in files.EnumerateArray())
+        {
+            var duration = ReadDuration(file, "duration");
+            if (duration.HasValue)
+                return duration;
+        }
+
+        return null;
+    }
 
     private static int? ReadArrayCount(JsonElement item, string property) =>
         item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Array

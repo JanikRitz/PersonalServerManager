@@ -18,6 +18,7 @@ public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, 
     public string? FileFormat { get; init; }
     public int? ContentCount { get; init; }
     public long? FileSizeBytes { get; init; }
+    public TimeSpan? Duration { get; init; }
     public bool IsFavorite { get; init; }
     public decimal? RatingOutOfFive { get; init; }
 }
@@ -130,6 +131,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                             }, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, Path: item.Path)
                         {
                             ContentCount = item.ContentCount,
+                            Duration = item.Duration,
                             RatingOutOfFive = item.Rating100 / 20m,
                             IsFavorite = item.IsFavorite,
                             FileFormat = kind is StashSearchKind.Images or StashSearchKind.Scenes
@@ -153,6 +155,7 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                         CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path)
                     {
                         IsFavorite = entry.Item.IsFavorite,
+                        Duration = entry.Item.Duration,
                         FileFormat = entry.Type is LibraryMediaType.Image or LibraryMediaType.Video
                             ? FormatFromPath(entry.Item.Path) ?? HydrusFileFormat(entry.Item.Mime) : null
                     })
