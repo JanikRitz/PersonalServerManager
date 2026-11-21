@@ -38,7 +38,7 @@
                         var feed = _feeds[index];
                         var position = index;
                         <div class="feed-row" @key="feed.Id">
-                            <button class="feed-select @(feed.Id == _activeId ? "selected" : "")" type="button" aria-pressed="@(feed.Id == _activeId)" @onclick="() => OpenFeedAsync(feed)"><strong>@feed.Name</strong><small>@feed.Sources.Count sources</small></button>
+                            <button class="feed-select @(feed.Id == _activeId ? "selected" : "")" type="button" aria-pressed="@(feed.Id == _activeId ? "true" : "false")" @onclick="() => OpenFeedAsync(feed)"><strong>@feed.Name</strong><small>@feed.Sources.Count sources</small></button>
                             <div class="row-actions">
                                 <button class="icon-action" type="button" title="Move up" aria-label="Move @feed.Name up" disabled="@(_busy || position == 0)" @onclick="() => MoveAsync(feed.Id, -1)"><MudIcon Icon="@Icons.Material.Filled.KeyboardArrowUp" /></button>
                                 <button class="icon-action" type="button" title="Move down" aria-label="Move @feed.Name down" disabled="@(_busy || position == _feeds.Count - 1)" @onclick="() => MoveAsync(feed.Id, 1)"><MudIcon Icon="@Icons.Material.Filled.KeyboardArrowDown" /></button>
@@ -228,6 +228,14 @@
             {
                 var exists = source.Provider switch { FeedProvider.Stash => stash.Any(item => item.Id == source.InstanceId), FeedProvider.Hydrus => hydrus.Any(item => item.Id == source.InstanceId), FeedProvider.SwarmUI => swarm.Any(item => item.Id == source.InstanceId), _ => false };
                 if (!exists) throw new InvalidDataException($"{source.Name} is no longer available. Remove it before saving.");
+                if (source.Provider == FeedProvider.Hydrus)
+                {
+                    try { HydrusFeedQuery.Parse(source.HydrusQuery); }
+                    catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+                    {
+                        throw new InvalidDataException($"Hydrus query for {source.Name}: {exception.Message}");
+                    }
+                }
                 if (source.Provider == FeedProvider.SwarmUI && !string.IsNullOrWhiteSpace(source.SwarmFolder))
                 {
                     var folder = source.SwarmFolder.Trim();
@@ -323,7 +331,7 @@
         var generation = _generation;
         if (_index + 1 >= _items.Count && _hasMore) await LoadNextAsync();
         if (_disposed || generation != _generation) return;
-        if (_index + 1 < _items.Count) { _index++; _mediaError = false; }
+        if (_index + 1 < _items.Count) { _index++; _mediaError = false; StateHasChanged(); }
         if (_index + 2 >= _items.Count && _hasMore && !_loading) await LoadNextAsync();
     }
     private async Task ViewerKeyAsync(KeyboardEventArgs args) { if (args.Key == "ArrowLeft") Previous(); else if (args.Key == "ArrowRight") await NextAsync(); }

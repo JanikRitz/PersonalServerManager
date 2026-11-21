@@ -34,6 +34,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             (kind == StashSearchKind.Images && source.Media == FeedMedia.Videos)) return [];
 
         var objectFilter = new Dictionary<string, object>();
+        var missingIncludes = false;
         foreach (var (includedNames, excludedNames, entity, property) in new[]
         {
             (source.IncludeTags, source.ExcludeTags, "tag", "tags"),
@@ -42,9 +43,17 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         {
             var includes = includedNames.Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim()).Distinct(StringComparer.Ordinal).ToArray();
             var excludes = excludedNames.Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim()).Distinct(StringComparer.Ordinal).ToArray();
-            var includeIds = await ResolveFeedNamesAsync(instance, entity, includes, cancellationToken);
-            if (includes.Length > 0 && includeIds.Count == 0) return [];
-            var excludeIds = await ResolveFeedNamesAsync(instance, entity, excludes, cancellationToken);
+            var includeIds = await ResolveFeedNamesAsync(instance, entity, includes, false, cancellationToken);
+            missingIncludes |= includes.Length > 0 && includeIds.Count == 0;
+            IReadOnlyList<string> excludeIds;
+            try
+            {
+                excludeIds = await ResolveFeedNamesAsync(instance, entity, excludes, true, cancellationToken);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or HttpRequestException or JsonException)
+            {
+                throw new InvalidDataException($"A Stash excluded {entity} could not be resolved. Check excluded {entity} names in the feed settings and the Stash connection.");
+            }
             if (includeIds.Count == 0 && excludeIds.Count == 0) continue;
             var criterion = new Dictionary<string, object> { ["modifier"] = "INCLUDES" };
             if (includeIds.Count > 0) criterion["value"] = includeIds;
@@ -52,10 +61,11 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             if (entity == "tag") criterion["depth"] = 0;
             objectFilter[property] = criterion;
         }
+        if (missingIncludes) return [];
 
         var (field, collection, argument, filterType, selection) = kind == StashSearchKind.Scenes
             ? ("findScenes", "scenes", "scene_filter", "SceneFilterType", "id title paths { screenshot webp } files { path duration } rating100")
-            : ("findImages", "images", "image_filter", "ImageFilterType", "id title paths { thumbnail preview } files { path } visual_files { ... on ImageFile { path } ... on VideoFile { path } } rating100");
+            : ("findImages", "images", "image_filter", "ImageFilterType", "id title paths { thumbnail preview } files { path } visual_files { __typename ... on ImageFile { path } ... on VideoFile { path } } rating100");
         var document = $"query Feed($filter: FindFilterType, $criteria: {filterType}) {{ {field}(filter: $filter, {argument}: $criteria) {{ {collection} {{ {selection} created_at updated_at }} }} }}";
         var results = new List<StashSearchResult>();
         var skip = offset % limit;
@@ -81,7 +91,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
     }
 
     private async Task<IReadOnlyList<string>> ResolveFeedNamesAsync(
-        StashInstance instance, string entity, IReadOnlyList<string> names, CancellationToken cancellationToken)
+        StashInstance instance, string entity, IReadOnlyList<string> names, bool requireAll, CancellationToken cancellationToken)
     {
         var field = entity == "tag" ? "findTags" : "findPerformers";
         var collection = entity == "tag" ? "tags" : "performers";
@@ -90,6 +100,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var name in names)
         {
+            var matched = false;
             using var response = await SendAsync(instance, document, new { criteria = new { name = new { value = name, modifier = "EQUALS" } } }, cancellationToken);
             using var payload = await ReadPayloadAsync(response, cancellationToken);
             ThrowForGraphQlErrors(payload.RootElement);
@@ -102,8 +113,14 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
                 if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("name", out var itemName) || itemName.ValueKind != JsonValueKind.String ||
                     !item.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(id.GetString()))
                     throw new InvalidDataException("Stash returned an invalid feed name lookup.");
-                if (string.Equals(name, itemName.GetString(), StringComparison.Ordinal)) ids.Add(id.GetString()!);
+                if (string.Equals(name, itemName.GetString(), StringComparison.OrdinalIgnoreCase))
+                {
+                    ids.Add(id.GetString()!);
+                    matched = true;
+                }
             }
+            if (requireAll && !matched)
+                throw new InvalidDataException($"A Stash excluded {entity} could not be found. Check excluded {entity} names in the feed settings and Stash.");
         }
         return ids.ToArray();
     }
@@ -169,7 +186,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         var (field, collectionName, selection, urlSegment) = kind switch
         {
             StashSearchKind.Scenes => ("findScenes", "scenes", "id title paths { screenshot webp } files { path duration } rating100", "scenes"),
-            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail preview } files { path } visual_files { ... on ImageFile { path } ... on VideoFile { path } } rating100", "images"),
+            StashSearchKind.Images => ("findImages", "images", "id title paths { thumbnail preview } files { path } visual_files { __typename ... on ImageFile { path } ... on VideoFile { path } } rating100", "images"),
             StashSearchKind.Performers => ("findPerformers", "performers", "id name image_path rating100 favorite", "performers"),
             StashSearchKind.Studios => ("findStudios", "studios", "id name image_path rating100 favorite", "studios"),
             StashSearchKind.Tags => ("findTags", "tags", "id name image_path favorite", "tags"),
@@ -357,6 +374,10 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             MarkerEnd = kind == StashSearchKind.Markers ? ReadMarkerTime(item, "end_seconds") : null,
             HasAnimatedPreview = kind is StashSearchKind.Scenes or StashSearchKind.Images &&
                 ResolveThumbnail(instance.WebUiUrl, kind, id, GetNestedString(item, "paths", kind == StashSearchKind.Scenes ? "webp" : "preview"), animated: true) is not null,
+            IsVideo = kind == StashSearchKind.Scenes || kind == StashSearchKind.Images &&
+                item.TryGetProperty("visual_files", out var visualFiles) && visualFiles.ValueKind == JsonValueKind.Array &&
+                visualFiles.EnumerateArray().Any(file => file.ValueKind == JsonValueKind.Object &&
+                    file.TryGetProperty("__typename", out var type) && type.ValueKind == JsonValueKind.String && type.GetString() == "VideoFile"),
             Path = path,
             ContentCount = kind switch
             {

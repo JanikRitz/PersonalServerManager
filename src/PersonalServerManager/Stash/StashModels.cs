@@ -44,6 +44,7 @@ public sealed record StashSearchResult(
     public TimeSpan? MarkerStart { get; init; }
     public TimeSpan? MarkerEnd { get; init; }
     public bool HasAnimatedPreview { get; init; }
+    public bool IsVideo { get; init; }
     public string? Path { get; init; }
     public int? ContentCount { get; init; }
     public int? Rating100 { get; init; }

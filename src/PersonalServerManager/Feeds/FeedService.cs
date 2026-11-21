@@ -46,26 +46,18 @@ public sealed class FeedSession
             while (pendingItems.Count < PageSize && sources.Any(source => !source.Exhausted))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var source = sources[nextSource];
-                nextSource = (nextSource + 1) % sources.Count;
-                if (source.Exhausted) continue;
-                try
+                var requests = new List<Task<SourceResult>>();
+                for (var visited = 0; visited < sources.Count && requests.Count < PageSize - pendingItems.Count; visited++)
                 {
-                    var item = await source.NextAsync(pendingErrors, cancellationToken);
-                    if (item is not null && seen.Add(item.Id)) pendingItems.Add(item);
+                    var source = sources[nextSource];
+                    nextSource = (nextSource + 1) % sources.Count;
+                    if (!source.Exhausted) requests.Add(LoadSourceAsync(source, cancellationToken));
                 }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-                catch (MissingInstanceException)
+                var results = await Task.WhenAll(requests);
+                foreach (var sourceResult in results)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    source.Exhausted = true;
-                    pendingErrors.Add($"{source.Provider} source {source.InstanceId:D} instance is missing.");
-                }
-                catch (Exception)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    source.Exhausted = true;
-                    pendingErrors.Add($"{source.Provider} source {source.InstanceId:D} could not be loaded.");
+                    pendingErrors.AddRange(sourceResult.Errors);
+                    if (sourceResult.Item is not null && seen.Add(sourceResult.Item.Id)) pendingItems.Add(sourceResult.Item);
                 }
             }
             cancellationToken.ThrowIfCancellationRequested();
@@ -76,6 +68,32 @@ public sealed class FeedSession
         }
         finally { gate.Release(); }
     }
+
+    private static async Task<SourceResult> LoadSourceAsync(SourceState source, CancellationToken token)
+    {
+        var errors = new List<string>();
+        try { return new SourceResult(await source.NextAsync(errors, token), errors); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { return new SourceResult(null, errors); }
+        catch (MissingInstanceException)
+        {
+            if (!token.IsCancellationRequested)
+            {
+                source.Exhausted = true;
+                errors.Add($"{source.Provider} source {source.InstanceId:D} instance is missing.");
+            }
+        }
+        catch (Exception exception)
+        {
+            if (!token.IsCancellationRequested)
+            {
+                source.Exhausted = true;
+                errors.Add(source.ErrorMessage(exception));
+            }
+        }
+        return new SourceResult(null, errors);
+    }
+
+    private sealed record SourceResult(FeedItem? Item, List<string> Errors);
 
     private sealed class SourceState
     {
@@ -91,9 +109,38 @@ public sealed class FeedSession
         private int nextStream;
         private bool initialized;
         private bool failed;
+        private string? instanceName;
         public bool Exhausted { get => failed || (initialized && streams.All(stream => stream.Exhausted)); set => failed = value; }
         public FeedProvider Provider => source.Provider;
         public Guid InstanceId => source.InstanceId;
+
+        public string ErrorMessage(Exception exception)
+        {
+            var detail = (source.Provider, exception) switch
+            {
+                (FeedProvider.Stash, InvalidDataException { Message: "A Stash excluded tag could not be resolved. Check excluded tag names in the feed settings and the Stash connection." or
+                    "A Stash excluded performer could not be resolved. Check excluded performer names in the feed settings and the Stash connection." } known) => known.Message,
+                (FeedProvider.Hydrus, InvalidDataException { Message: "Hydrus feed search exceeds the supported result size." }) =>
+                    order == FeedOrder.Random ? "Random search exceeds the 100,000 matching file limit." : "Search exceeds the 100,000 file result limit.",
+                (FeedProvider.Hydrus, ArgumentException argument) when MatchesArgument(argument, "Invalid Hydrus feed query.", "query") => "Invalid Hydrus feed query.",
+                (FeedProvider.Hydrus, ArgumentException argument) when MatchesArgument(argument, "Hydrus feed query is too long.", "query") => "Hydrus feed query is too long.",
+                (FeedProvider.Hydrus, NotSupportedException { Message: "This system predicate cannot be negated." or
+                    "Multiple system predicates in an expression are not supported." or
+                    "This escaped tag cannot be represented by the Hydrus API." or
+                    "This system predicate is not supported in feed queries." or
+                    "Unsupported Hydrus system predicate or syntax in feed query." or
+                    "Conflicting system predicates cannot be combined safely." or
+                    "Hydrus feed expression is too complex." } known) => known.Message,
+                (FeedProvider.SwarmUI, ArgumentException argument) when MatchesArgument(argument, "Invalid SwarmUI feed query.", "source") => "Invalid SwarmUI feed query.",
+                (FeedProvider.SwarmUI, ArgumentException argument) when MatchesArgument(argument, "Invalid SwarmUI feed folder.", "source") => "Invalid SwarmUI feed folder.",
+                (FeedProvider.SwarmUI, ArgumentException argument) when MatchesArgument(argument, "The SwarmUI feed folder must be within a configured search path.", "source") => "The SwarmUI feed folder must be within a configured search path.",
+                _ => "could not be loaded."
+            };
+            return $"{Provider} source {instanceName ?? InstanceId.ToString("D")} {detail}";
+        }
+
+        private static bool MatchesArgument(ArgumentException exception, string message, string parameter) =>
+            exception.Message == new ArgumentException(message, parameter).Message;
 
         public SourceState(FeedSource source, FeedOrder order, IStashInstanceStore stashStore, IStashGraphQlClient stashClient,
             IHydrusInstanceStore hydrusStore, IHydrusClient hydrusClient, ISwarmUIInstanceStore swarmStore, ISwarmUIClient swarmClient)
@@ -123,11 +170,11 @@ public sealed class FeedSession
                     if (item is not null) return item;
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-                catch (Exception)
+                catch (Exception exception)
                 {
                     token.ThrowIfCancellationRequested();
                     stream.Fail();
-                    errors.Add($"{source.Provider} source {source.InstanceId:D} could not be loaded.");
+                    errors.Add(ErrorMessage(exception));
                 }
             }
             Exhausted = true;
@@ -141,12 +188,14 @@ public sealed class FeedSession
                 case FeedProvider.Stash:
                     var stash = (await stashStore.GetAllAsync(token)).FirstOrDefault(instance => instance.Id == source.InstanceId)
                         ?? throw new MissingInstanceException();
+                    instanceName = stash.Name;
                     if (source.Media != FeedMedia.Images) AddStash(stash, StashSearchKind.Scenes);
-                    if (source.Media != FeedMedia.Videos) AddStash(stash, StashSearchKind.Images);
+                    AddStash(stash, StashSearchKind.Images);
                     break;
                 case FeedProvider.Hydrus:
                     var hydrus = (await hydrusStore.GetAllAsync(token)).FirstOrDefault(instance => instance.Id == source.InstanceId)
                         ?? throw new MissingInstanceException();
+                    instanceName = hydrus.Name;
                     streams.Add(new StreamState(async (offset, limit, cancellationToken) =>
                     {
                         var files = await hydrusClient.SearchFeedAsync(hydrus, source.HydrusQuery, source.Media, order, offset, limit, cancellationToken);
@@ -156,6 +205,7 @@ public sealed class FeedSession
                 case FeedProvider.SwarmUI:
                     var swarm = (await swarmStore.GetAllAsync(token)).FirstOrDefault(instance => instance.Id == source.InstanceId)
                         ?? throw new MissingInstanceException();
+                    instanceName = swarm.Name;
                     streams.Add(new StreamState(async (offset, limit, cancellationToken) =>
                     {
                         var files = await swarmClient.SearchFeedAsync(swarm, source, order, offset, limit, cancellationToken);
@@ -169,8 +219,11 @@ public sealed class FeedSession
 
         private void AddStash(StashInstance instance, StashSearchKind kind) => streams.Add(new StreamState(async (offset, limit, token) =>
         {
-            var files = await stashClient.SearchFeedAsync(instance, kind, source, order, offset, limit, token);
-            return (files.Count, files.Select(file => MapStash(instance, kind, file)).OfType<FeedItem>().ToArray());
+            var requestSource = kind == StashSearchKind.Images && source.Media == FeedMedia.Videos
+                ? source with { Media = FeedMedia.All } : source;
+            var files = await stashClient.SearchFeedAsync(instance, kind, requestSource, order, offset, limit, token);
+            return (files.Count, files.Select(file => MapStash(instance, kind, file)).OfType<FeedItem>()
+                .Where(item => source.Media == FeedMedia.All || item.IsVideo == (source.Media == FeedMedia.Videos)).ToArray());
         }));
 
         private static FeedItem? MapStash(StashInstance instance, StashSearchKind kind, StashSearchResult file)
@@ -179,7 +232,7 @@ public sealed class FeedSession
             var category = kind == StashSearchKind.Scenes ? "scenes" : "images";
             return new FeedItem($"stash:{instance.Id:D}:{category}:{file.Id}", file.Title, instance.Name, "Stash",
                 new Uri($"/media/stash/{instance.Id:D}/{category}/{Uri.EscapeDataString(file.Id)}", UriKind.Relative),
-                file.ItemUrl, kind == StashSearchKind.Scenes);
+                file.ItemUrl, kind == StashSearchKind.Scenes || file.IsVideo);
         }
 
         private static FeedItem? MapHydrus(HydrusInstance instance, HydrusFile file)

@@ -9,6 +9,7 @@ namespace PersonalServerManager.Hydrus;
 public sealed class HydrusClient : IHydrusClient, IDisposable
 {
     private const int MaximumResponseBytes = 256 * 1024;
+    private const int MaximumFeedIds = 100_000;
     private static readonly string DefaultFavouritesServiceKey = Convert.ToHexStringLower("favourites"u8);
     // Hydrus has no tag-search limit and returns every match, so short queries can be several megabytes.
     private const int MaximumTagResponseBytes = 16 * 1024 * 1024;
@@ -97,10 +98,11 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
         {
             FeedOrder.Newest => "&file_sort_type=2&file_sort_asc=false",
             FeedOrder.Oldest => "&file_sort_type=2&file_sort_asc=true",
-            FeedOrder.Random => "&file_sort_type=4",
+            FeedOrder.Random => "",
             _ => throw new ArgumentOutOfRangeException(nameof(order))
         };
-        var count = offset + limit;
+        var count = (int)Math.Min((long)offset + limit, MaximumFeedIds + 1L);
+        if (order == FeedOrder.Random) count = MaximumFeedIds + 1;
         await _searchGate.WaitAsync(cancellationToken);
         try
         {
@@ -111,9 +113,14 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 using var search = await SendAsync(instance, HttpMethod.Get,
                     $"get_files/search_files?tags={Uri.EscapeDataString(JsonSerializer.Serialize(predicates.Append($"system:limit={count}")))}&return_file_ids=true&return_hashes=false{sort}",
                     null, timeout.Token, cancellationToken, maximumBytes);
+                if (search.RootElement.TryGetProperty("file_ids", out var returnedIds) && returnedIds.ValueKind == JsonValueKind.Array &&
+                    (returnedIds.GetArrayLength() > count || returnedIds.GetArrayLength() > MaximumFeedIds))
+                    throw new InvalidDataException("Hydrus feed search exceeds the supported result size.");
                 var ids = ReadIds(search.RootElement, count);
                 if (ids.Length != Math.Min(count, search.RootElement.GetProperty("file_ids").GetArrayLength()))
                     throw new InvalidDataException("Hydrus returned duplicate file IDs.");
+                if (offset >= ids.Length && ids.Length < count) return [];
+                if (order == FeedOrder.Random) ids = ids.OrderBy(ShuffleFeedId).ToArray();
                 var files = new List<HydrusFile>();
                 var candidates = media == FeedMedia.All ? ids.Skip(offset).Take(limit) : ids.AsEnumerable();
                 foreach (var batch in candidates.Chunk(100))
@@ -139,13 +146,23 @@ public sealed class HydrusClient : IHydrusClient, IDisposable
                 }
                 if (media == FeedMedia.All) return files;
                 if (files.Count >= offset + limit || ids.Length < count) return files.Skip(offset).Take(limit).ToArray();
-                if (count == int.MaxValue) throw new InvalidDataException("Hydrus feed search exceeds the supported result size.");
-                count = (int)Math.Min(int.MaxValue, (long)count * 2);
+                count = (int)Math.Min(MaximumFeedIds + 1L, (long)count * 2);
             }
         }
         finally
         {
             _searchGate.Release();
+        }
+    }
+
+    private static ulong ShuffleFeedId(long id)
+    {
+        unchecked
+        {
+            var value = (ulong)id + 0x9E3779B97F4A7C15UL;
+            value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9UL;
+            value = (value ^ (value >> 27)) * 0x94D049BB133111EBUL;
+            return value ^ (value >> 31);
         }
     }
 

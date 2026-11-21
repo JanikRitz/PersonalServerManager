@@ -3,27 +3,30 @@ using System.Text.RegularExpressions;
 
 namespace PersonalServerManager.Hydrus;
 
-internal sealed class HydrusFeedQuery
+public sealed class HydrusFeedQuery
 {
     private const int MaximumClauses = 4096;
+    private const int MaximumLiterals = 128;
+    private const int MaximumConversionSteps = 65536;
     private readonly string _query;
     private int _position;
     private int _depth;
+    private int _literals;
 
     private HydrusFeedQuery(string query) => _query = query;
 
     public static IReadOnlyList<object> Parse(string query)
     {
+        if (query is not null && query.Length > 16384) throw new ArgumentException("Hydrus feed query is too long.", nameof(query));
         if (string.IsNullOrWhiteSpace(query)) return ["system:everything"];
         if (query.Trim().Equals("system:everything", StringComparison.Ordinal)) return ["system:everything"];
-        if (query.Length > 16384) throw new ArgumentException("Hydrus feed query is too long.", nameof(query));
         var parser = new HydrusFeedQuery(query);
         var expression = parser.Expression(0);
         parser.SkipWhitespace();
         if (parser._position != query.Length) throw Invalid();
-        var clauses = ToCnf(expression, false);
+        var steps = 0;
+        var clauses = ToCnf(expression, false, ref steps);
         var result = new List<object>();
-        var systemCount = 0;
         foreach (var clause in clauses)
         {
             var literals = clause.Distinct().ToArray();
@@ -33,7 +36,6 @@ internal sealed class HydrusFeedQuery
             {
                 if (literal.Text.StartsWith("system:", StringComparison.Ordinal))
                 {
-                    systemCount++;
                     if (literal.Negated) throw new NotSupportedException("This system predicate cannot be negated.");
                 }
                 values.Add(literal.Negated ? "-" + literal.Text : literal.Text);
@@ -41,7 +43,10 @@ internal sealed class HydrusFeedQuery
             if (values.Count == 0) throw Invalid();
             result.Add(values.Count == 1 ? values[0] : values.ToArray());
         }
-        if (systemCount > 1) throw new NotSupportedException("Multiple system predicates in an expression are not supported.");
+        var topLevel = result.OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if ((topLevel.Contains("system:has audio") && topLevel.Contains("system:no audio")) ||
+            (topLevel.Contains("system:inbox") && topLevel.Contains("system:archive")))
+            throw new NotSupportedException("Conflicting system predicates cannot be combined safely.");
         if (result.Count == 0) result.Add("system:everything");
         return result;
     }
@@ -129,9 +134,16 @@ internal sealed class HydrusFeedQuery
         {
             if (!value.StartsWith("system:", StringComparison.Ordinal)) throw Invalid();
             var system = value[7..];
-            if (!Regex.IsMatch(system, @"^(inbox|archive|untagged|has audio|no audio|(?:width|height)\s*(?:<=|>=|!=|=|<|>|~=)\s*\d+(?:\s*(?:px|pixels?))?)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-                throw new NotSupportedException("This system predicate is not supported in feed queries.");
+            const string comparison = @"(?:<=|>=|!=|==|=|<|>|~=)";
+            const string number = @"(?:0|[1-9][0-9]{0,8})";
+            const string duration = @"(?:(?:0|[1-9][0-9]{0,8}) *(?:hours|hour|hr|h) *)?(?:(?:0|[1-9][0-9]{0,8}) *(?:minutes|minute|mins) *)?(?:(?:0|[1-9][0-9]{0,8}) *(?:seconds|second|secs|sec|s) *)?(?:(?:0|[1-9][0-9]{0,8}) *(?:milliseconds|millisecond|msecs|msec|ms))?";
+            var supported = Regex.IsMatch(system, @"\A(?:inbox|archive|untagged|has tags|has audio|no audio|has duration|no duration)\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
+                Regex.IsMatch(system, $@"\A(?:width|height) *{comparison} *{number}(?: *(?:px|pixels?))?\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
+                Regex.IsMatch(system, $@"\Aduration *{comparison} *(?=[0-9]){duration}\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!supported)
+                throw new NotSupportedException("Unsupported Hydrus system predicate or syntax in feed query.");
         }
+        if (++_literals > MaximumLiterals) throw new NotSupportedException("Hydrus feed expression is too complex.");
         return new Node("literal", value, null, null);
     }
 
@@ -156,8 +168,9 @@ internal sealed class HydrusFeedQuery
     private void SkipWhitespace() { while (_position < _query.Length && char.IsWhiteSpace(_query[_position])) _position++; }
     private static ArgumentException Invalid() => new("Invalid Hydrus feed query.", "query");
 
-    private static List<List<Literal>> ToCnf(Node node, bool negated)
+    private static List<List<Literal>> ToCnf(Node node, bool negated, ref int steps)
     {
+        if (++steps > MaximumConversionSteps) throw new NotSupportedException("Hydrus feed expression is too complex.");
         if (node.Operation == "literal")
         {
             var text = node.Text!;
@@ -167,20 +180,20 @@ internal sealed class HydrusFeedQuery
             if (negated && text.Equals("system:no audio", StringComparison.OrdinalIgnoreCase)) return [[new("system:has audio", false)]];
             return [[new(text, negated)]];
         }
-        if (node.Operation == "not") return ToCnf(node.Left!, !negated);
+        if (node.Operation == "not") return ToCnf(node.Left!, !negated, ref steps);
         if (node.Operation is "xor" or "xnor" or "iff")
         {
             var equal = (node.Operation is "xnor" or "iff") ^ negated;
-            return And(Or(ToCnf(node.Left!, false), ToCnf(node.Right!, equal)),
-                Or(ToCnf(node.Left!, true), ToCnf(node.Right!, !equal)));
+            return And(Or(ToCnf(node.Left!, false, ref steps), ToCnf(node.Right!, equal, ref steps)),
+                Or(ToCnf(node.Left!, true, ref steps), ToCnf(node.Right!, !equal, ref steps)));
         }
         if (node.Operation == "implies")
-            return negated ? And(ToCnf(node.Left!, false), ToCnf(node.Right!, true)) :
-                Or(ToCnf(node.Left!, true), ToCnf(node.Right!, false));
+            return negated ? And(ToCnf(node.Left!, false, ref steps), ToCnf(node.Right!, true, ref steps)) :
+                Or(ToCnf(node.Left!, true, ref steps), ToCnf(node.Right!, false, ref steps));
         var invert = negated ^ (node.Operation is "nand" or "nor");
         var conjunction = (node.Operation is "and" or "nand") ^ invert;
-        var left = ToCnf(node.Left!, invert);
-        var right = ToCnf(node.Right!, invert);
+        var left = ToCnf(node.Left!, invert, ref steps);
+        var right = ToCnf(node.Right!, invert, ref steps);
         return conjunction ? And(left, right) : Or(left, right);
     }
 

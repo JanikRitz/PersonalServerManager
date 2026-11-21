@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using PersonalServerManager.Feeds;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.Search;
@@ -12,6 +13,211 @@ public sealed class FeedServiceTests
     private readonly StashInstance stash = new(Guid.NewGuid(), "Stash library", new Uri("https://stash.test/graphql"), new Uri("https://stash.test/"), "secret");
     private readonly HydrusInstance hydrus = new(Guid.NewGuid(), "Hydrus library", new Uri("https://hydrus.test/"), "secret");
     private readonly SwarmUIInstance swarm = new(Guid.NewGuid(), "Swarm library", new Uri("https://swarm.test/base/"), SwarmUIInstance.DefaultSearchPaths);
+
+    [Fact]
+    public async Task StartsSlowSourcesTogetherAndKeepsRoundRobinOrder()
+    {
+        var clients = new Clients();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        clients.Stash = async (instance, kind, source, order, offset, limit, token) =>
+        {
+            await release.Task.WaitAsync(token);
+            return kind == StashSearchKind.Scenes ? [StashFile(instance, kind, 1)] : [];
+        };
+        clients.Hydrus = async (instance, query, media, order, offset, limit, token) =>
+        {
+            started.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return [new HydrusFile(1, "hydrus", "image/png")];
+        };
+        var session = Service(clients).Start(Feed(new(stash.Id, FeedProvider.Stash), new(hydrus.Id, FeedProvider.Hydrus)));
+        var loading = session.LoadNextAsync();
+        try { await started.Task.WaitAsync(TimeSpan.FromSeconds(3)); }
+        finally { release.TrySetResult(); }
+        var page = await loading;
+        Assert.Equal(new[] { "Stash", "Hydrus" }, page.Items.Select(item => item.Provider));
+        Assert.Empty(page.Errors);
+    }
+
+    [Fact]
+    public async Task ContinuesRoundRobinAcrossPagesWithMoreSourcesThanPageSize()
+    {
+        var clients = new Clients();
+        clients.Hydrus = (instance, query, media, order, offset, limit, token) => Task.FromResult<IReadOnlyList<HydrusFile>>(
+            [new HydrusFile(int.Parse(query), query, "image/png")]);
+        var sources = Enumerable.Range(1, 25).Select(index => new FeedSource(hydrus.Id, FeedProvider.Hydrus)
+            { HydrusQuery = index.ToString() }).ToArray();
+        var session = Service(clients).Start(Feed(sources));
+        var first = await session.LoadNextAsync();
+        var second = await session.LoadNextAsync();
+        Assert.Equal(Enumerable.Range(1, 20).Select(index => index.ToString()), first.Items.Select(item => item.Title));
+        Assert.Equal(Enumerable.Range(21, 5).Select(index => index.ToString()), second.Items.Select(item => item.Title));
+        Assert.True(first.HasMore);
+        Assert.False(second.HasMore);
+        Assert.Empty(first.Errors);
+        Assert.Empty(second.Errors);
+    }
+
+    [Theory]
+    [InlineData(FeedMedia.All, new[] { "Scenes1", "Images1", "Images2" })]
+    [InlineData(FeedMedia.Images, new[] { "Images1" })]
+    [InlineData(FeedMedia.Videos, new[] { "Scenes1", "Images2" })]
+    public async Task StashFiltersActualMediaAndClassifiesVideoImages(FeedMedia media, string[] titles)
+    {
+        var clients = new Clients();
+        clients.Stash = (instance, kind, source, order, offset, limit, token) =>
+        {
+            if (kind == StashSearchKind.Images && media == FeedMedia.Videos) Assert.Equal(FeedMedia.All, source.Media);
+            return Task.FromResult<IReadOnlyList<StashSearchResult>>(kind == StashSearchKind.Scenes
+                ? [StashFile(instance, kind, 1) with { IsVideo = false }]
+                : [StashFile(instance, kind, 1), StashFile(instance, kind, 2) with { IsVideo = true }]);
+        };
+        var page = await Service(clients).Start(Feed(new FeedSource(stash.Id, FeedProvider.Stash) { Media = media })).LoadNextAsync();
+        Assert.Equal(titles, page.Items.Select(item => item.Title));
+        Assert.All(page.Items, item => Assert.Equal(item.Title != "Images1", item.IsVideo));
+        var videoImage = page.Items.FirstOrDefault(item => item.Title == "Images2");
+        if (videoImage is not null) Assert.Equal($"/media/stash/{stash.Id:D}/images/2", videoImage.MediaUrl.OriginalString);
+        Assert.Empty(page.Errors);
+        Assert.False(page.HasMore);
+    }
+
+    [Fact]
+    public async Task StashFilteredFullBatchStillAdvancesByRawCount()
+    {
+        var clients = new Clients();
+        clients.Stash = (instance, kind, source, order, offset, limit, token) => Task.FromResult<IReadOnlyList<StashSearchResult>>(
+            offset == 0 ? Enumerable.Range(1, 20).Select(index => StashFile(instance, kind, index) with { IsVideo = true }).ToArray()
+            : [StashFile(instance, kind, 21)]);
+        var page = await Service(clients).Start(Feed(new FeedSource(stash.Id, FeedProvider.Stash) { Media = FeedMedia.Images })).LoadNextAsync();
+        Assert.Equal("Images21", Assert.Single(page.Items).Title);
+        Assert.Contains("Stash:Images:20:20", clients.Calls);
+        Assert.False(page.HasMore);
+    }
+
+    [Theory]
+    [InlineData("query", "Invalid Hydrus feed query.")]
+    [InlineData("unsupported", "This system predicate is not supported in feed queries.")]
+    [InlineData("limit", "Random search exceeds the 100,000 matching file limit.")]
+    [InlineData("secret", "could not be loaded.")]
+    public async Task ReportsOnlyKnownSafeHydrusErrors(string failure, string expected)
+    {
+        var clients = new Clients();
+        clients.Hydrus = (instance, query, media, order, offset, limit, token) => throw failure switch
+        {
+            "query" => new ArgumentException("Invalid Hydrus feed query.", "query"),
+            "unsupported" => new NotSupportedException("This system predicate is not supported in feed queries."),
+            "limit" => new InvalidDataException("Hydrus feed search exceeds the supported result size."),
+            _ => new ArgumentException("secret remote input", "query")
+        };
+        var page = await Service(clients).Start(new FeedDefinition(Guid.NewGuid(), "Feed", FeedOrder.Random,
+            [new FeedSource(hydrus.Id, FeedProvider.Hydrus)])).LoadNextAsync();
+        Assert.Contains(expected, Assert.Single(page.Errors));
+        Assert.DoesNotContain("secret", page.Errors[0], StringComparison.OrdinalIgnoreCase);
+        Assert.False(page.HasMore);
+    }
+
+    [Theory]
+    [InlineData("system:unknown secret", "Unsupported Hydrus system predicate or syntax in feed query.")]
+    [InlineData("system:inbox and system:archive", "Conflicting system predicates cannot be combined safely.")]
+    [InlineData("not system:width > 1", "This system predicate cannot be negated.")]
+    [InlineData("tag\\*", "This escaped tag cannot be represented by the Hydrus API.")]
+    [InlineData("tag and", "Invalid Hydrus feed query.")]
+    public async Task ReportsRealSavedHydrusQueryErrors(string query, string detail)
+    {
+        var clients = new Clients();
+        clients.Hydrus = (instance, savedQuery, media, order, offset, limit, token) =>
+        {
+            HydrusFeedQuery.Parse(savedQuery);
+            return Task.FromResult<IReadOnlyList<HydrusFile>>([]);
+        };
+        var page = await Service(clients).Start(Feed(new FeedSource(hydrus.Id, FeedProvider.Hydrus) { HydrusQuery = query })).LoadNextAsync();
+        Assert.Equal($"Hydrus source {hydrus.Name} {detail}", Assert.Single(page.Errors));
+        Assert.DoesNotContain("secret", page.Errors[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(FeedProvider.Stash)]
+    [InlineData(FeedProvider.Hydrus)]
+    [InlineData(FeedProvider.SwarmUI)]
+    public async Task ReportsConfiguredInstanceNameAndSanitizesUnexpectedErrors(FeedProvider provider)
+    {
+        var clients = new Clients();
+        clients.Stash = (instance, kind, source, order, offset, limit, token) => throw new HttpRequestException("secret https://user:password@stash.test/");
+        clients.Hydrus = (instance, query, media, order, offset, limit, token) => throw new NotSupportedException("Unsupported Hydrus system predicate or syntax in feed query. secret");
+        clients.Swarm = (instance, source, order, offset, limit, token) => throw new InvalidDataException("secret https://user:password@swarm.test/");
+        var (id, name) = provider switch
+        {
+            FeedProvider.Stash => (stash.Id, stash.Name),
+            FeedProvider.Hydrus => (hydrus.Id, hydrus.Name),
+            _ => (swarm.Id, swarm.Name)
+        };
+        var page = await Service(clients).Start(Feed(new FeedSource(id, provider) { Media = FeedMedia.Images })).LoadNextAsync();
+        Assert.Equal($"{provider} source {name} could not be loaded.", Assert.Single(page.Errors));
+    }
+
+    [Theory]
+    [InlineData(FeedProvider.Stash)]
+    [InlineData(FeedProvider.Hydrus)]
+    [InlineData(FeedProvider.SwarmUI)]
+    public async Task ReportsMissingInstanceId(FeedProvider provider)
+    {
+        var missing = Guid.NewGuid();
+        var page = await Service(new Clients()).Start(Feed(new FeedSource(missing, provider))).LoadNextAsync();
+        Assert.Equal($"{provider} source {missing:D} instance is missing.", Assert.Single(page.Errors));
+    }
+
+    [Theory]
+    [InlineData("tag")]
+    [InlineData("performer")]
+    public async Task ReportsSafeStashExclusionErrors(string entity)
+    {
+        var clients = new Clients();
+        var detail = $"A Stash excluded {entity} could not be resolved. Check excluded {entity} names in the feed settings and the Stash connection.";
+        clients.Stash = (instance, kind, source, order, offset, limit, token) => throw new InvalidDataException(detail);
+        var page = await Service(clients).Start(Feed(new FeedSource(stash.Id, FeedProvider.Stash) { Media = FeedMedia.Images })).LoadNextAsync();
+        Assert.Equal($"Stash source {stash.Name} {detail}", Assert.Single(page.Errors));
+    }
+
+    [Fact]
+    public async Task ReportsKnownSwarmFolderErrorWithoutLeakingUnknownMessages()
+    {
+        var clients = new Clients();
+        clients.Swarm = (instance, source, order, offset, limit, token) =>
+            throw new ArgumentException("The SwarmUI feed folder must be within a configured search path.", "source");
+        var page = await Service(clients).Start(Feed(new FeedSource(swarm.Id, FeedProvider.SwarmUI))).LoadNextAsync();
+        Assert.Contains("folder must be within a configured search path", Assert.Single(page.Errors));
+    }
+
+    [Fact]
+    public async Task CancellationDuringConcurrentRequestsPreservesCompletedItems()
+    {
+        var clients = new Clients();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+        clients.Stash = (instance, kind, source, order, offset, limit, token) => Task.FromResult<IReadOnlyList<StashSearchResult>>(
+            kind == StashSearchKind.Scenes ? [StashFile(instance, kind, 1)] : []);
+        var first = true;
+        clients.Hydrus = async (instance, query, media, order, offset, limit, token) =>
+        {
+            if (first)
+            {
+                first = false;
+                started.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+            return [new HydrusFile(1, "hydrus", "image/png")];
+        };
+        var session = Service(clients).Start(Feed(new(stash.Id, FeedProvider.Stash), new(hydrus.Id, FeedProvider.Hydrus)));
+        var loading = session.LoadNextAsync(cancellation.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loading);
+        var page = await session.LoadNextAsync();
+        Assert.Equal(new[] { "Scenes1", "hydrus" }, page.Items.Select(item => item.Title));
+        Assert.Empty(page.Errors);
+        Assert.False(page.HasMore);
+    }
 
     [Fact]
     public async Task MixesSourcesAndStashStreamsAcrossPagesUntilExhausted()
@@ -206,7 +412,7 @@ public sealed class FeedServiceTests
 
     private sealed class Clients : IStashGraphQlClient, IHydrusClient, ISwarmUIClient
     {
-        public List<string> Calls { get; } = [];
+        public ConcurrentQueue<string> Calls { get; } = new();
         public Func<StashInstance, StashSearchKind, FeedSource, FeedOrder, int, int, CancellationToken, Task<IReadOnlyList<StashSearchResult>>> Stash { get; set; } =
             (instance, kind, source, order, offset, limit, token) => Task.FromResult<IReadOnlyList<StashSearchResult>>([]);
         public Func<HydrusInstance, string, FeedMedia, FeedOrder, int, int, CancellationToken, Task<IReadOnlyList<HydrusFile>>> Hydrus { get; set; } =
@@ -215,9 +421,9 @@ public sealed class FeedServiceTests
             (instance, source, order, offset, limit, token) => Task.FromResult<IReadOnlyList<SwarmUIFile>>([]);
 
         public Task<IReadOnlyList<StashSearchResult>> SearchFeedAsync(StashInstance instance, StashSearchKind kind, FeedSource source, FeedOrder order, int offset, int limit, CancellationToken cancellationToken = default)
-        { Calls.Add($"Stash:{kind}:{offset}:{limit}"); return Stash(instance, kind, source, order, offset, limit, cancellationToken); }
+        { Calls.Enqueue($"Stash:{kind}:{offset}:{limit}"); return Stash(instance, kind, source, order, offset, limit, cancellationToken); }
         public Task<IReadOnlyList<HydrusFile>> SearchFeedAsync(HydrusInstance instance, string query, FeedMedia media, FeedOrder order, int offset, int limit, CancellationToken cancellationToken = default)
-        { Calls.Add($"Hydrus:{offset}:{limit}"); return Hydrus(instance, query, media, order, offset, limit, cancellationToken); }
+        { Calls.Enqueue($"Hydrus:{offset}:{limit}"); return Hydrus(instance, query, media, order, offset, limit, cancellationToken); }
         public Task<IReadOnlyList<SwarmUIFile>> SearchFeedAsync(SwarmUIInstance instance, FeedSource source, FeedOrder order, int offset, int limit, CancellationToken cancellationToken = default) => Swarm(instance, source, order, offset, limit, cancellationToken);
         public Task<IReadOnlyList<StashSearchResult>> SearchAsync(StashInstance instance, StashSearchKind kind, string query, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<StashObservation> ObserveAsync(StashInstance instance, CancellationToken cancellationToken = default) => throw new NotSupportedException();

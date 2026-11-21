@@ -81,7 +81,6 @@ public sealed class HydrusClientTests
     [InlineData("system:limit=4")]
     [InlineData("system:has tag")]
     [InlineData("NOT system:width > 5")]
-    [InlineData("system:height > 2 AND system:width > 3")]
     public async Task SearchFeedAsync_RejectsUnsupportedSystemPredicates(string expression)
     {
         using var client = new HydrusClient(new StubHandler((_, _) => throw new InvalidOperationException("Must not send.")));
@@ -131,6 +130,162 @@ public sealed class HydrusClientTests
         var files = await client.SearchFeedAsync(Instance(), "tag", FeedMedia.Videos, FeedOrder.Oldest, 1, 2);
         Assert.Equal(new[] { 4L, 6L }, files.Select(file => file.Id));
         Assert.Equal(new[] { 3, 6 }, limits);
+    }
+
+    [Theory]
+    [InlineData(FeedMedia.All, 6)]
+    [InlineData(FeedMedia.Videos, 3)]
+    public async Task SearchFeedAsync_RandomPagesPreserveMembershipWhenBackendOrderChanges(FeedMedia media, int pageSize)
+    {
+        var searches = 0;
+        HttpResponseMessage Respond(HttpRequestMessage request, string body)
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+            {
+                var tags = JsonSerializer.Deserialize<string[]>(args["tags"].ToString())!;
+                var requested = int.Parse(tags[^1]["system:limit=".Length..]);
+                var ids = Enumerable.Range(1, 12);
+                if (searches++ % 2 != 0) ids = ids.Reverse();
+                return Json(JsonSerializer.Serialize(new { file_ids = ids.Take(requested) }));
+            }
+            var batch = JsonSerializer.Deserialize<int[]>(args["file_ids"].ToString())!;
+            return Json(JsonSerializer.Serialize(new { metadata = batch.Select(id => new { file_id = id, mime = id % 2 == 0 ? "video/webm" : "image/png" }) }));
+        }
+
+        using var firstClient = new HydrusClient(new StubHandler(Respond));
+        using var secondClient = new HydrusClient(new StubHandler(Respond));
+        var first = await firstClient.SearchFeedAsync(Instance(), "tag", media, FeedOrder.Random, 0, pageSize);
+        var second = await secondClient.SearchFeedAsync(Instance(), "tag", media, FeedOrder.Random, pageSize, pageSize);
+        var repeated = await secondClient.SearchFeedAsync(Instance(), "tag", media, FeedOrder.Random, 0, pageSize);
+        var actual = first.Concat(second).Select(file => file.Id).ToArray();
+        var expected = Enumerable.Range(1, 12).Where(id => media == FeedMedia.All || id % 2 == 0).Select(id => (long)id).ToArray();
+        Assert.Equal(pageSize, first.Count);
+        Assert.Equal(pageSize, second.Count);
+        Assert.Equal(expected, actual.Order());
+        Assert.Equal(actual.Length, actual.Distinct().Count());
+        Assert.False(actual.SequenceEqual(expected));
+        Assert.Equal(first.Select(file => file.Id), repeated.Select(file => file.Id));
+    }
+
+    [Theory]
+    [InlineData(100_000, false)]
+    [InlineData(100_001, true)]
+    public async Task SearchFeedAsync_RandomRejectsOversizedResultsWithoutTruncation(int resultCount, bool rejected)
+    {
+        var metadataRequests = 0;
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+            {
+                var tags = JsonSerializer.Deserialize<string[]>(args["tags"].ToString())!;
+                Assert.Equal("system:limit=100001", tags[^1]);
+                return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, resultCount) }));
+            }
+            metadataRequests++;
+            var ids = JsonSerializer.Deserialize<long[]>(args["file_ids"].ToString())!;
+            return Json(JsonSerializer.Serialize(new { metadata = ids.Select(id => new { file_id = id, mime = "image/png" }) }));
+        }));
+
+        if (rejected)
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchFeedAsync(Instance(), "tag", FeedMedia.All, FeedOrder.Random, 0, 1));
+            Assert.Equal(0, metadataRequests);
+        }
+        else
+        {
+            Assert.Single(await client.SearchFeedAsync(Instance(), "tag", FeedMedia.All, FeedOrder.Random, 0, 1));
+            Assert.Equal(1, metadataRequests);
+        }
+    }
+
+    [Theory]
+    [InlineData(FeedOrder.Newest)]
+    [InlineData(FeedOrder.Oldest)]
+    [InlineData(FeedOrder.Random)]
+    public async Task SearchFeedAsync_EndsAfterExactlyMaximumIds(FeedOrder order)
+    {
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            Assert.EndsWith("search_files", request.RequestUri!.AbsolutePath);
+            var args = QueryHelpers.ParseQuery(request.RequestUri.Query);
+            var tags = JsonSerializer.Deserialize<string[]>(args["tags"].ToString())!;
+            Assert.Equal("system:limit=100001", tags[^1]);
+            return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, 100_000) }));
+        }));
+
+        Assert.Empty(await client.SearchFeedAsync(Instance(), "tag", FeedMedia.All, order, 100_000, 1));
+    }
+
+    [Theory]
+    [InlineData(FeedOrder.Newest, FeedMedia.All)]
+    [InlineData(FeedOrder.Oldest, FeedMedia.Images)]
+    [InlineData(FeedOrder.Random, FeedMedia.Videos)]
+    public async Task SearchFeedAsync_RejectsOverflowAtBoundaryBeforeFetchingMetadata(FeedOrder order, FeedMedia media)
+    {
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            Assert.EndsWith("search_files", request.RequestUri!.AbsolutePath);
+            var args = QueryHelpers.ParseQuery(request.RequestUri.Query);
+            var tags = JsonSerializer.Deserialize<string[]>(args["tags"].ToString())!;
+            Assert.Equal("system:limit=100001", tags[^1]);
+            return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, 100_001) }));
+        }));
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            client.SearchFeedAsync(Instance(), "tag", media, order, 100_000, 1));
+        Assert.Contains("exceeds the supported result size", exception.Message);
+    }
+
+    [Theory]
+    [InlineData(FeedOrder.Newest, FeedMedia.All)]
+    [InlineData(FeedOrder.Oldest, FeedMedia.All)]
+    [InlineData(FeedOrder.Random, FeedMedia.All)]
+    [InlineData(FeedOrder.Newest, FeedMedia.Images)]
+    [InlineData(FeedOrder.Oldest, FeedMedia.Videos)]
+    [InlineData(FeedOrder.Random, FeedMedia.Images)]
+    public async Task SearchFeedAsync_ReturnsPartialPageAcrossMaximumBoundary(FeedOrder order, FeedMedia media)
+    {
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+                return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, 100_000) }));
+            var ids = JsonSerializer.Deserialize<int[]>(args["file_ids"].ToString())!;
+            return Json(JsonSerializer.Serialize(new { metadata = ids.Select(id => new { file_id = id, mime = media == FeedMedia.Videos ? "video/webm" : "image/png" }) }));
+        }));
+
+        var files = await client.SearchFeedAsync(Instance(), "tag", media, order, 99_999, 5);
+        Assert.Single(files);
+        if (order != FeedOrder.Random) Assert.Equal(100_000, files[0].Id);
+    }
+
+    [Theory]
+    [InlineData(FeedOrder.Newest, 100_000, false)]
+    [InlineData(FeedOrder.Oldest, 100_001, true)]
+    public async Task SearchFeedAsync_FilteredExhaustionProbesBeyondMaximum(FeedOrder order, int resultCount, bool rejected)
+    {
+        var limits = new List<int>();
+        using var client = new HydrusClient(new StubHandler((request, _) =>
+        {
+            var args = QueryHelpers.ParseQuery(request.RequestUri!.Query);
+            if (request.RequestUri.AbsolutePath.EndsWith("search_files", StringComparison.Ordinal))
+            {
+                var tags = JsonSerializer.Deserialize<string[]>(args["tags"].ToString())!;
+                var requested = int.Parse(tags[^1]["system:limit=".Length..]);
+                limits.Add(requested);
+                return Json(JsonSerializer.Serialize(new { file_ids = Enumerable.Range(1, Math.Min(requested, resultCount)) }));
+            }
+            var ids = JsonSerializer.Deserialize<int[]>(args["file_ids"].ToString())!;
+            return Json(JsonSerializer.Serialize(new { metadata = ids.Select(id => new { file_id = id, mime = id <= 49_999 ? "image/png" : "video/webm" }) }));
+        }));
+
+        if (rejected)
+            await Assert.ThrowsAsync<InvalidDataException>(() => client.SearchFeedAsync(Instance(), "tag", FeedMedia.Images, order, 49_999, 1));
+        else
+            Assert.Empty(await client.SearchFeedAsync(Instance(), "tag", FeedMedia.Images, order, 49_999, 1));
+        Assert.Equal(new[] { 50_000, 100_000, 100_001 }, limits);
     }
 
     [Fact]
