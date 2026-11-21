@@ -98,7 +98,7 @@ public sealed class JsonLocalLibraryStore(string filePath) : ILocalLibraryStore
     {
         if (instance is null || instance.Id == Guid.Empty || string.IsNullOrWhiteSpace(instance.Name)
             || instance.Name.Any(char.IsControl) || string.IsNullOrWhiteSpace(instance.RootPath)
-            || instance.RootPath.Any(char.IsControl) || !Enum.IsDefined(instance.Kind))
+            || instance.RootPath.Any(char.IsControl) || !Enum.IsDefined(instance.Kind) || !instance.HasValidReaderConfiguration())
         {
             throw new InvalidDataException("Invalid local library configuration. It was left untouched.");
         }

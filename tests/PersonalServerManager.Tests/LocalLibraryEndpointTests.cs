@@ -23,7 +23,8 @@ public sealed class LocalLibraryEndpointTests
         var root = Directory.CreateTempSubdirectory("psm-local-http-").FullName;
         try
         {
-            await File.WriteAllTextAsync(Path.Combine(root, "fixture.md"), "<script>fixture</script>");
+            const string noteText = "# Fixture\n\n**Read this**\n\n<script>fixture</script>";
+            await File.WriteAllTextAsync(Path.Combine(root, "fixture.md"), noteText);
             var instance = new LocalLibraryInstance(Guid.NewGuid(), "Fixture", root, LocalLibraryKind.Notes);
             var store = new JsonLocalLibraryStore(Path.Combine(root, "instances.json"));
             await store.SaveAsync(instance);
@@ -42,15 +43,26 @@ public sealed class LocalLibraryEndpointTests
             using var http = new HttpClient { BaseAddress = new Uri(app.Services.GetRequiredService<IServer>()
                 .Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
             var item = Assert.Single(await new LocalLibraryClient().SearchAsync(instance, "fixture", 25));
+            var readerUrl = $"/libraries/{instance.Id:D}/read/{item.Id}";
             using var unauthorized = await http.GetAsync(item.ItemUrl);
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+            using var unauthorizedReader = await http.GetAsync(readerUrl);
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedReader.StatusCode);
             using var unauthorizedCover = await http.GetAsync($"/libraries/{instance.Id:D}/covers/1");
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedCover.StatusCode);
             http.DefaultRequestHeaders.Add("X-Fixture-Authorization", "yes");
             using var response = await http.GetAsync(item.ItemUrl);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.Equal("text/plain", response.Content.Headers.ContentType!.MediaType);
-            Assert.Equal("<script>fixture</script>", await response.Content.ReadAsStringAsync());
+            Assert.Equal(noteText, await response.Content.ReadAsStringAsync());
+            using var rendered = await http.GetAsync(readerUrl);
+            Assert.Equal(HttpStatusCode.OK, rendered.StatusCode);
+            Assert.Equal("text/html", rendered.Content.Headers.ContentType!.MediaType);
+            Assert.Contains("sandbox", rendered.Headers.GetValues("Content-Security-Policy").Single());
+            var html = await rendered.Content.ReadAsStringAsync();
+            Assert.Contains("<h1>Fixture</h1>", html);
+            Assert.Contains("<strong>Read this</strong>", html);
+            Assert.DoesNotContain("<script>", html);
             Assert.Contains("no-store", response.Headers.CacheControl!.ToString());
             Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").Single());
             Assert.Contains("sandbox", response.Headers.GetValues("Content-Security-Policy").Single());
@@ -81,6 +93,8 @@ public sealed class LocalLibraryEndpointTests
 
             var calibre = instance with { Id = Guid.NewGuid(), Kind = LocalLibraryKind.CalibreText };
             await store.SaveAsync(calibre);
+            using var wrongReader = await http.GetAsync($"/libraries/{calibre.Id:D}/read/1");
+            Assert.Equal(HttpStatusCode.NotFound, wrongReader.StatusCode);
             using var download = await http.GetAsync($"/libraries/{calibre.Id:D}/items/1");
             Assert.Equal(HttpStatusCode.OK, download.StatusCode);
             Assert.Equal("application/pdf", download.Content.Headers.ContentType!.MediaType);

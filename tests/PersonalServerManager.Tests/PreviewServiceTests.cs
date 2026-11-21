@@ -20,6 +20,44 @@ namespace PersonalServerManager.Tests;
 public sealed class PreviewServiceTests
 {
     [Theory]
+    [InlineData("video/mp4", 206)]
+    [InlineData("text/html", 502)]
+    [InlineData("image/svg+xml", 502)]
+    public async Task HydrusMedia_StreamsOnlyBrowserSafeTypesAndForwardsSingleRange(string mime, int expectedStatus)
+    {
+        var id = Guid.NewGuid();
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            Assert.Equal("https://configured.example/prefix/get_files/file?file_id=42", request.RequestUri!.AbsoluteUri);
+            Assert.Equal("secret", request.Headers.GetValues("Hydrus-Client-API-Access-Key").Single());
+            Assert.Equal("bytes=1-2", request.Headers.Range!.ToString());
+            return new HttpResponseMessage(HttpStatusCode.PartialContent)
+            {
+                Content = new ByteArrayContent([2, 3])
+                {
+                    Headers = { ContentType = new(mime), ContentRange = new(1, 2, 3) }
+                }
+            };
+        }));
+        var media = new HydrusClientMedia(client, new HydrusStore(id));
+        var context = new DefaultHttpContext();
+        context.Request.Headers.Range = "bytes=1-2";
+        using var body = new MemoryStream();
+        context.Response.Body = body;
+
+        await media.ServeAsync(id, 42, context);
+
+        Assert.Equal(expectedStatus, context.Response.StatusCode);
+        Assert.Equal("nosniff", context.Response.Headers.XContentTypeOptions);
+        if (expectedStatus == 206)
+        {
+            Assert.Equal("bytes 1-2/3", context.Response.Headers.ContentRange);
+            Assert.Equal(new byte[] { 2, 3 }, body.ToArray());
+        }
+        else Assert.Empty(body.ToArray());
+    }
+
+    [Theory]
     [InlineData("stash", "scenes", "scene/42/screenshot")]
     [InlineData("stash", "images", "image/42/thumbnail")]
     [InlineData("stash", "performers", "performer/42/image")]

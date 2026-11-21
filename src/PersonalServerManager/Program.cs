@@ -68,8 +68,13 @@ builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusIn
 builder.Services.AddTransient<LibrarySearchService>();
 builder.Services.AddSingleton<ILocalLibraryStore>(_ => new JsonLocalLibraryStore(
     Path.Combine(dataDirectory, "local-libraries.json")));
+builder.Services.AddSingleton(services => new ManagedCalibreServer(Path.Combine(dataDirectory, "calibre-server.json"),
+    services.GetRequiredService<ILocalLibraryStore>(), services.GetRequiredService<ILogger<ManagedCalibreServer>>()));
+builder.Services.AddHostedService(services => services.GetRequiredService<ManagedCalibreServer>());
 builder.Services.AddSingleton<LocalLibraryClient>();
 builder.Services.AddHttpClient<PreviewService>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
+builder.Services.AddHttpClient<HydrusClientMedia>(client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -139,6 +144,9 @@ app.UseAntiforgery();
 app.MapAccountEndpoints();
 app.MapPreviewEndpoints();
 app.MapLocalLibraryEndpoints();
+app.MapGet("/media/hydrus/{instanceId:guid}/{fileId:long}",
+    (Guid instanceId, long fileId, HydrusClientMedia media, HttpContext context) => media.ServeAsync(instanceId, fileId, context))
+    .RequireAuthorization();
 
 app.MapStaticAssets();
 app.MapRazorComponents<App>()

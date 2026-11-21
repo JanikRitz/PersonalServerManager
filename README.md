@@ -34,8 +34,8 @@ Results are interleaved round-robin across backend instances, preserving each
 source's ranking so one full source cannot crowd out the others. Each type
 initially shows up to five results. Expand it to fetch up to 25 per
 source and display up to 25 combined results, with an option to show everything
-in each contributing source. Stash thumbnails link to the original item; Hydrus
-thumbnails open the preview because its Client API has no browser-based item UI.
+in each contributing source. Stash results open in Stash. Supported Hydrus files
+open in the browser through the signed-in app; other formats open their preview.
 Thumbnails preserve their aspect ratio, with a larger preview on hover or keyboard
 focus. Backend failures are reported separately without hiding healthy results.
 Scene markers use their own screenshot through the authenticated preview proxy.
@@ -90,12 +90,14 @@ Notes search `.md`, `.markdown`, and `.txt` filenames and UTF-8 text recursively
 using a literal case-insensitive query. Files larger than 1 MiB, non-UTF-8 files,
 binary content, and symbolic links/junctions are skipped. A search scans at most
 10,000 directory entries and 32 MiB of note content; matches beyond these bounds
-are not returned. Notes open as plain text, never executable HTML.
+are not returned. Notes open in a browser reader with Markdown formatting. Raw
+HTML and remote resources are disabled, and the original note remains available.
 
 Calibre libraries must contain `metadata.db`. Search covers titles, authors,
 tags, and comments, not full book contents. Supported on-disk formats are selected
 without conversion; ebooks and comics remain distinct backends. Covers are shown
-when available, and thumbnails download the preferred existing format. SQLite is
+when available. With a Content Server connection, results open Calibre's browser
+reader (or the browser's PDF viewer) and offer a separate file download. SQLite is
 opened read-only. Book descriptions from Calibre comments are shown as bounded,
 plain-text excerpts with an expandable full description when available. SQLite uses
 immutable reads; uncheckpointed WAL changes are not visible.
@@ -107,8 +109,12 @@ cover routes also require sign-in, reject path traversal/reparse points, and
 expose opaque item IDs rather than physical paths. Local configuration is stored
 alongside the other backend settings in `local-libraries.json`.
 
-No Calibre service is required for this mode. For browser reading, OPDS, and a
-separately hosted library UI, see [Calibre hosting](docs/calibre-hosting.md).
+To enable reading on the manager PC, start **Calibre Content Server** under
+**Backends**. The app serves the configured Calibre folders, discovers their
+library IDs, and can launch Calibre when the manager starts. For remote reading,
+configure an authenticated external server URL and library ID instead. Without
+a running reader, the app still searches and downloads files. See
+[Calibre hosting](docs/calibre-hosting.md).
 
 ## Network Access
 

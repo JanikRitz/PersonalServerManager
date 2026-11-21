@@ -12,7 +12,7 @@ public enum LibrarySort { Default, TitleAscending, TitleDescending, DateNewest, 
 
 public record LibraryItem(string Id, string Title, string Detail, Uri? ItemUrl, Uri? PreviewUrl = null,
     LibraryMediaType MediaType = LibraryMediaType.Image, string? Description = null,
-    DateTimeOffset? CreatedAt = null, DateTimeOffset? UpdatedAt = null, string? Path = null);
+    DateTimeOffset? CreatedAt = null, DateTimeOffset? UpdatedAt = null, string? Path = null, Uri? ReaderUrl = null);
 
 public record LibraryGroup(
     Guid InstanceId,
@@ -116,7 +116,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                     .Select(item => (Item: item, Type: HydrusMediaType(item.Mime)))
                     .Where(entry => entry.Type.HasValue)
                     .Take(limit)
-                    .Select(entry => new LibraryItem(entry.Item.Id.ToString(CultureInfo.InvariantCulture), entry.Item.Title, entry.Item.Mime, null,
+                    .Select(entry => new LibraryItem(entry.Item.Id.ToString(CultureInfo.InvariantCulture), entry.Item.Title, entry.Item.Mime,
+                        HydrusClientMedia.CanDisplay(entry.Item.Mime) ? HydrusClientMedia.CreateLink(instance.Id, entry.Item.Id) : null,
                         PreviewService.CreateLink("hydrus", instance.Id, "files", entry.Item.Id.ToString(CultureInfo.InvariantCulture)), entry.Type!.Value,
                         CreatedAt: entry.Item.CreatedAt, UpdatedAt: entry.Item.UpdatedAt, Path: entry.Item.Path))
                     .ToArray(), backend),

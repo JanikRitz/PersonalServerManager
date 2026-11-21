@@ -29,13 +29,17 @@
         <ul class="library-grid" aria-busy="@(_loading ? "true" : "false")">
             @foreach (var item in _items)
             {
-                <li @key="item.Id"><a class="item-preview" href="@item.ItemUrl" target="_blank" rel="noopener noreferrer" aria-label="@($"Open {item.Title}")">
+                <li @key="item.Id"><a class="item-preview" href="@(item.ReaderUrl ?? item.ItemUrl)" target="_blank" rel="noopener noreferrer" aria-label="@($"{(item.ReaderUrl is null ? "Open" : "Read")} {item.Title}")">
                     <MudIcon Icon="@(item.MediaType == LibraryMediaType.Note ? Icons.Material.Outlined.Description : Icons.Material.Outlined.MenuBook)" />
                     @if (item.PreviewUrl is not null)
                     {
                         <img src="@item.PreviewUrl" alt="" loading="lazy" onerror="this.hidden=true" />
                     }
                 </a><strong>@item.Title</strong><small>@item.Detail</small>
+                @if (item.ReaderUrl is not null && item.ItemUrl is not null)
+                {
+                    <a href="@item.ItemUrl" download aria-label="@($"Download {item.Title}")"><MudIcon Icon="@Icons.Material.Filled.Download" Size="Size.Small" /></a>
+                }
                 @if (!string.IsNullOrWhiteSpace(item.Description))
                 {
                     <BookDescription Description="@item.Description" />

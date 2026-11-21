@@ -9,6 +9,7 @@
 
 
   <ItemGroup>
+    <PackageReference Include="Markdig" Version="0.44.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.15" />
     <PackageReference Include="MudBlazor" Version="9.*" />
   </ItemGroup>

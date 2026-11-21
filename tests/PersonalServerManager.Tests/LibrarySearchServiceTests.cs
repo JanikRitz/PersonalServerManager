@@ -186,7 +186,7 @@ public sealed class LibrarySearchServiceTests
             Assert.Equal("Hydrus", group.Provider);
             Assert.Equal("Files", group.Category);
             Assert.Null(group.SearchUrl);
-            Assert.Equal(new LibraryItem("6000000001", "File 1", "image/png", null,
+            Assert.Equal(new LibraryItem("6000000001", "File 1", "image/png", new Uri($"/media/hydrus/{instance.Id}/6000000001", UriKind.Relative),
                 new Uri($"/previews/hydrus/{instance.Id}/files/6000000001", UriKind.Relative)), group.Items[0]);
             Assert.Equal(new[] { "6000000001", "6000000002", "6000000003", "6000000004", "6000000005" }, group.Items.Select(item => item.Id));
         }

@@ -13,7 +13,7 @@ public sealed record LocalLibraryFile(Stream Content, string ContentType, string
     public ValueTask DisposeAsync() => Content.DisposeAsync();
 }
 
-public sealed class LocalLibraryClient
+public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = null)
 {
     private const int MaximumNoteBytes = 1024 * 1024;
     private const int MaximumScanBytes = 32 * 1024 * 1024;
@@ -22,7 +22,7 @@ public sealed class LocalLibraryClient
     private const int MaximumCommentLength = 32768;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly HashSet<string> NoteExtensions = new(StringComparer.OrdinalIgnoreCase) { ".md", ".markdown", ".txt" };
-    private static readonly string[] TextFormats = ["EPUB", "PDF", "AZW3", "MOBI", "AZW", "FB2", "TXT", "RTF", "DOCX", "ODT", "DJVU"];
+    private static readonly string[] TextFormats = ["EPUB", "PDF", "AZW3", "MOBI", "AZW", "FB2", "MD", "MARKDOWN", "TXT", "RTF", "DOCX", "ODT", "DJVU"];
     private static readonly string[] ComicFormats = ["CBZ", "CBR", "CB7", "CBT", "PDF", "EPUB"];
 
     public async Task<IReadOnlyList<LibraryItem>> SearchAsync(LocalLibraryInstance instance, string query, int limit,
@@ -40,7 +40,8 @@ public sealed class LocalLibraryClient
             return await SearchNotesAsync(instance, root, query.Trim(), limit, cancellationToken, offset);
         try
         {
-            return await SearchCalibreAsync(instance, root, query.Trim(), limit, cancellationToken, offset);
+            return await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance) ?? instance,
+                root, query.Trim(), limit, cancellationToken, offset);
         }
         catch (SqliteException) when (cancellationToken.IsCancellationRequested)
         {
@@ -126,7 +127,8 @@ public sealed class LocalLibraryClient
                 var id = NoteId(root, path);
                 items.Add(new LibraryItem(id, Path.GetFileName(path), "Note", ItemUrl(instance.Id, id),
                     MediaType: LibraryMediaType.Note, CreatedAt: fileInfo.CreationTimeUtc,
-                    UpdatedAt: fileInfo.LastWriteTimeUtc, Path: Path.GetRelativePath(root, path)));
+                    UpdatedAt: fileInfo.LastWriteTimeUtc, Path: Path.GetRelativePath(root, path),
+                    ReaderUrl: new Uri($"/libraries/{instance.Id:D}/read/{id}", UriKind.Relative)));
                 if (items.Count == limit) break;
             }
             catch (Exception exception) when (IsFileFailure(exception))
@@ -267,7 +269,8 @@ public sealed class LocalLibraryClient
             items.Add(new LibraryItem(id, string.IsNullOrWhiteSpace(title) ? bookPath : title, reader.GetString(3), ItemUrl(instance.Id, id), coverUrl,
                 instance.Kind == LocalLibraryKind.CalibreComic ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                 Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4)),
-                CreatedAt: ReadCalibreDate(reader, 5), UpdatedAt: ReadCalibreDate(reader, 6), Path: bookPath));
+                CreatedAt: ReadCalibreDate(reader, 5), UpdatedAt: ReadCalibreDate(reader, 6), Path: bookPath,
+                ReaderUrl: instance.GetCalibreReaderUrl(id, file.Value.Format)));
             if (items.Count == limit) break;
         }
 

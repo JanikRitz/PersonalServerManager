@@ -113,7 +113,7 @@
                                 {
                                     var item = entry.Item;
                                     <li class="media-tile" @key="(entry.Source.InstanceId, entry.Source.Category, item.Id)">
-                                        <a class="thumbnail-link" href="@(item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")">
+                                        <a class="thumbnail-link" href="@(item.ReaderUrl ?? item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ReaderUrl is not null ? $"Read {item.Title}" : item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")">
                                             <span class="thumbnail-placeholder" aria-hidden="true"><MudIcon Icon="@TypeIcon(group.Type)" /></span>
                                             @if (item.PreviewUrl is not null)
                                             {
@@ -123,6 +123,10 @@
                                         </a>
                                         <small class="media-source">@entry.Source.Provider / @entry.Source.InstanceName</small>
                                         <span class="media-title" title="@item.Title">@item.Title</span>
+                                        @if (item.ReaderUrl is not null && item.ItemUrl is not null)
+                                        {
+                                            <a href="@item.ItemUrl" download aria-label="@($"Download {item.Title}")"><MudIcon Icon="@Icons.Material.Filled.Download" Size="Size.Small" /></a>
+                                        }
                                         @if (!string.IsNullOrWhiteSpace(item.Description))
                                         {
                                             <BookDescription Description="@item.Description" />

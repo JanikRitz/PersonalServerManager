@@ -1,18 +1,26 @@
 # Calibre Hosting
 
-## Recommendation
+## Managed Setup
 
-Use the official Calibre Content server when you want browser reading and OPDS,
-with one process serving both libraries. Keep the Calibre desktop application as
-the editor and restrict server accounts to read-only access. Avoid adding another
-library manager solely to expose these two existing folders.
+Install Calibre in its standard Program Files location. In **Backends**, add
+the Calibre ebook and comic folders under **Local libraries**. In the **Calibre
+Content Server** section, save a loopback port (default `8080`) and select
+**Start Calibre**. Enable **Start with Personal Server Manager** and save the
+settings to have the app launch Calibre on subsequent starts.
 
-Personal Server Manager currently searches these libraries directly and reads
-existing files. It does not start a server, synchronize reading progress, convert
-ebooks, or connect to a remote Calibre API. Starting the optional Content server
-does not automatically change the app's local-backend configuration.
+The app starts one read-only server for the configured Calibre folders, obtains
+their library IDs, and uses those IDs for reader links. Stop and start Calibre to
+apply changes to the folder list. The manager stops its own Calibre process when
+it shuts down normally and does not take over a port used by another process.
+An explicit Content Server URL on a library overrides the managed reader link.
 
-## Local Setup
+Managed Calibre binds to `127.0.0.1` with no Calibre login. Other processes on
+the same PC can reach it. It is not for remote browser access; do not forward
+or reverse-proxy the managed port. Use the external setup below for that.
+Personal Server Manager does not synchronize reading progress, convert ebooks,
+or proxy Calibre credentials.
+
+## External Setup
 
 Calibre is installed under `C:\Program Files\Calibre2` on the test machine.
 Create an account database outside the book folders, then use Calibre's interactive
@@ -32,6 +40,13 @@ After configuring accounts, a loopback-only server can serve both libraries:
 The browser UI is at `http://127.0.0.1:8080/`; OPDS clients use `/opds`.
 The `--disable-local-write` switch blocks unauthenticated local edits; authenticated
 users still need read-only permissions in the account database.
+
+In Personal Server Manager, edit each Calibre library under **Backends**. Set
+**Content Server URL** to the address reachable from the reading device and
+**Content Server library ID** to the matching ID from `/ajax/library-info` on
+that server. The example folders use `Calibre_Text` and `SFW_Comics`. Both
+libraries can share one server URL. When using a separate device, do not enter
+`localhost` or `127.0.0.1`; those refer to the device running the browser.
 
 ## LAN Access
 
