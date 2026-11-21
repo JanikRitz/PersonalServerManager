@@ -125,6 +125,15 @@
                                     var score = item.RatingOutOfFive?.ToString("0.##");
                                     var ratingLabel = score is not null ? $"Rated {score} out of 5" : item.IsFavorite ? "Favorite" : null;
                                     if (ratingLabel is not null) descriptions += $" {badgeId}-rating";
+                                    var contentBadgeText = item.ContentCount is { } count
+                                        ? count.ToString()
+                                        : group.Type == LibraryMediaType.Comic && item.FileSizeBytes is { } size
+                                            ? FormatFileSize(size) : null;
+                                    var contentBadgeLabel = item.ContentCount is { } contentCount
+                                        ? $"{contentCount} {(group.Type == LibraryMediaType.Comic ? "pages" : "items")}" :
+                                        group.Type == LibraryMediaType.Comic && item.FileSizeBytes is { } fileSize
+                                            ? $"File size: {fileSize:N0} bytes" : null;
+                                    if (contentBadgeLabel is not null) descriptions += $" {badgeId}-count";
                                     <li class="media-tile" @key="(entry.Source.InstanceId, entry.Source.Category, item.Id)">
                                         <a class="thumbnail-link" href="@(item.ReaderUrl ?? item.ItemUrl ?? item.PreviewUrl)" target="_blank" rel="noopener noreferrer" aria-label="@(item.ReaderUrl is not null ? $"Read {item.Title}" : item.ItemUrl is null ? $"View preview: {item.Title}" : $"Open {item.Title} in {entry.Source.InstanceName}")" aria-describedby="@descriptions">
                                             <span class="thumbnail-placeholder" aria-hidden="true"><MudIcon Icon="@TypeIcon(group.Type)" /></span>
@@ -137,7 +146,11 @@
                                             {
                                                 <span class="format-badge" id="@($"{badgeId}-format")">@item.FileFormat</span>
                                             }
-                                            <span class="source-badge" id="@($"{badgeId}-source")" title="@sourceLabel">@sourceLabel</span>
+                                            <span class="source-badge @(contentBadgeText is null ? string.Empty : "with-content-badge")" id="@($"{badgeId}-source")" title="@sourceLabel">@sourceLabel</span>
+                                            @if (contentBadgeText is not null)
+                                            {
+                                                <span class="content-count-badge" id="@($"{badgeId}-count")" aria-label="@contentBadgeLabel" title="@contentBadgeLabel">@contentBadgeText</span>
+                                            }
                                             @if (ratingLabel is not null)
                                             {
                                                 <span class="rating-badge" id="@($"{badgeId}-rating")" title="@ratingLabel">
@@ -213,6 +226,19 @@
     private int VisibleResultCount => _typeGroups.Sum(group => Math.Min(group.Items.Count, _expandedTypes.Contains(group.Type) ? 25 : 5));
 
     private static string TypeLabel(LibraryMediaType type) => type == LibraryMediaType.TextEbook ? "Text/Ebook" : type.ToString();
+
+    private static string FormatFileSize(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var size = (double)bytes;
+        var unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+        return $"{size:0.#} {units[unit]}";
+    }
 
     private static string TypeIcon(LibraryMediaType type) => type switch
     {

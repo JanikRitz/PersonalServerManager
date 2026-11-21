@@ -187,7 +187,7 @@ public sealed class StashGraphQlClientTests
     [InlineData(StashSearchKind.Studios, "findStudios", "studios", "id name image_path rating100 favorite", "studio/42/image")]
     [InlineData(StashSearchKind.Tags, "findTags", "tags", "id name image_path favorite", "tag/42/image")]
     [InlineData(StashSearchKind.Galleries, "findGalleries", "galleries", "id title paths { cover } files { path } rating100", "gallery/42/cover")]
-    [InlineData(StashSearchKind.Groups, "findGroups", "groups", "id name front_image_path rating100", "group/42/frontimage")]
+    [InlineData(StashSearchKind.Groups, "findGroups", "groups", "id name front_image_path scenes { id } rating100", "group/42/frontimage")]
     public async Task SearchAsync_MapsNewCollectionsAndTrustedPreviewPaths(
         StashSearchKind kind, string field, string collection, string selection, string previewPath)
     {
@@ -198,7 +198,9 @@ public sealed class StashGraphQlClientTests
             Assert.Contains($"{collection} {{ {selection} created_at updated_at }}", request.RootElement.GetProperty("query").GetString());
             Assert.Equal(5, request.RootElement.GetProperty("variables").GetProperty("filter").GetProperty("per_page").GetInt32());
             var thumbnail = new Uri(instance.WebUiUrl, previewPath).AbsoluteUri + "?apikey=private";
-            var item = new { id = "42", name = "A name", title = "A title", image_path = thumbnail, front_image_path = thumbnail, paths = new { cover = thumbnail } };
+            var item = new { id = "42", name = "A name", title = "A title", image_path = thumbnail, front_image_path = thumbnail,
+                paths = new { cover = thumbnail }, files = new[] { new { path = "one.jpg" }, new { path = "two.jpg" } },
+                scenes = new[] { new { id = "1" }, new { id = "2" }, new { id = "3" } } };
             return Json(System.Text.Json.JsonSerializer.Serialize(new
             {
                 data = new Dictionary<string, object> { [field] = new Dictionary<string, object> { [collection] = new[] { item } } }
@@ -212,6 +214,7 @@ public sealed class StashGraphQlClientTests
         Assert.Equal(new Uri(instance.WebUiUrl, previewPath), result.ThumbnailUrl);
         Assert.Equal(instance.Id, result.InstanceId);
         Assert.Equal(instance.Name, result.InstanceName);
+        Assert.Equal(kind is StashSearchKind.Galleries ? 2 : kind is StashSearchKind.Groups ? 3 : null, result.ContentCount);
     }
 
     [Theory]

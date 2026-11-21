@@ -37,7 +37,10 @@ public sealed class ComicCompanionClient(HttpClient client)
                 return new LibraryItem(id, comic.Title, imagesets ? "Hydrus imageset" : "Hydrus comic",
                     reader is null ? new Uri(browser, $"{(imagesets ? "collection" : "comic")}/{id}") : null,
                     comic.CoverHash is null ? null : PreviewService.CreateLink("comiccompanion", settings.Id, "comics", comic.CoverHash),
-                    imagesets ? LibraryMediaType.Collection : LibraryMediaType.Comic, UpdatedAt: comic.UpdatedAt, ReaderUrl: reader);
+                    imagesets ? LibraryMediaType.Collection : LibraryMediaType.Comic, UpdatedAt: comic.UpdatedAt, ReaderUrl: reader)
+                {
+                    ContentCount = imagesets ? comic.ImageCount : comic.PageCount
+                };
             }).ToArray();
     }
 
@@ -55,5 +58,6 @@ public sealed class ComicCompanionClient(HttpClient client)
     private static bool IsPositiveId(string value) =>
         int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id > 0;
 
-    private sealed record ComicResult(int Id, string Title, string? CoverHash, DateTimeOffset? UpdatedAt, string? Kind, string? ReaderPath);
+    private sealed record ComicResult(int Id, string Title, string? CoverHash, DateTimeOffset? UpdatedAt, string? Kind,
+        string? ReaderPath, int? PageCount, int? ImageCount);
 }

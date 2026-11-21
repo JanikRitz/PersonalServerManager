@@ -13,6 +13,7 @@ public sealed class LocalLibraryRemoteTests
 
     private const string Metadata = """
         {"title":"Mixed book","authors":["Writer"],"formats":["epub","cbz","pdf","markdown"],
+         "format_metadata":{"epub":{"size":2048},"cbz":{"size":1536}},
          "comments":"<p>Summary</p><script>hidden</script>","rating":4.5,"timestamp":"2020-01-02T00:00:00Z"}
         """;
 
@@ -38,6 +39,8 @@ public sealed class LocalLibraryRemoteTests
         Assert.Equal(kind == LocalLibraryKind.CalibreComic ? "42:EPUB" : "42", ebook.Id);
         Assert.Equal(kind == LocalLibraryKind.CalibreComic ? "42" : "42:CBZ", comic.Id);
         Assert.Equal("Summary", ebook.Description);
+        Assert.Equal(2048, ebook.FileSizeBytes);
+        Assert.Equal(1536, comic.FileSizeBytes);
         Assert.All(items, item => Assert.Equal(4.5m, item.RatingOutOfFive));
         Assert.Equal(DateTimeOffset.Parse("2020-01-02T00:00:00Z"), ebook.CreatedAt);
         Assert.Contains("fmt=cbz", comic.ReaderUrl!.AbsoluteUri);

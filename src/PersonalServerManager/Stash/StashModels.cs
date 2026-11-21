@@ -41,6 +41,7 @@ public sealed record StashSearchResult(
     public DateTimeOffset? CreatedAt { get; init; }
     public DateTimeOffset? UpdatedAt { get; init; }
     public string? Path { get; init; }
+    public int? ContentCount { get; init; }
     public int? Rating100 { get; init; }
     public bool IsFavorite { get; init; }
 }

@@ -36,12 +36,12 @@ public sealed class LibrarySearchServiceTests
                 var body = query["kind"].ToString() switch
                 {
                     "Comic" => $$"""
-                        [{"id":11,"title":"A comic","coverHash":"{{hash}}","kind":"Comic","readerPath":"read/11/42/1"},
+                        [{"id":11,"title":"A comic","coverHash":"{{hash}}","kind":"Comic","readerPath":"read/11/42/1","pageCount":18},
                          {"id":11,"title":"Duplicate","kind":"Comic"},
                          {"id":12,"title":"An invalid reader link","kind":"Comic","readerPath":"//untrusted.test/read/12/1/1"}]
                         """,
                     "Imageset" => $$"""
-                        [{"id":11,"title":"An imageset","coverHash":"{{hash}}","kind":"Imageset","readerPath":"collection/11/image/{{hash}}"}]
+                        [{"id":11,"title":"An imageset","coverHash":"{{hash}}","kind":"Imageset","readerPath":"collection/11/image/{{hash}}","imageCount":7}]
                         """,
                     _ => throw new InvalidOperationException("Missing catalog kind.")
                 };
@@ -61,7 +61,9 @@ public sealed class LibrarySearchServiceTests
                 var comic = Assert.Single(comics.Items, entry => entry.Source.InstanceId == instance.Id && entry.Item.Id == "11");
                 var imageset = Assert.Single(collections.Items, entry => entry.Source.InstanceId == instance.Id);
                 Assert.Equal(instance.Name, comic.Source.InstanceName);
+                Assert.Equal(18, comic.Item.ContentCount);
                 Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, "read/11/42/1"), comic.Item.ReaderUrl);
+                Assert.Equal(7, imageset.Item.ContentCount);
                 Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, $"collection/11/image/{hash}"), imageset.Item.ReaderUrl);
                 Assert.Null(comic.Item.ItemUrl);
                 Assert.Null(imageset.Item.ItemUrl);

@@ -179,7 +179,12 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                         ComicFormats.Contains(format) ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                         Description: NormalizeDescription(JsonText(metadata, "comments") ?? ""),
                         CreatedAt: JsonDate(metadata, "timestamp"), UpdatedAt: JsonDate(metadata, "last_modified"),
-                        ReaderUrl: instance.GetCalibreReaderUrl(id, format)) { FileFormat = format, RatingOutOfFive = rating });
+                        ReaderUrl: instance.GetCalibreReaderUrl(id, format))
+                    {
+                        FileFormat = format,
+                        FileSizeBytes = RemoteFormatSize(metadata, format),
+                        RatingOutOfFive = rating
+                    });
                 }
             }
             candidateOffset += ids.Length;
@@ -193,6 +198,14 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
         metadata.TryGetProperty("formats", out var formats) && formats.ValueKind == JsonValueKind.Array
             ? formats.EnumerateArray().Select(format => format.GetString()?.ToUpperInvariant() ?? "").ToHashSet(StringComparer.Ordinal)
             : [];
+
+    private static long? RemoteFormatSize(JsonElement metadata, string format) =>
+        metadata.TryGetProperty("format_metadata", out var formats) &&
+        formats.ValueKind == JsonValueKind.Object &&
+        formats.TryGetProperty(format.ToLowerInvariant(), out var details) &&
+        details.ValueKind == JsonValueKind.Object &&
+        details.TryGetProperty("size", out var size) && size.TryGetInt64(out var bytes) && bytes >= 0
+            ? bytes : null;
 
     private static string? JsonText(JsonElement metadata, string name) =>
         metadata.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
@@ -449,7 +462,12 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 comicItem ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                 Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4)),
                 CreatedAt: ReadCalibreDate(reader, 5), UpdatedAt: ReadCalibreDate(reader, 6), Path: bookPath,
-                ReaderUrl: instance.GetCalibreReaderUrl(id, file.Value.Format)) { FileFormat = file.Value.Format, RatingOutOfFive = rating });
+                ReaderUrl: instance.GetCalibreReaderUrl(id, file.Value.Format))
+                {
+                    FileFormat = file.Value.Format,
+                    FileSizeBytes = file.Value.Size,
+                    RatingOutOfFive = rating
+                });
                 if (items.Count == limit) break;
             }
             if (items.Count == limit) break;
@@ -536,7 +554,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
         }
     }
 
-    private static async Task<(string Path, string Format)?> FindFormatAsync(SqliteConnection connection, string root,
+    private static async Task<(string Path, string Format, long Size)?> FindFormatAsync(SqliteConnection connection, string root,
         string bookPath, long bookId, LocalLibraryKind kind, CancellationToken cancellationToken, string? requestedFormat = null)
     {
         using var command = connection.CreateCommand();
@@ -544,7 +562,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
         command.Parameters.AddWithValue("$id", bookId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var formats = kind == LocalLibraryKind.CalibreComic ? ComicFormats : TextFormats;
-        (string Path, string Format)? selected = null;
+        (string Path, string Format, long Size)? selected = null;
         var bestRank = int.MaxValue;
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -558,7 +576,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             {
                 var path = LocalLibraryPaths.Resolve(root, bookPath, name + "." + format.ToLowerInvariant());
                 if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.Directory) != 0) continue;
-                selected = (path, format);
+                selected = (path, format, new FileInfo(path).Length);
                 bestRank = rank;
             }
             catch (Exception exception) when (IsFileFailure(exception))

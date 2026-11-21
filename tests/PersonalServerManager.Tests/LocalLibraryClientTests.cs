@@ -245,6 +245,7 @@ public sealed class LocalLibraryClientTests : IDisposable
         Assert.Equal("1", item.Id);
         Assert.Equal("1:EPUB", Assert.Single(mixed, item => item.MediaType == LibraryMediaType.TextEbook).Id);
         Assert.Equal(LibraryMediaType.Comic, item.MediaType);
+        Assert.Equal(11, item.FileSizeBytes);
         await using (var file = await _client.OpenItemAsync(instance, item.Id))
         {
             Assert.NotNull(file);

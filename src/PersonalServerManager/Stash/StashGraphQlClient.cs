@@ -77,7 +77,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             StashSearchKind.Tags => ("findTags", "tags", "id name image_path favorite", "tags"),
             StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "id title seconds scene { id } primary_tag { name } screenshot", "scenes"),
             StashSearchKind.Galleries => ("findGalleries", "galleries", "id title paths { cover } files { path } rating100", "galleries"),
-            StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path rating100", "groups"),
+            StashSearchKind.Groups => ("findGroups", "groups", "id name front_image_path scenes { id } rating100", "groups"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
 
@@ -259,6 +259,12 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             CreatedAt = ReadDate(item, "created_at"),
             UpdatedAt = ReadDate(item, "updated_at"),
             Path = path,
+            ContentCount = kind switch
+            {
+                StashSearchKind.Galleries => ReadArrayCount(item, "files"),
+                StashSearchKind.Groups => ReadArrayCount(item, "scenes"),
+                _ => null
+            },
             Rating100 = item.TryGetProperty("rating100", out var rating) && rating.ValueKind == JsonValueKind.Number &&
                 rating.TryGetInt32(out var score) && score is > 0 and <= 100 ? score : null,
             IsFavorite = item.TryGetProperty("favorite", out var favorite) && favorite.ValueKind == JsonValueKind.True
@@ -269,6 +275,11 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String &&
         DateTimeOffset.TryParse(value.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date)
             ? date : null;
+
+    private static int? ReadArrayCount(JsonElement item, string property) =>
+        item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Array
+            ? value.GetArrayLength()
+            : null;
 
     private static string? GetNestedString(JsonElement element, string objectName, string propertyName) =>
         element.TryGetProperty(objectName, out var nested) && nested.TryGetProperty(propertyName, out var value)
