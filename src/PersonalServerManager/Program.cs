@@ -13,6 +13,7 @@ using PersonalServerManager.Search;
 using PersonalServerManager.LocalLibraries;
 
 var builder = WebApplication.CreateBuilder(args);
+var allowInsecureHttp = builder.Configuration.GetValue<bool>("NetworkAccess:AllowInsecureHttp");
 
 // Add MudBlazor services
 builder.Services.AddMudServices();
@@ -120,10 +121,14 @@ if (!app.Environment.IsDevelopment())
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
 
 app.UseForwardedHeaders();
-app.UseHttpsRedirection();
+if (!allowInsecureHttp)
+{
+    app.UseHttpsRedirection();
+}
 app.Use(async (context, next) =>
 {
-    if (context.Connection.RemoteIpAddress is not { } address || !System.Net.IPAddress.IsLoopback(address))
+    if (!allowInsecureHttp &&
+        (context.Connection.RemoteIpAddress is not { } address || !System.Net.IPAddress.IsLoopback(address)))
     {
         if (!context.Request.IsHttps)
         {

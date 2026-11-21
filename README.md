@@ -118,19 +118,39 @@ a running reader, the app still searches and downloads files. See
 
 ## Network Access
 
-Keep the app on loopback for local use. Non-loopback plaintext HTTP is rejected.
-For LAN access, terminate TLS at an owner-managed reverse proxy and configure
-the exact proxy IP in `ForwardedHeaders:KnownProxies`; requests with forwarded
-headers from other addresses are not trusted. For example:
+For local development, use the `http` launch profile, which binds only to
+loopback. To serve HTTP directly on a trusted private LAN, start the opt-in
+`lan-http` profile:
+
+```powershell
+dotnet run --project src/PersonalServerManager --launch-profile lan-http
+```
+
+On the manager PC, open `http://localhost:5289` once to complete owner-password
+enrollment; enrollment is intentionally limited to loopback. Find the PC's
+private IPv4 address with `ipconfig`, then open `http://<PC-IPv4>:5289` from a
+LAN device. If Windows Firewall blocks access, add an inbound rule in an
+Administrator PowerShell window, restricted to the private profile and local
+subnet:
+
+```powershell
+New-NetFirewallRule -DisplayName "Personal Server Manager (LAN)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5289 -Profile Private -RemoteAddress LocalSubnet
+```
+
+HTTP sends passwords, session cookies, and app traffic without transport
+encryption. Use this only on a trusted private network, keep the firewall
+restricted to the local subnet, and do not port-forward the app to the internet.
+The normal `http` profile remains loopback-only. For access beyond a trusted
+LAN, use TLS at an owner-managed reverse proxy and configure its exact IP in
+`ForwardedHeaders:KnownProxies`; forwarded headers from other addresses are not
+trusted. For example:
 
 ```powershell
 $env:ForwardedHeaders__KnownProxies__0 = "10.0.0.10"
 ```
 
 Bind the app only to an address reachable by that proxy, and firewall the app
-port so clients cannot bypass the proxy. The repository does not configure
-nginx, certificates, firewall rules, or public access. Verify the proxy source
-address seen by the Windows host before enabling this mode.
+port so clients cannot bypass the proxy.
 
 ## Local Data And Recovery
 
