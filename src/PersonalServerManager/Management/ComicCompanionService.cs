@@ -25,6 +25,13 @@ public sealed record ComicCompanionSettings(
     public bool IsManaged => InstallationFolder is not null;
     [JsonIgnore]
     public Uri? EffectiveBrowserUrl => BrowserUrl ?? ApiUrl;
+
+    [JsonIgnore]
+    public string ManagedPath => $"/managed/comiccompanion/{(Id == Guid.Empty ? ComicCompanionService.LegacyInstanceId : Id):D}";
+
+    public Uri BrowserLink(Uri url) => IsManaged
+        ? new Uri($"{ManagedPath}/{EffectiveBrowserUrl!.MakeRelativeUri(url)}", UriKind.Relative)
+        : url;
 }
 
 public sealed class ComicCompanionService(string settingsPath, ILogger<ComicCompanionService> logger) : BackgroundService
@@ -192,6 +199,7 @@ public sealed class ComicCompanionService(string settingsPath, ILogger<ComicComp
 
         start.ArgumentList.Add("--urls");
         start.ArgumentList.Add(settings.ApiUrl!.AbsoluteUri.TrimEnd('/'));
+        start.Environment["PSM_COMIC_PATH_BASE"] = settings.ManagedPath;
         start.Environment.Remove(SyncVariable);
         if (settings.AutomaticSync)
             start.Environment[SyncVariable] = settings.SyncIntervalMinutes.ToString(CultureInfo.InvariantCulture);

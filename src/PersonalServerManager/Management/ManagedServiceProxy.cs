@@ -19,7 +19,7 @@ public static class ManagedServiceProxy
     {
         app.Map("/managed/{provider}/{instanceId:guid}/{**path}", async (HttpContext context,
             string provider, Guid instanceId, IStashInstanceStore stashStore, ILocalLibraryStore libraries,
-            ManagedCalibreServer calibre, IHttpForwarder forwarder) =>
+            ManagedCalibreServer calibre, ComicCompanionService comicCompanion, IHttpForwarder forwarder) =>
         {
             Uri? upstream = null;
             var prefix = $"/managed/{provider}/{instanceId:D}";
@@ -36,6 +36,12 @@ public static class ManagedServiceProxy
                     .FirstOrDefault(item => item.Id == instanceId && item.IsManaged);
                 if (instance is not null)
                     upstream = calibre.WithReaderConnection(instance).ContentServerUrl;
+            }
+            else if (provider == "comiccompanion")
+            {
+                var instance = (await comicCompanion.GetAllAsync(context.RequestAborted))
+                    .FirstOrDefault(item => item.Id == instanceId && item.IsManaged);
+                upstream = instance?.ApiUrl;
             }
 
             if (upstream is null)

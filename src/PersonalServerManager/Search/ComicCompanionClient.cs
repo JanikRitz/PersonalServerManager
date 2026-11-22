@@ -35,9 +35,9 @@ public sealed class ComicCompanionClient(HttpClient client)
                 var browser = settings.EffectiveBrowserUrl!;
                 var reader = GetReaderUrl(browser, id, imagesets, comic.ReaderPath);
                 return new LibraryItem(id, comic.Title, imagesets ? "Hydrus imageset" : "Hydrus comic",
-                    reader is null ? new Uri(browser, $"{(imagesets ? "collection" : "comic")}/{id}") : null,
+                    reader is null ? settings.BrowserLink(new Uri(browser, $"{(imagesets ? "collection" : "comic")}/{id}")) : null,
                     comic.CoverHash is null ? null : PreviewService.CreateLink("comiccompanion", settings.Id, "comics", comic.CoverHash),
-                    imagesets ? LibraryMediaType.Collection : LibraryMediaType.Comic, UpdatedAt: comic.UpdatedAt, ReaderUrl: reader)
+                    imagesets ? LibraryMediaType.Collection : LibraryMediaType.Comic, UpdatedAt: comic.UpdatedAt, ReaderUrl: reader is null ? null : settings.BrowserLink(reader))
                 {
                     ContentCount = imagesets ? comic.ImageCount : comic.PageCount
                 };

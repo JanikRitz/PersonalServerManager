@@ -145,6 +145,20 @@ public sealed class ComicCompanionServiceTests : IDisposable
     }
 
     [Fact]
+    public void ManagedBrowserLinksUseInstancePathAndIgnoreConfiguredBrowserPrefix()
+    {
+        var id = Guid.NewGuid();
+        var settings = new ComicCompanionSettings(new("http://127.0.0.1:5053/"),
+            new("https://reader.example.test/old-path/"), InstallationFolder: _folder) { Id = id };
+        Assert.Equal($"/managed/comiccompanion/{id:D}/", settings.BrowserLink(settings.EffectiveBrowserUrl!).OriginalString);
+        Assert.Equal($"/managed/comiccompanion/{id:D}/read/11/42/1?view=full#page",
+            settings.BrowserLink(new Uri(settings.EffectiveBrowserUrl!, "read/11/42/1?view=full#page")).OriginalString);
+        var external = settings with { InstallationFolder = null };
+        Assert.Equal("https://reader.example.test/old-path/read/11/42/1",
+            external.BrowserLink(new Uri(external.EffectiveBrowserUrl!, "read/11/42/1")).AbsoluteUri);
+    }
+
+    [Fact]
     public void SourceAndPublishedLaunchesUseTheInstallFolderAndProcessLocalSync()
     {
         var project = Path.Combine(_folder, "HydrusComicCompanion.csproj");
@@ -154,6 +168,7 @@ public sealed class ComicCompanionServiceTests : IDisposable
         Assert.Equal(_folder, source.WorkingDirectory);
         Assert.False(source.UseShellExecute);
         Assert.Equal(new[] { "run", "--project", project, "--no-launch-profile", "--", "--urls", "http://127.0.0.1:5053" }, source.ArgumentList);
+        Assert.Equal($"/managed/comiccompanion/{ComicCompanionService.LegacyInstanceId:D}", source.Environment["PSM_COMIC_PATH_BASE"]);
         Assert.False(source.Environment.ContainsKey("PSM_COMIC_SYNC_MINUTES"));
         var lan = ComicCompanionService.CreateStartInfo(settings with { ApiUrl = new("http://192.168.1.20:5053/") });
         Assert.Equal("http://192.168.1.20:5053", lan.ArgumentList[^1]);

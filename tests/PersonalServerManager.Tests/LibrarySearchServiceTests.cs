@@ -25,10 +25,14 @@ public sealed class LibrarySearchServiceTests
             var first = await service.SaveSettingsAsync(new(new("http://api.example.test/catalog"), new("https://reader.example.test/books")));
             var second = await service.SaveSettingsAsync(new(new("http://other-api.example.test/catalog"), new("https://other-reader.example.test/books"))
                 { Id = Guid.NewGuid(), Name = "Other Companion" });
+            File.WriteAllText(Path.Combine(root.FullName, "HydrusComicCompanion.csproj"), "");
+            var managed = await service.SaveSettingsAsync(new(new("http://127.0.0.1:5053/"),
+                new("https://reader.example.test/old-path/"), InstallationFolder: root.FullName)
+                { Id = Guid.NewGuid(), Name = "Managed Companion" });
             var hash = new string('a', 64);
             using var http = new HttpClient(new CatalogHandler(request =>
             {
-                Assert.Equal("/catalog/api/manager/comics", request.RequestUri!.AbsolutePath);
+                Assert.Equal(request.RequestUri!.IsLoopback ? "/api/manager/comics" : "/catalog/api/manager/comics", request.RequestUri.AbsolutePath);
                 var query = QueryHelpers.ParseQuery(request.RequestUri.Query);
                 Assert.Equal("Lara Croft & allies", query["q"].ToString());
                 Assert.Equal("25", query["limit"].ToString());
@@ -54,23 +58,23 @@ public sealed class LibrarySearchServiceTests
             var groups = LibrarySearchService.GroupByType(results);
             var comics = Assert.Single(groups, group => group.Type == LibraryMediaType.Comic);
             var collections = Assert.Single(groups, group => group.Type == LibraryMediaType.Collection);
-            Assert.Equal(4, comics.Items.Count);
-            Assert.Equal(2, collections.Items.Count);
-            foreach (var instance in new[] { first, second })
+            Assert.Equal(6, comics.Items.Count);
+            Assert.Equal(3, collections.Items.Count);
+            foreach (var instance in new[] { first, second, managed })
             {
                 var comic = Assert.Single(comics.Items, entry => entry.Source.InstanceId == instance.Id && entry.Item.Id == "11");
                 var imageset = Assert.Single(collections.Items, entry => entry.Source.InstanceId == instance.Id);
                 Assert.Equal(instance.Name, comic.Source.InstanceName);
                 Assert.Equal(18, comic.Item.ContentCount);
-                Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, "read/11/42/1"), comic.Item.ReaderUrl);
+                Assert.Equal(instance.BrowserLink(new Uri(instance.EffectiveBrowserUrl!, "read/11/42/1")), comic.Item.ReaderUrl);
                 Assert.Equal(7, imageset.Item.ContentCount);
-                Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, $"collection/11/image/{hash}"), imageset.Item.ReaderUrl);
+                Assert.Equal(instance.BrowserLink(new Uri(instance.EffectiveBrowserUrl!, $"collection/11/image/{hash}")), imageset.Item.ReaderUrl);
                 Assert.Null(comic.Item.ItemUrl);
                 Assert.Null(imageset.Item.ItemUrl);
                 Assert.Equal($"/previews/comiccompanion/{instance.Id:D}/comics/{hash}", imageset.Item.PreviewUrl!.OriginalString);
                 var fallback = Assert.Single(comics.Items, entry => entry.Source.InstanceId == instance.Id && entry.Item.Id == "12").Item;
                 Assert.Null(fallback.ReaderUrl);
-                Assert.Equal(new Uri(instance.EffectiveBrowserUrl!, "comic/12"), fallback.ItemUrl);
+                Assert.Equal(instance.BrowserLink(new Uri(instance.EffectiveBrowserUrl!, "comic/12")), fallback.ItemUrl);
             }
         }
         finally

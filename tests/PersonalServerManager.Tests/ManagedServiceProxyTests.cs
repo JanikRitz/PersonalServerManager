@@ -72,6 +72,9 @@ public sealed class ManagedServiceProxyTests
         builder.Services.AddSingleton(serviceProvider => new ManagedCalibreServer(
             Path.Combine(Path.GetTempPath(), $"psm-calibre-{Guid.NewGuid():N}.json"), libraries,
             serviceProvider.GetRequiredService<ILogger<ManagedCalibreServer>>()));
+        builder.Services.AddSingleton(serviceProvider => new ComicCompanionService(
+            Path.Combine(Path.GetTempPath(), $"psm-comic-{Guid.NewGuid():N}.json"),
+            serviceProvider.GetRequiredService<ILogger<ComicCompanionService>>()));
         builder.Services.AddHttpForwarder();
         builder.Services.AddAuthentication("fixture").AddScheme<AuthenticationSchemeOptions, FixtureAuthentication>("fixture", _ => { });
         builder.Services.AddAuthorization();
@@ -137,6 +140,39 @@ public sealed class ManagedServiceProxyTests
         Assert.Equal("managed stash echo", Encoding.UTF8.GetString(echo, 0, echoResult.Count));
         await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", cancellation.Token);
         Assert.Equal(2, Volatile.Read(ref upstreamRequests));
+
+        var comicFolder = Directory.CreateTempSubdirectory("psm-comic-proxy-");
+        try
+        {
+            File.WriteAllText(Path.Combine(comicFolder.FullName, "HydrusComicCompanion.csproj"), "");
+            var comics = app.Services.GetRequiredService<ComicCompanionService>();
+            var managedComic = await comics.SaveSettingsAsync(new(upstreamAddress, InstallationFolder: comicFolder.FullName)
+                { Id = Guid.NewGuid(), Name = "Managed Comic" });
+            var externalComic = await comics.SaveSettingsAsync(new(upstreamAddress)
+                { Id = Guid.NewGuid(), Name = "External Comic" });
+            var comicPath = $"/managed/comiccompanion/{managedComic.Id:D}";
+            http.DefaultRequestHeaders.Remove("X-Fixture-Authorization");
+            using var unauthorizedComic = await http.GetAsync($"{comicPath}/read/1/2/3");
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedComic.StatusCode);
+            http.DefaultRequestHeaders.Add("X-Fixture-Authorization", "yes");
+            using var comicResponse = await http.GetAsync($"{comicPath}/read/1/2/3?x=y");
+            Assert.Equal(HttpStatusCode.OK, comicResponse.StatusCode);
+            var comicRequest = await comicResponse.Content.ReadFromJsonAsync<UpstreamRequest>();
+            Assert.NotNull(comicRequest);
+            Assert.Equal($"{comicPath}/read/1/2/3", comicRequest.Path);
+            Assert.Equal("?x=y", comicRequest.Query);
+            Assert.Equal("", comicRequest.ForwardedPrefix);
+            Assert.DoesNotContain("PersonalServerManager.Auth", comicRequest.Cookie, StringComparison.OrdinalIgnoreCase);
+            using var externalComicResponse = await http.GetAsync($"/managed/comiccompanion/{externalComic.Id:D}/");
+            Assert.Equal(HttpStatusCode.NotFound, externalComicResponse.StatusCode);
+            using var missingComicResponse = await http.GetAsync($"/managed/comiccompanion/{Guid.NewGuid():D}/");
+            Assert.Equal(HttpStatusCode.NotFound, missingComicResponse.StatusCode);
+            Assert.Equal(3, Volatile.Read(ref upstreamRequests));
+        }
+        finally
+        {
+            comicFolder.Delete(recursive: true);
+        }
     }
 
     private sealed record UpstreamRequest(string Path, string Query, string ForwardedPrefix, string Cookie,

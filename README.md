@@ -66,16 +66,18 @@ state. External servers remain under their owner's lifecycle control.
 
 ## Comic Companion
 
-Run the updated HydrusComicCompanion build, then open **Server Management** and
-select **Add Comic Companion instance**. Give each instance a name and an API base
-URL. The optional browser URL controls where results open. Use a URL reachable
-from the browser, especially when accessing the manager from another device.
+Use a HydrusComicCompanion build that supports `PSM_COMIC_PATH_BASE`, then open
+**Server Management** and select **Add Comic Companion instance**. Give each
+instance a name and an API base URL. For external instances, the optional browser
+URL controls where results open and must be reachable from the browser.
 Each instance shows its catalog API status separately from its managed process state.
 
 To let the manager launch your existing installation, select **Managed**,
-select the source checkout or published folder, and use an HTTP URL with a specific
-local IP and port. For LAN access, use the server's LAN IP instead of loopback.
-Stop any independently running copy before starting the managed process.
+select the source checkout or updated published folder, and use an HTTP URL with a
+specific local IP and port. Loopback is recommended: the manager proxies the
+interface and search links through its own authenticated URL and port. Stop any
+independently running copy before starting the managed process, and restart managed
+instances after upgrading so they receive the path-base configuration.
 
 **Automatic sync** is off by default. When enabled for a managed process, it syncs
 at startup and again 60 minutes after each completed run by default. You can also

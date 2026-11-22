@@ -41,7 +41,7 @@
                         }
                         @if (instance.EffectiveBrowserUrl is { } browser)
                         {
-                            <MudIconButton Icon="@Icons.Material.Filled.OpenInNew" Href="@browser.AbsoluteUri" Target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="@($"Open {instance.Name}")" Size="Size.Small" />
+                            <MudIconButton Icon="@Icons.Material.Filled.OpenInNew" Href="@instance.BrowserLink(browser).ToString()" Target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="@($"Open {instance.Name}")" Size="Size.Small" />
                         }
                         <MudIconButton Icon="@Icons.Material.Filled.Edit" title="Edit" aria-label="@($"Edit {instance.Name}")" Disabled="@(_busy || status.IsRunning)" OnClick="() => OpenEditor(instance)" Size="Size.Small" />
                         <MudIconButton Icon="@Icons.Material.Filled.DeleteOutline" title="Remove" aria-label="@($"Remove {instance.Name}")" Color="Color.Error" Disabled="@(_busy || status.IsRunning)" OnClick="() => RemoveAsync(instance)" Size="Size.Small" />
