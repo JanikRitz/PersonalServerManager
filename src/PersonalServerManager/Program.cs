@@ -17,6 +17,12 @@ using PersonalServerManager.Feeds;
 using Yarp.ReverseProxy.Forwarder;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>(
+    category: null,
+    level: LogLevel.Warning);
+builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>(
+    category: "Microsoft.Hosting.Lifetime",
+    level: LogLevel.Information);
 var allowInsecureHttp = builder.Configuration.GetValue<bool>("NetworkAccess:AllowInsecureHttp");
 
 // Add MudBlazor services
@@ -57,6 +63,7 @@ if (!OperatingSystem.IsWindows())
 }
 
 builder.Services.AddDataProtection()
+    .SetApplicationName("PersonalServerManager")
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(dataDirectory, "keys")))
     .ProtectKeysWithDpapi();
 builder.Services.AddSingleton<IStashInstanceStore>(services => new JsonStashInstanceStore(
