@@ -647,6 +647,53 @@ public sealed class LocalLibraryClientTests : IDisposable
         await Assert.ThrowsAsync<InvalidDataException>(() => _client.OpenCoverAsync(instance, "1"));
     }
 
+    [Fact]
+    public async Task CalibreInstanceWithAdditionalFoldersSearchesAndServesEveryFolder()
+    {
+        await CreateDatabaseAsync();
+        var second = Directory.CreateDirectory(Path.Combine(_root, "Second")).FullName;
+        File.Copy(Path.Combine(_root, "metadata.db"), Path.Combine(second, "metadata.db"));
+        var book = Directory.CreateDirectory(Path.Combine(second, "Writer", "Fixture (1)")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(book, "fixture.epub"), "second epub");
+        await File.WriteAllBytesAsync(Path.Combine(book, "cover.jpg"), [255, 216, 255, 217]);
+        var instance = Instance(LocalLibraryKind.Calibre) with { AdditionalRootPaths = [second] };
+
+        var items = await _client.SearchAsync(instance, "fixture", 25);
+        Assert.Equal(new[] { "1", "1~1" }, items.Select(item => item.Id));
+        Assert.Equal($"/libraries/{instance.Id:D}/covers/1~1", items[1].PreviewUrl!.ToString());
+        Assert.Equal("1~1", Assert.Single(await _client.SearchAsync(instance, "fixture", 1, offset: 1)).Id);
+        await using (var file = await _client.OpenItemAsync(instance, "1~1"))
+        {
+            Assert.NotNull(file);
+            using var reader = new StreamReader(file.Content);
+            Assert.Equal("second epub", await reader.ReadToEndAsync());
+        }
+        await using (var cover = await _client.OpenCoverAsync(instance, "1~1")) Assert.NotNull(cover);
+        foreach (var invalid in new[] { "0~1", "2~1", "x~1", "~1", "1~" })
+        {
+            Assert.Null(await _client.OpenItemAsync(instance, invalid));
+            Assert.Null(await _client.OpenCoverAsync(instance, invalid));
+        }
+        Assert.Null(await _client.OpenItemAsync(instance with { AdditionalRootPaths = null }, "1~1"));
+    }
+
+    [Fact]
+    public async Task StoreRejectsInvalidAdditionalCalibreFolders()
+    {
+        var store = new JsonLocalLibraryStore(Path.Combine(_root, "instances.json"));
+        var first = Directory.CreateDirectory(Path.Combine(_root, "Books")).FullName;
+        var sameName = Directory.CreateDirectory(Path.Combine(_root, "nested", "Books")).FullName;
+        var other = Directory.CreateDirectory(Path.Combine(_root, "Comics")).FullName;
+        var calibre = new LocalLibraryInstance(Guid.NewGuid(), "Calibre", first, LocalLibraryKind.Calibre);
+        await store.SaveAsync(calibre with { AdditionalRootPaths = [other] });
+        Assert.Equal(new[] { other }, Assert.Single(await store.GetAllAsync()).AdditionalRootPaths);
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(calibre with { AdditionalRootPaths = [sameName] }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(calibre with { AdditionalRootPaths = [first] }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(calibre with { AdditionalRootPaths = ["relative"] }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(
+            calibre with { Kind = LocalLibraryKind.Notes, AdditionalRootPaths = [other] }));
+    }
+
     private static void CreateJunction(string link, string destination)
     {
         var start = new ProcessStartInfo("cmd.exe", $"/d /c mklink /J \"{link}\" \"{destination}\"")

@@ -39,7 +39,7 @@
                     <strong>@instance.Name</strong>
                     <span class="instance-kind">@KindLabel(instance.Kind)</span>
                     <span class="instance-status" role="status">@_availability.GetValueOrDefault(instance.Id, "Unavailable")</span>
-                    <small class="root-path">@(instance.IsExternal ? instance.ContentServerUrl?.AbsoluteUri : instance.RootPath)</small>
+                    <small class="root-path">@(instance.IsExternal ? instance.ContentServerUrl?.AbsoluteUri : string.Join(" · ", instance.RootPaths))</small>
                     @if (instance.IsManaged)
                     {
                         <span class="managed-badge" role="status">Managed · @status.Message · Port @instance.ManagedPort</span>
@@ -140,6 +140,9 @@
                         }
                         @if (_draftKind != LocalLibraryKind.Notes && !_draftExternal)
                         {
+                            <label for="@FieldId("additional-paths")">Additional Calibre library folders (optional, one per line)</label>
+                            <textarea id="@FieldId("additional-paths")" @bind="_draftAdditionalPaths" rows="3" placeholder="M:\CALIBRE\Comics" spellcheck="false" autocomplete="off"></textarea>
+                            <small class="field-hint">Folders listed here are served by the same Calibre server, which lets you switch between them. Add separate libraries instead to run them independently.</small>
                             <label for="@FieldId("port")">Loopback port</label>
                             <input id="@FieldId("port")" type="number" min="1024" max="65535" required @bind="_draftPort" />
                             <label for="@FieldId("installation")">Calibre installation folder (optional)</label>
@@ -197,6 +200,7 @@
     private IReadOnlyList<PersonalServerManager.Hydrus.HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<PersonalServerManager.Stash.StashInstance> _stashInstances = [];
     private string? _draftInstallation;
+    private string? _draftAdditionalPaths;
     private bool _calibreBusy;
 
     private string FieldId(string suffix) => $"{_id}-{suffix}";
@@ -304,7 +308,8 @@
         _availability.Clear();
         foreach (var instance in _instances)
         {
-            _availability[instance.Id] = instance.IsExternal ? "External" : ValidateRoot(instance.RootPath, instance.Kind) ?? "Available";
+            _availability[instance.Id] = instance.IsExternal ? "External" :
+                instance.RootPaths.Select(path => ValidateRoot(path, instance.Kind)).FirstOrDefault(error => error is not null) ?? "Available";
         }
     }
 
@@ -356,6 +361,7 @@
         _draftHydrusId = _draftStashId = null;
         _draftPort = 8080;
         _draftInstallation = null;
+        _draftAdditionalPaths = null;
         OpenEditor();
     }
 
@@ -382,6 +388,7 @@
         _draftPort = instance.ManagedPort;
         _draftAutostart = instance.StartWithApp;
         _draftInstallation = instance.CalibreInstallationFolder;
+        _draftAdditionalPaths = instance.AdditionalRootPaths is { Count: > 0 } additional ? string.Join(Environment.NewLine, additional) : null;
         _draftAutoGitPull = instance.AutoGitPull;
         _draftHydrusId = instance.HydrusInstanceId;
         _draftStashId = instance.StashInstanceId;
@@ -468,6 +475,32 @@
             return;
         }
 
+        string[]? additionalPaths = null;
+        if (_draftKind != LocalLibraryKind.Notes && !external && !string.IsNullOrWhiteSpace(_draftAdditionalPaths))
+        {
+            additionalPaths = _draftAdditionalPaths.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (additionalPaths.Length > LocalLibraryInstance.MaximumAdditionalRootPaths)
+            {
+                _editorError = $"Enter at most {LocalLibraryInstance.MaximumAdditionalRootPaths} additional folders.";
+                return;
+            }
+            foreach (var additional in additionalPaths)
+            {
+                if (ValidateRoot(additional, _draftKind) is { } error)
+                {
+                    _editorError = $"{additional}: {error}";
+                    return;
+                }
+            }
+            additionalPaths = additionalPaths.Select(Path.GetFullPath).ToArray();
+            var all = additionalPaths.Prepend(Path.GetFullPath(path)).Select(Path.TrimEndingDirectorySeparator).ToArray();
+            if (all.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() != all.Length)
+            {
+                _editorError = "Each Calibre folder in one library must have a distinct folder name.";
+                return;
+            }
+        }
+
         Uri? serverUrl = null;
         string? serverLibrary = null;
         if (_draftKind != LocalLibraryKind.Notes)
@@ -485,7 +518,8 @@
             _draftPort, _draftAutostart, string.IsNullOrWhiteSpace(_draftInstallation) ? null : _draftInstallation.Trim(),
             _draftKind == LocalLibraryKind.Notes && _draftAutoGitPull,
             _draftKind == LocalLibraryKind.Notes ? _draftHydrusId : null,
-            _draftKind == LocalLibraryKind.Notes ? _draftStashId : null);
+            _draftKind == LocalLibraryKind.Notes ? _draftStashId : null,
+            additionalPaths is { Length: > 0 } ? additionalPaths : null);
         if (!instance.HasValidReaderConfiguration())
         {
             _editorError = "Enter both a Content Server library ID and an HTTP or HTTPS URL without credentials, a query, or a fragment.";

@@ -5,11 +5,18 @@ public enum LocalLibraryKind { Notes, CalibreText, CalibreComic, Calibre }
 public sealed record LocalLibraryInstance(Guid Id, string Name, string RootPath, LocalLibraryKind Kind,
     Uri? ContentServerUrl = null, string? ContentServerLibraryId = null,
     int ManagedPort = 8080, bool StartWithApp = false, string? CalibreInstallationFolder = null,
-    bool AutoGitPull = false, Guid? HydrusInstanceId = null, Guid? StashInstanceId = null)
+    bool AutoGitPull = false, Guid? HydrusInstanceId = null, Guid? StashInstanceId = null,
+    IReadOnlyList<string>? AdditionalRootPaths = null)
 {
+    public const int MaximumAdditionalRootPaths = 20;
+
     public bool IsCalibre => Kind is LocalLibraryKind.Calibre or LocalLibraryKind.CalibreText or LocalLibraryKind.CalibreComic;
     public bool IsExternal => IsCalibre && string.IsNullOrWhiteSpace(RootPath) && ContentServerUrl is not null;
     public bool IsManaged => IsCalibre && !string.IsNullOrWhiteSpace(RootPath) && ContentServerUrl is null;
+
+    /// <summary>All library folders of this instance; index 0 is <see cref="RootPath"/>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<string> RootPaths => [RootPath, .. AdditionalRootPaths ?? []];
 
     public bool HasValidReaderConfiguration() =>
         ContentServerUrl is null && ContentServerLibraryId is null ||

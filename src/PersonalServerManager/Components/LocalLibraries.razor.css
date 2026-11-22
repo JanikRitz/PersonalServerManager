@@ -48,13 +48,15 @@ h3 { font-size: 20px; }
 .editor-heading { margin-bottom: 18px; }
 fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 label { display: block; margin: 16px 0 6px; font-size: 13px; font-weight: 600; }
-input, select { display: block; width: 100%; min-width: 0; min-height: 42px; padding: 9px 10px; border: 1px solid var(--line, #9aafa8); border-radius: 4px; background: var(--paper, #fff); color: var(--ink, #172a2a); font: inherit; }
-input::placeholder { color: var(--muted, #526763); opacity: 1; }
+input, select, textarea { display: block; width: 100%; min-width: 0; min-height: 42px; padding: 9px 10px; border: 1px solid var(--line, #9aafa8); border-radius: 4px; background: var(--paper, #fff); color: var(--ink, #172a2a); font: inherit; }
+textarea { resize: vertical; }
+.field-hint { display: block; margin-top: 4px; color: var(--muted, #526763); font-size: 12px; }
+input::placeholder, textarea::placeholder { color: var(--muted, #526763); opacity: 1; }
 select option { background: var(--panel, #fff); color: var(--ink, #172a2a); }
 .editor-actions { justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 .cancel-button, .save-button { min-height: 40px; max-width: 100%; padding: 8px 14px; border: 1px solid var(--line, #d7dfd9); border-radius: 4px; background: var(--panel, #fff); color: var(--teal, #176d62); font: inherit; font-weight: 600; overflow-wrap: anywhere; cursor: pointer; }
 .save-button { border-color: var(--teal, #176d62); background: var(--teal, #176d62); color: var(--panel, #fff); }
-button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--teal, #176d62); outline-offset: 3px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--teal, #176d62); outline-offset: 3px; }
 button:disabled, button[aria-disabled="true"], fieldset:disabled button { cursor: wait; opacity: .6; }
 .focus-guard { position: absolute; width: 1px; height: 1px; overflow: hidden; }
 

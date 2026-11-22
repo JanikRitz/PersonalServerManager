@@ -74,6 +74,46 @@ public sealed class ManagedCalibreTests : IDisposable
     }
 
     [Fact]
+    public async Task InstanceWithAdditionalFoldersServesThemFromOneProcess()
+    {
+        var store = new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"));
+        await File.WriteAllTextAsync(Path.Combine(_root, "calibre-server.exe"), "fixture");
+        var first = await LibraryAsync(store, "first", FreePort(), _root);
+        var second = await LibraryAsync(store, "second", FreePort(), _root);
+        await store.RemoveAsync(second.Id);
+        var combined = first with { AdditionalRootPaths = [second.RootPath] };
+        await store.SaveAsync(combined);
+        var overlapping = second with { Id = Guid.NewGuid() };
+        await store.SaveAsync(overlapping);
+        var starts = new List<ProcessStartInfo>();
+        using var http = new HttpClient(new CombinedReadyHandler());
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
+            NullLogger<ManagedCalibreServer>.Instance, http, start => { starts.Add(start); return StandInProcess(); });
+        try
+        {
+            await server.StartServerAsync(combined.Id);
+            var start = Assert.Single(starts);
+            Assert.Contains(first.RootPath, start.ArgumentList);
+            Assert.Contains(second.RootPath, start.ArgumentList);
+            Assert.Equal("first-id", server.WithReaderConnection(combined).ContentServerLibraryId);
+            Assert.Equal("second-id", server.WithReaderConnection(combined, 1).ContentServerLibraryId);
+            Assert.Null(server.WithReaderConnection(combined, 2).ContentServerUrl);
+            Assert.Null(server.WithReaderConnection(first).ContentServerUrl);
+            await server.StartServerAsync(overlapping.Id);
+            Assert.Contains("already has a managed server", server.GetStatus(overlapping.Id).Message);
+            Assert.Single(starts);
+        }
+        finally { await server.StopServerAsync(); }
+    }
+
+    private sealed class CombinedReadyHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("{\"library_map\":{\"first-id\":\"first\",\"second-id\":\"second\"}}") });
+    }
+
+    [Fact]
     public async Task OnlyExplicitlyEnabledManagedLibrariesStartWithApp()
     {
         var store = new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"));

@@ -50,17 +50,57 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             return await SearchNotesAsync(instance, root, query.Trim(), limit, cancellationToken, offset, sort);
         try
         {
-            var results = await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance) ?? instance,
-                root, query.Trim(), limit, cancellationToken, offset, sort);
-            return instance.IsManaged
-                ? results.Select(item => item.ReaderUrl is null ? item : item with
-                    { ReaderUrl = new Uri(item.ReaderUrl.PathAndQuery + item.ReaderUrl.Fragment, UriKind.Relative) }).ToArray()
-                : results;
+            var roots = instance.RootPaths;
+            if (roots.Count == 1)
+                return ToRelativeReaders(instance, await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance) ?? instance,
+                    root, query.Trim(), limit, cancellationToken, offset, sort));
+            var folders = new List<IReadOnlyList<LibraryItem>>();
+            for (var folder = 0; folder < roots.Count; folder++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    folders.Add(await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance, folder) ?? instance,
+                        folder == 0 ? root : LocalLibraryPaths.Root(roots[folder]), query.Trim(), offset + limit, cancellationToken, 0, sort,
+                        FolderPrefix(folder)));
+                }
+                catch (Exception exception) when (folder > 0 && (IsFileFailure(exception) || exception is SqliteException) &&
+                    !cancellationToken.IsCancellationRequested)
+                {
+                }
+            }
+            // Interleave folders so the default order does not hide later folders behind the first one.
+            var items = Enumerable.Range(0, folders.Max(results => results.Count))
+                .SelectMany(index => folders.Where(results => index < results.Count).Select(results => results[index])).ToArray();
+            var merged = sort == LibrarySort.Default ? items : LibrarySearchService.SortItems(items, sort);
+            return ToRelativeReaders(instance, merged.Skip(offset).Take(limit).ToArray());
         }
         catch (SqliteException) when (cancellationToken.IsCancellationRequested)
         {
             throw new OperationCanceledException(cancellationToken);
         }
+    }
+
+    private static IReadOnlyList<LibraryItem> ToRelativeReaders(LocalLibraryInstance instance, IReadOnlyList<LibraryItem> results) =>
+        instance.IsManaged
+            ? results.Select(item => item.ReaderUrl is null ? item : item with
+                { ReaderUrl = new Uri(item.ReaderUrl.PathAndQuery + item.ReaderUrl.Fragment, UriKind.Relative) }).ToArray()
+            : results;
+
+    private static string FolderPrefix(int folder) => folder == 0 ? "" : folder.ToString(CultureInfo.InvariantCulture) + "~";
+
+    /// <summary>Splits an optional "{folder}~" prefix from a Calibre item or cover ID and resolves that folder's root.</summary>
+    private static bool TryFolder(LocalLibraryInstance instance, string value, out string root, out string id)
+    {
+        root = "";
+        id = value;
+        var folder = 0;
+        var separator = value.IndexOf('~');
+        if (separator >= 0 && (!int.TryParse(value.AsSpan(0, separator), NumberStyles.None, CultureInfo.InvariantCulture, out folder)
+            || folder < 1 || folder >= instance.RootPaths.Count)) return false;
+        id = value[(separator + 1)..];
+        root = LocalLibraryPaths.Root(instance.RootPaths[folder]);
+        return true;
     }
 
     public async Task<LocalLibraryFile?> OpenItemAsync(LocalLibraryInstance instance, string itemId,
@@ -83,7 +123,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             return null;
         }
 
-        if (!instance.IsCalibre || !TryItemId(itemId, out var bookId, out var requestedFormat)) return null;
+        if (!instance.IsCalibre || !TryFolder(instance, itemId, out root, out itemId) || !TryItemId(itemId, out var bookId, out var requestedFormat)) return null;
         await using var database = await OpenDatabaseAsync(root, cancellationToken);
         var connection = database.Connection;
         using var command = connection.CreateCommand();
@@ -108,10 +148,10 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!instance.IsCalibre
-            || !TryBookId(bookId, out var numericId)) return null;
-        if (instance.IsExternal) return await OpenRemoteFileAsync(instance, numericId, "cover", cancellationToken);
-        var root = LocalLibraryPaths.Root(instance.RootPath);
+        if (!instance.IsCalibre) return null;
+        if (instance.IsExternal)
+            return TryBookId(bookId, out var remoteId) ? await OpenRemoteFileAsync(instance, remoteId, "cover", cancellationToken) : null;
+        if (!TryFolder(instance, bookId, out var root, out bookId) || !TryBookId(bookId, out var numericId)) return null;
         await using var database = await OpenDatabaseAsync(root, cancellationToken);
         var connection = database.Connection;
         using var command = connection.CreateCommand();
@@ -446,7 +486,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
     }
 
     private static async Task<IReadOnlyList<LibraryItem>> SearchCalibreAsync(LocalLibraryInstance instance, string root,
-        string query, int limit, CancellationToken cancellationToken, int offset, LibrarySort sort)
+        string query, int limit, CancellationToken cancellationToken, int offset, LibrarySort sort, string idPrefix = "")
     {
         await using var database = await OpenDatabaseAsync(root, cancellationToken);
         var connection = database.Connection;
@@ -512,7 +552,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             {
                 var coverPath = LocalLibraryPaths.Resolve(root, bookPath, "cover.jpg");
                 if (new FileInfo(coverPath).Length <= 5 * 1024 * 1024)
-                    coverUrl = new Uri($"/libraries/{instance.Id:D}/covers/{id}", UriKind.Relative);
+                    coverUrl = new Uri($"/libraries/{instance.Id:D}/covers/{idPrefix}{id}", UriKind.Relative);
             }
             catch (Exception exception) when (IsFileFailure(exception))
             {
@@ -524,7 +564,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             {
                 if (offset > 0) { offset--; continue; }
                 var comicItem = ComicFormats.Contains(file!.Value.Format);
-                var itemId = CategoryItemId(instance, id, file.Value.Format, ebook is not null && comic is not null);
+                var itemId = idPrefix + CategoryItemId(instance, id, file.Value.Format, ebook is not null && comic is not null);
                 items.Add(new LibraryItem(itemId, string.IsNullOrWhiteSpace(title) ? bookPath : title, reader.GetString(3), ItemUrl(instance.Id, itemId), coverUrl,
                 comicItem ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                 Description: reader.IsDBNull(4) ? null : NormalizeDescription(reader.GetString(4)),

@@ -18,7 +18,7 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
     : BackgroundService
 {
     private sealed record LibraryInfo([property: JsonPropertyName("library_map")] Dictionary<string, string>? LibraryMap);
-    private sealed record RunningServer(Process Process, Uri Url, string Root, string LibraryId);
+    private sealed record RunningServer(Process Process, Uri Url, IReadOnlyList<string> Roots, IReadOnlyList<string> LibraryIds);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -39,11 +39,13 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
             : IsAlive(running.Process) ? new("Running", running.Url, true) : new("Calibre exited unexpectedly.")
         : new(_messages.GetValueOrDefault(id, "Stopped"));
 
-    public LocalLibraryInstance WithReaderConnection(LocalLibraryInstance instance) =>
+    /// <summary>Returns the instance connected to its running server, using the Calibre library ID of folder <paramref name="folder"/>.</summary>
+    public LocalLibraryInstance WithReaderConnection(LocalLibraryInstance instance, int folder = 0) =>
         instance.IsManaged && _messages.GetValueOrDefault(instance.Id) == "Running" &&
         _running.TryGetValue(instance.Id, out var running) && IsAlive(running.Process) &&
-        string.Equals(running.Root, LocalLibraryPaths.NormalizeRoot(instance.RootPath), StringComparison.OrdinalIgnoreCase)
-            ? instance with { ContentServerUrl = running.Url, ContentServerLibraryId = running.LibraryId }
+        folder >= 0 && folder < running.LibraryIds.Count &&
+        running.Roots.SequenceEqual(instance.RootPaths.Select(LocalLibraryPaths.NormalizeRoot), StringComparer.OrdinalIgnoreCase)
+            ? instance with { ContentServerUrl = running.Url, ContentServerLibraryId = running.LibraryIds[folder] }
             : instance;
 
     public async Task<ManagedCalibreSettings> GetSettingsAsync(CancellationToken token = default)
@@ -107,9 +109,9 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
             if (_running.TryGetValue(library.Id, out var owned) && IsAlive(owned.Process)) return;
             if (_running.TryRemove(library.Id, out var previous)) previous.Process.Dispose();
             Validate(new(library.ManagedPort));
-            var roots = new[] { LocalLibraryPaths.Root(library.RootPath) };
+            var roots = library.RootPaths.Select(LocalLibraryPaths.Root).ToArray();
             if (_running.Values.Any(running => IsAlive(running.Process) &&
-                string.Equals(running.Root, roots[0], StringComparison.OrdinalIgnoreCase)))
+                running.Roots.Intersect(roots, StringComparer.OrdinalIgnoreCase).Any()))
                 throw new InvalidDataException("This Calibre library already has a managed server.");
             if (roots.Any(root => !File.Exists(LocalLibraryPaths.Resolve(root, "metadata.db"))))
                 throw new InvalidDataException("Every managed Calibre library must contain metadata.db.");
@@ -137,10 +139,10 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
                 ?? throw new InvalidDataException("Calibre could not be launched.");
 
             var url = new Uri($"http://127.0.0.1:{library.ManagedPort}/managed/calibre/{library.Id:D}/");
-            _running[library.Id] = new(process, url, roots[0], "");
+            _running[library.Id] = new(process, url, roots, []);
             var ready = await WaitForLibrariesAsync(process, url, roots, token);
             token.ThrowIfCancellationRequested();
-            _running[library.Id] = new(process, url, roots[0], ready[roots[0]]);
+            _running[library.Id] = new(process, url, roots, roots.Select(root => ready[root]).ToArray());
             _messages[library.Id] = "Running";
             process = null;
         }

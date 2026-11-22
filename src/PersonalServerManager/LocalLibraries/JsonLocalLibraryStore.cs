@@ -109,6 +109,16 @@ public sealed class JsonLocalLibraryStore(string filePath) : ILocalLibraryStore
             throw new InvalidDataException("Invalid per-library settings.");
         if (!instance.IsExternal) LocalLibraryPaths.NormalizeRoot(instance.RootPath);
         if (instance.CalibreInstallationFolder is not null) LocalLibraryPaths.NormalizeRoot(instance.CalibreInstallationFolder);
+        if (instance.AdditionalRootPaths is { } additional)
+        {
+            if (!instance.IsManaged || additional.Count > LocalLibraryInstance.MaximumAdditionalRootPaths
+                || additional.Any(path => string.IsNullOrWhiteSpace(path) || path.Any(char.IsControl)))
+                throw new InvalidDataException("Invalid additional Calibre library folders.");
+            var roots = instance.RootPaths.Select(LocalLibraryPaths.NormalizeRoot).ToArray();
+            if (roots.Distinct(StringComparer.OrdinalIgnoreCase).Count() != roots.Length
+                || roots.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() != roots.Length)
+                throw new InvalidDataException("Calibre library folders in one instance must have distinct folder names.");
+        }
     }
 
     private async Task WriteAsync(List<LocalLibraryInstance> stored, CancellationToken cancellationToken)
