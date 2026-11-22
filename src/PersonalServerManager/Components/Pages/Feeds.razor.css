@@ -199,6 +199,9 @@
     align-items: center;
     gap: 10px;
 }
+.action-rail.has-scrubber {
+    bottom: calc(30px + env(safe-area-inset-bottom, 0px));
+}
 .rail-btn {
     display: flex;
     flex-direction: column;
@@ -233,6 +236,102 @@
     gap: 6px;
     max-width: 680px;
     cursor: pointer;
+}
+.info-overlay.has-scrubber {
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+}
+
+.video-scrubber {
+    --progress: 0%;
+    --buffered: 0%;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: env(safe-area-inset-bottom, 0px);
+    z-index: 32;
+    height: 28px;
+    display: flex;
+    align-items: flex-end;
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.video-scrubber:focus { outline: none; }
+.video-scrubber:focus-visible .scrubber-track { outline: 2px solid var(--teal); outline-offset: 2px; }
+
+.scrubber-track {
+    position: relative;
+    width: 100%;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.28);
+    transition: height 120ms ease;
+}
+.video-scrubber.is-paused .scrubber-track,
+.video-scrubber.is-scrubbing .scrubber-track,
+.video-scrubber:hover .scrubber-track {
+    height: 5px;
+}
+
+.scrubber-buffered {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--buffered);
+    background: rgba(255, 255, 255, 0.42);
+    pointer-events: none;
+}
+
+.scrubber-fill {
+    position: relative;
+    height: 100%;
+    width: var(--progress);
+    background: #ff2846;
+    pointer-events: none;
+}
+
+.scrubber-handle {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: #ff2846;
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+    transform: translate(50%, -50%) scale(0);
+    opacity: 0;
+    transition: transform 120ms ease, opacity 120ms ease;
+    pointer-events: none;
+}
+.video-scrubber.is-paused .scrubber-handle,
+.video-scrubber.is-scrubbing .scrubber-handle,
+.video-scrubber:focus-visible .scrubber-handle {
+    transform: translate(50%, -50%) scale(1);
+    opacity: 1;
+}
+.video-scrubber.is-scrubbing .scrubber-handle {
+    transform: translate(50%, -50%) scale(1.18);
+}
+
+.scrubber-time {
+    position: absolute;
+    left: clamp(46px, var(--progress), calc(100% - 46px));
+    bottom: 18px;
+    transform: translateX(-50%);
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(7, 11, 13, 0.84);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    color: #fff;
+    font: 700 11px/1.2 "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease;
+}
+.video-scrubber.is-scrubbing .scrubber-time {
+    opacity: 1;
 }
 .badge-row {
     display: flex;

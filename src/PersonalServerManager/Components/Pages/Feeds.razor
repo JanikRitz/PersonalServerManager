@@ -139,7 +139,7 @@
 
             <div class="bottom-scrim" aria-hidden="true"></div>
 
-            <aside class="action-rail" aria-label="Media controls" data-no-swipe="true">
+            <aside class="action-rail @(activeIsVideo ? "has-scrubber" : "")" aria-label="Media controls" data-no-swipe="true">
                 @if (activeIsVideo)
                 {
                     <button class="rail-btn" type="button"
@@ -180,7 +180,7 @@
                 </button>
             </aside>
 
-            <section class="info-overlay" aria-label="Item details" data-no-swipe="true" @onclick="() => _expandedInfo = !_expandedInfo">
+            <section class="info-overlay @(activeIsVideo ? "has-scrubber" : "")" aria-label="Item details" data-no-swipe="true" @onclick="() => _expandedInfo = !_expandedInfo">
                 <div class="badge-row">
                     <span class="info-badge source">@item.SourceName</span>
                     @if (!string.IsNullOrWhiteSpace(item.MediaKind))
@@ -214,6 +214,28 @@
                     <span class="end-pill">Loading more...</span>
                 }
             </section>
+
+            @if (activeIsVideo)
+            {
+                <div @ref="_scrubberElement"
+                     @key="(_activeId, _index, useFallback)"
+                     class="video-scrubber @(_paused ? "is-paused" : "")"
+                     role="slider"
+                     tabindex="0"
+                     aria-label="Video progress"
+                     aria-valuemin="0"
+                     aria-valuemax="100"
+                     aria-valuenow="0"
+                     data-no-swipe="true">
+                    <span class="scrubber-time" aria-hidden="true">0:00</span>
+                    <div class="scrubber-track" aria-hidden="true">
+                        <div class="scrubber-buffered"></div>
+                        <div class="scrubber-fill">
+                            <span class="scrubber-handle"></span>
+                        </div>
+                    </div>
+                </div>
+            }
         }
         else if (_loading || !_interactive)
         {
@@ -251,8 +273,8 @@
     private string? _error;
     private int _index, _generation;
     private bool _loaded, _interactive, _loading, _hasMore, _disposed, _mediaError, _useFallback, _muted = true, _paused, _expandedInfo, _errorsDismissed;
-    private ElementReference _videoElement;
-    private string? _syncedVideoKey;
+    private ElementReference _videoElement, _scrubberElement;
+    private string? _syncedVideoKey, _preloadKey;
     private IJSObjectReference? _gestureModule, _gestureListener;
     private DotNetObjectReference<Feeds>? _gestureTarget;
 
@@ -323,13 +345,25 @@
             if (activeIsVideo && _syncedVideoKey != key)
             {
                 _syncedVideoKey = key;
-                try { await _gestureModule.InvokeAsync<bool>("syncVideo", _videoElement, _muted); }
+                try { await _gestureModule.InvokeAsync<bool>("syncVideo", _videoElement, _scrubberElement, _muted); }
                 catch (JSException) { }
                 catch (JSDisconnectedException) { }
             }
-            else if (!activeIsVideo)
+            else if (!activeIsVideo && _syncedVideoKey is not null)
             {
                 _syncedVideoKey = null;
+                try { await _gestureModule.InvokeVoidAsync("clearScrubber"); }
+                catch (JSException) { }
+                catch (JSDisconnectedException) { }
+            }
+
+            var preloadKey = $"{_activeId}:{_index}:{_items.Count}";
+            if (_preloadKey != preloadKey)
+            {
+                _preloadKey = preloadKey;
+                try { await _gestureModule.InvokeVoidAsync("preloadMedia", BuildPreloadTargets()); }
+                catch (JSException) { }
+                catch (JSDisconnectedException) { }
             }
         }
     }
@@ -358,6 +392,7 @@
         _expandedInfo = false;
         _errorsDismissed = false;
         _syncedVideoKey = null;
+        _preloadKey = null;
         _index = 0;
     }
 
@@ -370,6 +405,10 @@
             _session = FeedService.Start(feed);
             _hasMore = true;
             await LoadNextAsync();
+            if (!_disposed && _items.Count > 0 && _index + 5 >= _items.Count && _hasMore && !_loading)
+            {
+                _ = LoadNextInBackgroundAsync(_generation);
+            }
         }
         catch (Exception exception)
         {
@@ -443,8 +482,29 @@
             ResetItemState();
             StateHasChanged();
         }
-        if (_index + 3 >= _items.Count && _hasMore && !_loading) _ = LoadNextInBackgroundAsync(generation);
+        if (_index + 5 >= _items.Count && _hasMore && !_loading) _ = LoadNextInBackgroundAsync(generation);
     }
+
+    private IReadOnlyList<PreloadTarget> BuildPreloadTargets()
+    {
+        var targets = new List<PreloadTarget>(4);
+        AddPreloadTarget(targets, _index + 1, fullPreload: true);
+        AddPreloadTarget(targets, _index + 2, fullPreload: false);
+        AddPreloadTarget(targets, _index + 3, fullPreload: false);
+        AddPreloadTarget(targets, _index - 1, fullPreload: false);
+        return targets;
+    }
+
+    private void AddPreloadTarget(List<PreloadTarget> targets, int itemIndex, bool fullPreload)
+    {
+        if (itemIndex < 0 || itemIndex >= _items.Count) return;
+        var item = _items[itemIndex];
+        var mediaUrl = item.MediaUrl.ToString();
+        if (string.IsNullOrWhiteSpace(mediaUrl)) return;
+        targets.Add(new PreloadTarget(mediaUrl, item.IsVideo, fullPreload, item.PosterUrl?.ToString()));
+    }
+
+    private sealed record PreloadTarget(string Url, bool IsVideo, bool FullPreload, string? PosterUrl);
 
     private async Task LoadNextInBackgroundAsync(int generation)
     {
