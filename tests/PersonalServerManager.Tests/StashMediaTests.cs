@@ -195,11 +195,35 @@ public sealed class StashMediaTests
         builder.Services.AddHttpClient<StashMedia>();
         using var app = builder.Build();
         app.MapStashMediaEndpoints();
-        var endpoint = Assert.Single(((IEndpointRouteBuilder)app).DataSources.SelectMany(source => source.Endpoints));
-        Assert.NotNull(endpoint.Metadata.GetMetadata<IAuthorizeData>());
+        var endpoints = ((IEndpointRouteBuilder)app).DataSources.SelectMany(source => source.Endpoints).ToArray();
+        Assert.Equal(2, endpoints.Length);
+        Assert.All(endpoints, endpoint => Assert.NotNull(endpoint.Metadata.GetMetadata<IAuthorizeData>()));
         using var handler = Assert.IsType<SocketsHttpHandler>(StashMedia.CreateHttpHandler());
         Assert.False(handler.AllowAutoRedirect);
         Assert.False(handler.UseCookies);
+    }
+
+    [Theory]
+    [InlineData("image-previews", 12, null, "image/12/preview", "image/webp")]
+    [InlineData("scene-previews", 12, null, "scene/12/preview", "video/mp4")]
+    [InlineData("scene-webp", 12, null, "scene/12/webp", "image/webp")]
+    [InlineData("markers", 42, 9L, "scene/9/scene_marker/42/stream", "video/mp4")]
+    [InlineData("marker-previews", 42, 9L, "scene/9/scene_marker/42/preview", "image/webp")]
+    public async Task ServesPreviewAndMarkerEndpoints(string kind, long id, long? sceneId, string expectedPath, string mime)
+    {
+        Uri? requested = null;
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            requested = request.RequestUri;
+            return Media(HttpStatusCode.OK, mime, [1, 2, 3]);
+        }));
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+        await new StashMedia(client, new Store()).ServeAsync(InstanceId, kind, id, sceneId, context);
+
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.Equal(mime, context.Response.ContentType);
+        Assert.Equal($"https://stash.example/prefix/{expectedPath}", requested?.AbsoluteUri);
     }
 
     private static async Task<DefaultHttpContext> ServeAsync(Func<HttpRequestMessage, HttpResponseMessage> respond,

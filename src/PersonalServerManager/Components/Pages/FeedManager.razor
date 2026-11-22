@@ -1,0 +1,370 @@
+@page "/feeds/manage"
+@using System.Text.Json
+@using PersonalServerManager.Feeds
+@using PersonalServerManager.Stash
+@using PersonalServerManager.Hydrus
+@using PersonalServerManager.SwarmUI
+@implements IDisposable
+@inject IFeedStore Store
+@inject IStashInstanceStore StashStore
+@inject IHydrusInstanceStore HydrusStore
+@inject ISwarmUIInstanceStore SwarmStore
+
+<PageTitle>Manage Feeds | Personal Server Manager</PageTitle>
+
+<div class="workspace">
+    <header class="topbar">
+        <a class="wordmark" href="/" aria-label="Personal Server Manager home"><span class="mark">P</span><span>Personal Server Manager</span></a>
+        <nav class="topbar-right" aria-label="Workspace">
+            <button class="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Toggle dark mode"><span class="theme-moon"><MudIcon Icon="@Icons.Material.Outlined.DarkMode" /></span><span class="theme-sun"><MudIcon Icon="@Icons.Material.Outlined.LightMode" /></span></button>
+            <a class="nav-link" href="/" aria-label="Library search" title="Library search"><MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" /><span>Search</span></a>
+            <a class="nav-link" href="/feeds" aria-label="Open feeds" title="Open feeds"><MudIcon Icon="@Icons.Material.Outlined.ViewCarousel" Size="Size.Small" /><span>Feeds</span></a>
+            <a class="nav-link" href="/backends" aria-label="Manage backends" title="Manage backends"><MudIcon Icon="@Icons.Material.Outlined.Settings" Size="Size.Small" /><span>Backends</span></a>
+            <form method="post" action="/account/logout"><AntiforgeryToken /><button class="logout" type="submit">Sign out</button></form>
+        </nav>
+    </header>
+    <main>
+        <div class="page-heading">
+            <div>
+                <h1>Manage Feeds</h1>
+                <p class="subtitle">Configure sources, ordering, and media types for your fullscreen feeds.</p>
+            </div>
+            <div class="heading-actions">
+                <a class="outline-action" href="/feeds"><MudIcon Icon="@Icons.Material.Filled.PlayArrow" Size="Size.Small" />Open viewer</a>
+                <button class="primary-action" type="button" @onclick="NewFeed" disabled="@_busy"><MudIcon Icon="@Icons.Material.Filled.Add" Size="Size.Small" />New feed</button>
+            </div>
+        </div>
+        @if (_error is not null) { <div class="notice" role="alert">@_error</div> }
+        @if (!_loaded) { <p role="status">Loading feeds...</p> }
+        else if (_feeds.Count == 0)
+        {
+            <div class="empty-card">
+                <p class="empty">No feeds yet. Create a feed to bring your Stash, Hydrus, and SwarmUI libraries together.</p>
+                <button class="primary-action" type="button" @onclick="NewFeed"><MudIcon Icon="@Icons.Material.Filled.Add" Size="Size.Small" />Create your first feed</button>
+            </div>
+        }
+        else
+        {
+            <section class="feed-cards" aria-label="Saved feeds">
+                @for (var index = 0; index < _feeds.Count; index++)
+                {
+                    var feed = _feeds[index];
+                    var position = index;
+                    <article class="feed-card" @key="feed.Id">
+                        <div class="feed-card-main">
+                            <div class="feed-card-title">
+                                <h2>@feed.Name</h2>
+                                <span class="order-pill">@feed.Order</span>
+                            </div>
+                            <p class="feed-card-summary">@DescribeSources(feed)</p>
+                        </div>
+                        <div class="feed-card-actions">
+                            <a class="outline-action" href="@($"/feeds/{feed.Id:D}")" aria-label="Watch @feed.Name"><MudIcon Icon="@Icons.Material.Filled.PlayArrow" Size="Size.Small" />Watch</a>
+                            <div class="row-actions">
+                                <button class="icon-action" type="button" title="Move up" aria-label="Move @feed.Name up" disabled="@(_busy || position == 0)" @onclick="() => MoveAsync(feed.Id, -1)"><MudIcon Icon="@Icons.Material.Filled.KeyboardArrowUp" /></button>
+                                <button class="icon-action" type="button" title="Move down" aria-label="Move @feed.Name down" disabled="@(_busy || position == _feeds.Count - 1)" @onclick="() => MoveAsync(feed.Id, 1)"><MudIcon Icon="@Icons.Material.Filled.KeyboardArrowDown" /></button>
+                                <button class="icon-action" type="button" title="Edit feed" aria-label="Edit @feed.Name" disabled="@_busy" @onclick="() => EditFeed(feed)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" /></button>
+                                <button class="icon-action danger" type="button" title="Delete feed" aria-label="Delete @feed.Name" disabled="@_busy" @onclick="() => _deleting = feed"><MudIcon Icon="@Icons.Material.Filled.DeleteOutline" Size="Size.Small" /></button>
+                            </div>
+                        </div>
+                    </article>
+                }
+            </section>
+        }
+    </main>
+    @if (_editing)
+    {
+        <div class="backdrop" @onkeydown="EditorKey">
+            <section class="editor" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+                <div class="editor-heading"><h2 id="editor-title">@(_original is null ? "New feed" : "Edit feed")</h2><button class="icon-action" type="button" aria-label="Close feed editor" title="Close" disabled="@_busy" @onclick="CloseEditor"><MudIcon Icon="@Icons.Material.Filled.Close" /></button></div>
+                @if (_editorError is not null) { <div class="notice" role="alert">@_editorError</div> }
+                <form class="editor-form" @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
+                    <fieldset disabled="@_busy">
+                        <label>Feed name<input required maxlength="80" @bind="_draftName" /></label>
+                        <label>Order<select @bind="_draftOrder"><option value="@FeedOrder.Newest">Newest</option><option value="@FeedOrder.Oldest">Oldest</option><option value="@FeedOrder.Random">Random</option></select></label>
+                        <div class="source-heading"><h3>Sources</h3><a href="/backends">Manage backends</a></div>
+                        @if (_draftSources.Count == 0) { <p class="empty">No compatible backends configured.</p> }
+                        @foreach (var source in _draftSources)
+                        {
+                            <div class="source-editor" @key="(source.Provider, source.InstanceId)">
+                                <label class="source-choice"><input type="checkbox" @bind="source.Selected" /><span><strong>@source.Name</strong><small>@source.Provider@(source.Missing ? " - unavailable" : "")</small></span></label>
+                                @if (source.Selected)
+                                {
+                                    @if (source.Missing) { <p class="notice">This instance no longer exists. Remove it from the feed or restore it before saving.</p> }
+                                    <div class="source-options">
+                                        @if (source.Provider == FeedProvider.Stash)
+                                        {
+                                            <div class="stash-types">
+                                                <span class="field-caption">Content types</span>
+                                                <div class="check-row">
+                                                    <label class="check-option"><input type="checkbox" @bind="source.IncludeStashImages" /><span>Images</span></label>
+                                                    <label class="check-option"><input type="checkbox" @bind="source.IncludeStashScenes" /><span>Scenes</span></label>
+                                                    <label class="check-option"><input type="checkbox" @bind="source.IncludeStashMarkers" /><span>Markers</span></label>
+                                                </div>
+                                                @if (source.IncludeStashScenes)
+                                                {
+                                                    <label class="check-option preview-option"><input type="checkbox" @bind="source.UseStashScenePreviews" /><span>Use Stash generated scene previews</span></label>
+                                                }
+                                                <p class="hint">Markers always play their generated clip previews; GIFs automatically use Stash WebP previews.</p>
+                                            </div>
+                                            <p class="hint">Separate names with commas or new lines. Include lists match any; exclude lists remove any matches.</p>
+                                            <label>Include tags<textarea rows="2" @bind="source.IncludeTags"></textarea></label>
+                                            <label>Exclude tags<textarea rows="2" @bind="source.ExcludeTags"></textarea></label>
+                                            <label>Include performers<textarea rows="2" @bind="source.IncludePerformers"></textarea></label>
+                                            <label>Exclude performers<textarea rows="2" @bind="source.ExcludePerformers"></textarea></label>
+                                        }
+                                        else if (source.Provider == FeedProvider.Hydrus)
+                                        {
+                                            <label>Media<select @bind="source.Media"><option value="@FeedMedia.All">Images and videos</option><option value="@FeedMedia.Images">Images only</option><option value="@FeedMedia.Videos">Videos only</option></select></label>
+                                            <label>Predicate expression<textarea rows="3" maxlength="4096" @bind="source.HydrusQuery" placeholder="tag AND (another tag OR third tag)"></textarea></label>
+                                        }
+                                        else
+                                        {
+                                            <label>Media<select @bind="source.Media"><option value="@FeedMedia.All">Images and videos</option><option value="@FeedMedia.Images">Images only</option><option value="@FeedMedia.Videos">Videos only</option></select></label>
+                                            <label>Folder<input @bind="source.SwarmFolder" maxlength="1024" placeholder="All configured folders" /></label>
+                                            <p class="hint">Configured roots: @source.Roots</p>
+                                            <label>Query<input @bind="source.SwarmQuery" maxlength="1024" /></label>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                        <div class="editor-actions"><button class="text-action" type="button" @onclick="CloseEditor">Cancel</button><button class="primary-action" type="submit">@(_busy ? "Saving..." : "Save feed")</button></div>
+                    </fieldset>
+                </form>
+            </section>
+        </div>
+    }
+    @if (_deleting is not null)
+    {
+        <div class="backdrop"><section class="editor confirm" role="dialog" aria-modal="true" aria-labelledby="delete-title"><h2 id="delete-title">Delete @_deleting.Name?</h2><p>This removes the saved feed, not its media.</p><div class="editor-actions"><button class="text-action" type="button" disabled="@_busy" @onclick="() => _deleting = null">Cancel</button><button class="primary-action destructive" type="button" disabled="@_busy" @onclick="DeleteAsync">Delete feed</button></div></section></div>
+    }
+</div>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private IReadOnlyList<FeedDefinition> _feeds = [];
+    private IReadOnlyList<StashInstance> _stash = [];
+    private IReadOnlyList<HydrusInstance> _hydrus = [];
+    private IReadOnlyList<SwarmUIInstance> _swarm = [];
+    private List<SourceDraft> _draftSources = [];
+    private FeedDefinition? _original, _deleting;
+    private string _draftName = "";
+    private FeedOrder _draftOrder;
+    private string? _error, _editorError;
+    private bool _loaded, _busy, _editing;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { await RefreshAsync(); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _error = $"Could not load feed configuration: {exception.Message}"; }
+        finally { _loaded = true; }
+    }
+
+    private async Task RefreshAsync()
+    {
+        _feeds = await Store.GetAllAsync(_lifetime.Token);
+        _stash = await StashStore.GetAllAsync(_lifetime.Token);
+        _hydrus = await HydrusStore.GetAllAsync(_lifetime.Token);
+        _swarm = await SwarmStore.GetAllAsync(_lifetime.Token);
+    }
+
+    private string DescribeSources(FeedDefinition feed)
+    {
+        if (feed.Sources.Count == 0) return "No sources configured";
+        return string.Join(" · ", feed.Sources.Select(source =>
+        {
+            var name = source.Provider switch
+            {
+                FeedProvider.Stash => _stash.FirstOrDefault(i => i.Id == source.InstanceId)?.Name ?? "Stash",
+                FeedProvider.Hydrus => _hydrus.FirstOrDefault(i => i.Id == source.InstanceId)?.Name ?? "Hydrus",
+                FeedProvider.SwarmUI => _swarm.FirstOrDefault(i => i.Id == source.InstanceId)?.Name ?? "SwarmUI",
+                _ => source.Provider.ToString()
+            };
+            if (source.Provider == FeedProvider.Stash)
+            {
+                var kinds = new List<string>();
+                if (source.StashImagesEnabled) kinds.Add("Images");
+                if (source.StashScenesEnabled) kinds.Add(source.UseStashScenePreviews ? "Scenes (preview)" : "Scenes");
+                if (source.StashMarkersEnabled) kinds.Add("Markers");
+                return $"{name} ({string.Join(", ", kinds)})";
+            }
+            return $"{name} ({source.Provider})";
+        }));
+    }
+
+    private void NewFeed() => BeginEdit(null);
+    private void EditFeed(FeedDefinition feed) => BeginEdit(feed);
+
+    private void BeginEdit(FeedDefinition? feed)
+    {
+        _original = feed;
+        _draftName = feed?.Name ?? "";
+        _draftOrder = feed?.Order ?? FeedOrder.Newest;
+        _editorError = null;
+        _draftSources = _stash.Select(instance => new SourceDraft(FeedProvider.Stash, instance.Id, instance.Name))
+            .Concat(_hydrus.Select(instance => new SourceDraft(FeedProvider.Hydrus, instance.Id, instance.Name)))
+            .Concat(_swarm.Select(instance => new SourceDraft(FeedProvider.SwarmUI, instance.Id, instance.Name) { Roots = string.Join(", ", instance.SearchPaths.Select(path => path.Path)) })).ToList();
+        foreach (var source in feed?.Sources ?? [])
+        {
+            var draft = _draftSources.FirstOrDefault(item => item.Provider == source.Provider && item.InstanceId == source.InstanceId);
+            if (draft is null) { draft = new SourceDraft(source.Provider, source.InstanceId, $"Missing instance ({source.InstanceId})") { Missing = true }; _draftSources.Add(draft); }
+            draft.Load(source);
+        }
+        if (feed is not null)
+            _draftSources = _draftSources.OrderBy(draft => { var index = feed.Sources.ToList().FindIndex(source => source.Provider == draft.Provider && source.InstanceId == draft.InstanceId); return index < 0 ? int.MaxValue : index; }).ToList();
+        _editing = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        _editorError = null;
+        try
+        {
+            var feeds = await Store.GetAllAsync(_lifetime.Token);
+            if (_original is not null && !SameFeed(_original, feeds.FirstOrDefault(feed => feed.Id == _original.Id)))
+                throw new InvalidDataException("This feed changed or was deleted elsewhere. Close the editor and reload before saving.");
+            var stash = await StashStore.GetAllAsync(_lifetime.Token);
+            var hydrus = await HydrusStore.GetAllAsync(_lifetime.Token);
+            var swarm = await SwarmStore.GetAllAsync(_lifetime.Token);
+            var selected = _draftSources.Where(source => source.Selected).ToArray();
+            if (selected.Length == 0) throw new InvalidDataException("Select at least one source.");
+            foreach (var source in selected)
+            {
+                var exists = source.Provider switch { FeedProvider.Stash => stash.Any(item => item.Id == source.InstanceId), FeedProvider.Hydrus => hydrus.Any(item => item.Id == source.InstanceId), FeedProvider.SwarmUI => swarm.Any(item => item.Id == source.InstanceId), _ => false };
+                if (!exists) throw new InvalidDataException($"{source.Name} is no longer available. Remove it before saving.");
+                if (source.Provider == FeedProvider.Stash && !source.IncludeStashImages && !source.IncludeStashScenes && !source.IncludeStashMarkers)
+                    throw new InvalidDataException($"Select at least one content type (Images, Scenes, or Markers) for {source.Name}.");
+                if (source.Provider == FeedProvider.Hydrus)
+                {
+                    try { HydrusFeedQuery.Parse(source.HydrusQuery); }
+                    catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+                    {
+                        throw new InvalidDataException($"Hydrus query for {source.Name}: {exception.Message}");
+                    }
+                }
+                if (source.Provider == FeedProvider.SwarmUI && !string.IsNullOrWhiteSpace(source.SwarmFolder))
+                {
+                    var folder = source.SwarmFolder.Trim();
+                    var instance = swarm.Single(item => item.Id == source.InstanceId);
+                    if (!SwarmUIPaths.IsValidRelativePath(folder) || !instance.SearchPaths.Any(root => folder == root.Path || folder.StartsWith(root.Path + "/", StringComparison.Ordinal)))
+                        throw new InvalidDataException($"The folder for {source.Name} must be inside a configured root.");
+                }
+            }
+            var feed = new FeedDefinition(_original?.Id ?? Guid.NewGuid(), _draftName.Trim(), _draftOrder, selected.Select(source => source.ToSource()).ToArray());
+            await Store.SaveAsync(feed, _lifetime.Token);
+            await RefreshAsync();
+            _editing = false;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _editorError = $"Could not save feed: {exception.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private async Task MoveAsync(Guid id, int direction)
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            var ids = _feeds.Select(feed => feed.Id).ToList();
+            var index = ids.IndexOf(id);
+            if (index < 0 || index + direction < 0 || index + direction >= ids.Count) return;
+            (ids[index], ids[index + direction]) = (ids[index + direction], ids[index]);
+            await Store.ReorderAsync(ids, _lifetime.Token);
+            _feeds = await Store.GetAllAsync(_lifetime.Token);
+            _error = null;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _error = $"Could not reorder feeds: {exception.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (_busy || _deleting is null) return;
+        _busy = true;
+        try
+        {
+            var current = await Store.GetAllAsync(_lifetime.Token);
+            if (!SameFeed(_deleting, current.FirstOrDefault(feed => feed.Id == _deleting.Id))) throw new InvalidDataException("This feed changed or was deleted elsewhere. Reload before deleting it.");
+            await Store.RemoveAsync(_deleting.Id, _lifetime.Token);
+            _feeds = await Store.GetAllAsync(_lifetime.Token);
+            _deleting = null;
+            _error = null;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) { _deleting = null; _error = $"Could not delete feed: {exception.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private static bool SameFeed(FeedDefinition expected, FeedDefinition? current) => current is not null && JsonSerializer.Serialize(expected) == JsonSerializer.Serialize(current);
+    private void CloseEditor() { if (!_busy) _editing = false; }
+    private void EditorKey(KeyboardEventArgs args) { if (args.Key == "Escape") CloseEditor(); }
+    public void Dispose() { _lifetime.Cancel(); _lifetime.Dispose(); }
+
+    private sealed class SourceDraft(FeedProvider provider, Guid instanceId, string name)
+    {
+        public FeedProvider Provider { get; } = provider;
+        public Guid InstanceId { get; } = instanceId;
+        public string Name { get; } = name;
+        public bool Selected { get; set; }
+        public bool Missing { get; set; }
+        public string Roots { get; set; } = "";
+        public FeedMedia Media { get; set; }
+        public bool IncludeStashImages { get; set; } = true;
+        public bool IncludeStashScenes { get; set; } = true;
+        public bool IncludeStashMarkers { get; set; }
+        public bool UseStashScenePreviews { get; set; }
+        public string HydrusQuery { get; set; } = "";
+        public string SwarmFolder { get; set; } = "";
+        public string SwarmQuery { get; set; } = "";
+        public string IncludeTags { get; set; } = "";
+        public string ExcludeTags { get; set; } = "";
+        public string IncludePerformers { get; set; } = "";
+        public string ExcludePerformers { get; set; } = "";
+
+        public void Load(FeedSource source)
+        {
+            Selected = true;
+            Media = source.Media;
+            IncludeStashImages = source.StashImagesEnabled;
+            IncludeStashScenes = source.StashScenesEnabled;
+            IncludeStashMarkers = source.StashMarkersEnabled;
+            UseStashScenePreviews = source.UseStashScenePreviews;
+            HydrusQuery = source.HydrusQuery;
+            SwarmFolder = source.SwarmFolder;
+            SwarmQuery = source.SwarmQuery;
+            IncludeTags = string.Join('\n', source.IncludeTags);
+            ExcludeTags = string.Join('\n', source.ExcludeTags);
+            IncludePerformers = string.Join('\n', source.IncludePerformers);
+            ExcludePerformers = string.Join('\n', source.ExcludePerformers);
+        }
+
+        public FeedSource ToSource() => Provider == FeedProvider.Stash
+            ? new(InstanceId, Provider)
+            {
+                Media = FeedMedia.All,
+                IncludeStashImages = IncludeStashImages,
+                IncludeStashScenes = IncludeStashScenes,
+                IncludeStashMarkers = IncludeStashMarkers,
+                UseStashScenePreviews = UseStashScenePreviews,
+                IncludeTags = Split(IncludeTags),
+                ExcludeTags = Split(ExcludeTags),
+                IncludePerformers = Split(IncludePerformers),
+                ExcludePerformers = Split(ExcludePerformers)
+            }
+            : new(InstanceId, Provider)
+            {
+                Media = Media,
+                HydrusQuery = HydrusQuery,
+                SwarmFolder = SwarmFolder.Trim(),
+                SwarmQuery = SwarmQuery
+            };
+
+        private static string[] Split(string text) => text.Split([',', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+}

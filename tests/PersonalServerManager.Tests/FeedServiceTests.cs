@@ -266,8 +266,74 @@ public sealed class FeedServiceTests
         Assert.Equal(video.MediaUrl, video.SourceUrl);
         var image = Assert.Single(page.Items, item => item.Provider == "SwarmUI");
         Assert.Equal($"/media/swarmui/{swarm.Id:D}/file?path=raw%2Fa%20b.png", image.MediaUrl.OriginalString);
-        Assert.Equal("https://swarm.test/base/View/local/raw/a%20b.png", image.SourceUrl.AbsoluteUri);
+        Assert.Equal(image.MediaUrl, image.SourceUrl);
         Assert.False(page.HasMore);
+    }
+
+    [Fact]
+    public async Task StashSupportsSeparateTypesScenePreviewsMarkersGifsAndManagedBrowserUrls()
+    {
+        var managedStash = new StashInstance(Guid.NewGuid(), "Managed Stash",
+            new Uri("http://127.0.0.1:9999/graphql"), new Uri("http://127.0.0.1:9999/"), "secret", @"D:\Stash", 9999);
+        var clients = new Clients();
+        clients.Stash = (instance, kind, source, order, offset, limit, token) => Task.FromResult<IReadOnlyList<StashSearchResult>>(kind switch
+        {
+            StashSearchKind.Scenes => [new StashSearchResult("10", "Scene", kind, null, new Uri(instance.WebUiUrl, "scenes/10"), instance.Id, instance.Name)
+            {
+                Duration = TimeSpan.FromMinutes(3),
+                Rating100 = 80,
+                Path = "video.mp4"
+            }],
+            StashSearchKind.Markers => [new StashSearchResult("20", "Marker", kind, null, new Uri(instance.WebUiUrl, "scenes/10?t=45"), instance.Id, instance.Name)
+            {
+                SceneId = "10",
+                MarkerStart = TimeSpan.FromSeconds(45),
+                MarkerEnd = TimeSpan.FromSeconds(75)
+            }],
+            StashSearchKind.Images => [new StashSearchResult("30", "Anim", kind, null, new Uri(instance.WebUiUrl, "images/30"), instance.Id, instance.Name)
+            {
+                Path = "funny.gif",
+                IsVideo = true,
+                HasAnimatedPreview = true
+            }],
+            _ => []
+        });
+
+        var service = new FeedService(
+            new StashStore([managedStash]), clients,
+            new HydrusStore([]), clients,
+            new SwarmStore([]), clients);
+
+        var source = new FeedSource(managedStash.Id, FeedProvider.Stash)
+        {
+            IncludeStashImages = true,
+            IncludeStashScenes = true,
+            IncludeStashMarkers = true,
+            UseStashScenePreviews = true
+        };
+        var page = await service.Start(Feed(source)).LoadNextAsync();
+
+        Assert.Equal(3, page.Items.Count);
+        var scene = Assert.Single(page.Items, item => item.MediaKind == "Scene");
+        Assert.Equal($"/media/stash/{managedStash.Id:D}/scene-previews/10", scene.MediaUrl.OriginalString);
+        Assert.Equal($"/media/stash/{managedStash.Id:D}/scene-webp/10", scene.FallbackMediaUrl?.OriginalString);
+        Assert.Equal($"/managed/stash/{managedStash.Id:D}/scenes/10", scene.SourceUrl.OriginalString);
+        Assert.Equal(4m, scene.RatingOutOfFive);
+        Assert.Equal("MP4", scene.FileFormat);
+
+        var marker = Assert.Single(page.Items, item => item.MediaKind == "Marker");
+        Assert.Equal($"/media/stash/{managedStash.Id:D}/markers/10/20", marker.MediaUrl.OriginalString);
+        Assert.Equal($"/media/stash/{managedStash.Id:D}/marker-previews/10/20", marker.FallbackMediaUrl?.OriginalString);
+        Assert.Equal($"/managed/stash/{managedStash.Id:D}/scenes/10?t=45", marker.SourceUrl.OriginalString);
+        Assert.True(marker.IsVideo);
+        Assert.Equal(TimeSpan.FromSeconds(45), marker.MarkerStart);
+        Assert.Equal(TimeSpan.FromSeconds(75), marker.MarkerEnd);
+
+        var gif = Assert.Single(page.Items, item => item.MediaKind == "GIF");
+        Assert.Equal($"/media/stash/{managedStash.Id:D}/image-previews/30", gif.MediaUrl.OriginalString);
+        Assert.False(gif.IsVideo);
+        Assert.True(gif.FallbackIsVideo);
+        Assert.Equal($"/managed/stash/{managedStash.Id:D}/images/30", gif.SourceUrl.OriginalString);
     }
 
     [Fact]

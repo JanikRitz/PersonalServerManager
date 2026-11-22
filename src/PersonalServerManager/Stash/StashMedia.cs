@@ -9,7 +9,10 @@ public sealed class StashMedia(HttpClient client, IStashInstanceStore store)
 {
     public static HttpMessageHandler CreateHttpHandler() => new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false };
 
-    public async Task ServeAsync(Guid instanceId, string kind, long id, HttpContext context)
+    public Task ServeAsync(Guid instanceId, string kind, long id, HttpContext context) =>
+        ServeAsync(instanceId, kind, id, null, context);
+
+    public async Task ServeAsync(Guid instanceId, string kind, long id, long? sceneId, HttpContext context)
     {
         var response = context.Response;
         response.Headers.CacheControl = "no-store";
@@ -17,10 +20,15 @@ public sealed class StashMedia(HttpClient client, IStashInstanceStore store)
         response.Headers.ContentSecurityPolicy = "default-src 'none'; media-src 'self'; img-src 'self'; frame-ancestors 'none'";
         response.StatusCode = StatusCodes.Status404NotFound;
 
-        var path = kind switch
+        var path = (kind, id > 0, sceneId is > 0) switch
         {
-            "images" when id > 0 => $"image/{id.ToString(CultureInfo.InvariantCulture)}/image",
-            "scenes" when id > 0 => $"scene/{id.ToString(CultureInfo.InvariantCulture)}/stream",
+            ("images", true, false) when sceneId is null => $"image/{id.ToString(CultureInfo.InvariantCulture)}/image",
+            ("image-previews", true, false) when sceneId is null => $"image/{id.ToString(CultureInfo.InvariantCulture)}/preview",
+            ("scenes", true, false) when sceneId is null => $"scene/{id.ToString(CultureInfo.InvariantCulture)}/stream",
+            ("scene-previews", true, false) when sceneId is null => $"scene/{id.ToString(CultureInfo.InvariantCulture)}/preview",
+            ("scene-webp", true, false) when sceneId is null => $"scene/{id.ToString(CultureInfo.InvariantCulture)}/webp",
+            ("markers", true, true) => $"scene/{sceneId!.Value.ToString(CultureInfo.InvariantCulture)}/scene_marker/{id.ToString(CultureInfo.InvariantCulture)}/stream",
+            ("marker-previews", true, true) => $"scene/{sceneId!.Value.ToString(CultureInfo.InvariantCulture)}/scene_marker/{id.ToString(CultureInfo.InvariantCulture)}/preview",
             _ => null
         };
         if (path is null) return;
@@ -51,8 +59,16 @@ public sealed class StashMedia(HttpClient client, IStashInstanceStore store)
             }
 
             var mediaType = headers.ContentType?.MediaType?.ToLowerInvariant();
-            var allowed = mediaType is "video/mp4" or "video/webm" or "video/ogg" or "video/quicktime" ||
-                kind == "images" && mediaType is "image/jpeg" or "image/png" or "image/gif" or "image/webp" or "image/avif" or "image/bmp";
+            var isVideoType = mediaType is "video/mp4" or "video/webm" or "video/ogg" or "video/quicktime";
+            var isImageType = mediaType is "image/jpeg" or "image/png" or "image/gif" or "image/webp" or "image/avif" or "image/bmp";
+            var allowed = kind switch
+            {
+                "scenes" or "scene-previews" or "markers" => isVideoType,
+                "scene-webp" => mediaType is "image/webp" or "image/gif",
+                "image-previews" or "marker-previews" => isVideoType || mediaType is "image/webp" or "image/gif" or "image/jpeg" or "image/png",
+                "images" => isVideoType || isImageType,
+                _ => false
+            };
             if (upstream.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent) ||
                 (upstream.StatusCode == HttpStatusCode.PartialContent && (request.Headers.Range is null || headers.ContentRange is null)) || !allowed)
             {
@@ -89,6 +105,9 @@ public static class StashMediaEndpoints
     {
         app.MapGet("/media/stash/{instanceId:guid}/{kind}/{id:long}",
             (Guid instanceId, string kind, long id, StashMedia media, HttpContext context) => media.ServeAsync(instanceId, kind, id, context))
+            .RequireAuthorization();
+        app.MapGet("/media/stash/{instanceId:guid}/{kind}/{sceneId:long}/{id:long}",
+            (Guid instanceId, string kind, long sceneId, long id, StashMedia media, HttpContext context) => media.ServeAsync(instanceId, kind, id, sceneId, context))
             .RequireAuthorization();
     }
 }

@@ -61,6 +61,7 @@ public sealed class JsonFeedStore(string filePath) : IFeedStore
         foreach (var source in feed.Sources)
         {
             if (source is null || source.InstanceId == Guid.Empty || !Enum.IsDefined(source.Provider) || !Enum.IsDefined(source.Media) ||
+                (source.Provider == FeedProvider.Stash && !source.StashImagesEnabled && !source.StashScenesEnabled && !source.StashMarkersEnabled) ||
                 source.HydrusQuery is null || source.HydrusQuery.Length > 4096 || source.SwarmQuery is null || source.SwarmQuery.Length > 1024 ||
                 source.SwarmFolder is null || (source.SwarmFolder.Length > 0 && !SwarmUIPaths.IsValidRelativePath(source.SwarmFolder)) ||
                 new[] { source.IncludeTags, source.ExcludeTags, source.IncludePerformers, source.ExcludePerformers }.Any(list =>

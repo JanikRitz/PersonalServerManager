@@ -18,7 +18,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
     {
         ArgumentNullException.ThrowIfNull(instance);
         ArgumentNullException.ThrowIfNull(source);
-        if (kind is not (StashSearchKind.Scenes or StashSearchKind.Images)) throw new ArgumentOutOfRangeException(nameof(kind));
+        if (kind is not (StashSearchKind.Scenes or StashSearchKind.Images or StashSearchKind.Markers)) throw new ArgumentOutOfRangeException(nameof(kind));
         if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
         if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
         var (sort, direction) = order switch
@@ -30,8 +30,9 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         };
         if (source.Media is not (FeedMedia.All or FeedMedia.Images or FeedMedia.Videos)) throw new ArgumentOutOfRangeException(nameof(source));
         cancellationToken.ThrowIfCancellationRequested();
-        if ((kind == StashSearchKind.Scenes && source.Media == FeedMedia.Images) ||
-            (kind == StashSearchKind.Images && source.Media == FeedMedia.Videos)) return [];
+        if ((kind == StashSearchKind.Scenes && !source.StashScenesEnabled) ||
+            (kind == StashSearchKind.Images && !source.StashImagesEnabled) ||
+            (kind == StashSearchKind.Markers && !source.StashMarkersEnabled)) return [];
 
         var objectFilter = new Dictionary<string, object>();
         var missingIncludes = false;
@@ -63,9 +64,13 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         }
         if (missingIncludes) return [];
 
-        var (field, collection, argument, filterType, selection) = kind == StashSearchKind.Scenes
-            ? ("findScenes", "scenes", "scene_filter", "SceneFilterType", "id title paths { screenshot webp } files { path duration } rating100")
-            : ("findImages", "images", "image_filter", "ImageFilterType", "id title paths { thumbnail preview } files { path } visual_files { __typename ... on ImageFile { path } ... on VideoFile { path } } rating100");
+        var (field, collection, argument, filterType, selection, urlSegment) = kind switch
+        {
+            StashSearchKind.Scenes => ("findScenes", "scenes", "scene_filter", "SceneFilterType", "id title paths { screenshot webp preview } files { path duration } rating100", "scenes"),
+            StashSearchKind.Images => ("findImages", "images", "image_filter", "ImageFilterType", "id title paths { thumbnail preview } files { path } visual_files { __typename ... on ImageFile { path } ... on VideoFile { path } } rating100", "images"),
+            StashSearchKind.Markers => ("findSceneMarkers", "scene_markers", "scene_marker_filter", "SceneMarkerFilterType", "id title seconds end_seconds scene { id title rating100 } primary_tag { name } screenshot stream preview", "scenes"),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
         var document = $"query Feed($filter: FindFilterType, $criteria: {filterType}) {{ {field}(filter: $filter, {argument}: $criteria) {{ {collection} {{ {selection} created_at updated_at }} }} }}";
         var results = new List<StashSearchResult>();
         var skip = offset % limit;
@@ -82,7 +87,7 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
                 !group.TryGetProperty(collection, out var items) || items.ValueKind != JsonValueKind.Array)
                 throw new InvalidDataException("Stash returned an invalid feed result list.");
             var count = items.GetArrayLength();
-            results.AddRange(items.EnumerateArray().Skip(skip).Take(limit - results.Count).Select(item => MapResult(instance, kind, collection, item)));
+            results.AddRange(items.EnumerateArray().Skip(skip).Take(limit - results.Count).Select(item => MapResult(instance, kind, urlSegment, item)));
             if (count < limit) break;
             skip = 0;
             page++;
@@ -343,26 +348,32 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
         };
 
         var itemPath = $"{urlSegment}/{Uri.EscapeDataString(id)}";
+        string? markerSceneId = null;
         if (kind == StashSearchKind.Markers)
         {
-            var sceneId = GetNestedString(item, "scene", "id");
-            if (string.IsNullOrWhiteSpace(sceneId) || !item.TryGetProperty("seconds", out var secondsValue) ||
+            markerSceneId = GetNestedString(item, "scene", "id");
+            if (string.IsNullOrWhiteSpace(markerSceneId) || !item.TryGetProperty("seconds", out var secondsValue) ||
                 secondsValue.ValueKind != JsonValueKind.Number || !secondsValue.TryGetDouble(out var seconds) ||
                 !double.IsFinite(seconds) || seconds < 0)
             {
                 throw new InvalidDataException("Stash returned invalid marker navigation data.");
             }
 
-            itemPath = $"scenes/{Uri.EscapeDataString(sceneId)}?t={seconds.ToString("R", CultureInfo.InvariantCulture)}";
+            itemPath = $"scenes/{Uri.EscapeDataString(markerSceneId)}?t={seconds.ToString("R", CultureInfo.InvariantCulture)}";
             if (string.IsNullOrWhiteSpace(title))
                 title = GetNestedString(item, "primary_tag", "name") ?? "(untitled)";
         }
+
+        var markerPreview = kind == StashSearchKind.Markers && item.TryGetProperty("preview", out var markerPreviewValue) &&
+            markerPreviewValue.ValueKind == JsonValueKind.String ? markerPreviewValue.GetString() : null;
+        var markerStream = kind == StashSearchKind.Markers && item.TryGetProperty("stream", out var markerStreamValue) &&
+            markerStreamValue.ValueKind == JsonValueKind.String ? markerStreamValue.GetString() : null;
 
         return new StashSearchResult(
             id,
             title,
             kind,
-            ResolveThumbnail(instance.WebUiUrl, kind, id, thumbnail, kind == StashSearchKind.Markers ? GetNestedString(item, "scene", "id") : null),
+            ResolveThumbnail(instance.WebUiUrl, kind, id, thumbnail, markerSceneId),
             new Uri(instance.WebUiUrl, itemPath),
             instance.Id,
             instance.Name)
@@ -372,8 +383,20 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
             Duration = kind == StashSearchKind.Scenes ? ReadFileDuration(item) : null,
             MarkerStart = kind == StashSearchKind.Markers ? ReadMarkerTime(item, "seconds") : null,
             MarkerEnd = kind == StashSearchKind.Markers ? ReadMarkerTime(item, "end_seconds") : null,
-            HasAnimatedPreview = kind is StashSearchKind.Scenes or StashSearchKind.Images &&
-                ResolveThumbnail(instance.WebUiUrl, kind, id, GetNestedString(item, "paths", kind == StashSearchKind.Scenes ? "webp" : "preview"), animated: true) is not null,
+            SceneId = markerSceneId,
+            HasAnimatedPreview = kind switch
+            {
+                StashSearchKind.Scenes => ResolveThumbnail(instance.WebUiUrl, kind, id, GetNestedString(item, "paths", "webp"), animated: true) is not null,
+                StashSearchKind.Images => ResolveThumbnail(instance.WebUiUrl, kind, id, GetNestedString(item, "paths", "preview"), animated: true) is not null,
+                StashSearchKind.Markers => markerSceneId is not null && ResolveExpectedPath(instance.WebUiUrl, $"scene/{markerSceneId}/scene_marker/{id}/preview", markerPreview) is not null,
+                _ => false
+            },
+            HasPreviewVideo = kind switch
+            {
+                StashSearchKind.Scenes => ResolveExpectedPath(instance.WebUiUrl, $"scene/{id}/preview", GetNestedString(item, "paths", "preview")) is not null,
+                StashSearchKind.Markers => markerSceneId is not null && ResolveExpectedPath(instance.WebUiUrl, $"scene/{markerSceneId}/scene_marker/{id}/stream", markerStream) is not null,
+                _ => false
+            },
             IsVideo = kind == StashSearchKind.Scenes || kind == StashSearchKind.Images &&
                 item.TryGetProperty("visual_files", out var visualFiles) && visualFiles.ValueKind == JsonValueKind.Array &&
                 visualFiles.EnumerateArray().Any(file => file.ValueKind == JsonValueKind.Object &&
@@ -385,11 +408,14 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
                 StashSearchKind.Groups => ReadArrayCount(item, "scenes"),
                 _ => null
             },
-            Rating100 = item.TryGetProperty("rating100", out var rating) && rating.ValueKind == JsonValueKind.Number &&
-                rating.TryGetInt32(out var score) && score is > 0 and <= 100 ? score : null,
+            Rating100 = ReadRating(item) ?? (kind == StashSearchKind.Markers && item.TryGetProperty("scene", out var sceneObj) && sceneObj.ValueKind == JsonValueKind.Object ? ReadRating(sceneObj) : null),
             IsFavorite = item.TryGetProperty("favorite", out var favorite) && favorite.ValueKind == JsonValueKind.True
         };
     }
+
+    private static int? ReadRating(JsonElement item) =>
+        item.TryGetProperty("rating100", out var rating) && rating.ValueKind == JsonValueKind.Number &&
+        rating.TryGetInt32(out var score) && score is > 0 and <= 100 ? score : null;
 
     private static DateTimeOffset? ReadDate(JsonElement item, string property) =>
         item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String &&
@@ -466,10 +492,15 @@ public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlCli
                 => $"scene/{numericSceneId.ToString(CultureInfo.InvariantCulture)}/scene_marker/{id}/screenshot",
             _ => null
         };
-        if (path is null || !Uri.TryCreate(baseUri, value, out var candidate))
+        return path is null ? null : ResolveExpectedPath(baseUri, path, value);
+    }
+
+    private static Uri? ResolveExpectedPath(Uri baseUri, string expectedPath, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || !Uri.TryCreate(baseUri, value, out var candidate))
             return null;
 
-        var expected = new Uri(baseUri, path);
+        var expected = new Uri(baseUri, expectedPath);
         return candidate.Scheme == expected.Scheme && candidate.Authority == expected.Authority &&
             candidate.UserInfo.Length == 0 && candidate.AbsolutePath == expected.AbsolutePath
             ? expected : null;

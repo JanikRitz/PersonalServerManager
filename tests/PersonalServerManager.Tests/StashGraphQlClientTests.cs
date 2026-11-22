@@ -576,6 +576,29 @@ public sealed class StashGraphQlClientTests
         Assert.Equal(1, calls);
     }
 
+    [Fact]
+    public async Task SearchFeedAsync_SupportsMarkersWithSceneIdAndPreviews()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            Assert.Contains("findSceneMarkers(filter: $filter, scene_marker_filter: $criteria)", body);
+            return Json("""{"data":{"findSceneMarkers":{"scene_markers":[{"id":"42","title":"Highlight","seconds":30,"end_seconds":48,"scene":{"id":"9","rating100":90},"primary_tag":{"name":"Tag"},"screenshot":"https://stash.example/prefix/scene/9/scene_marker/42/screenshot","stream":"https://stash.example/prefix/scene/9/scene_marker/42/stream","preview":"https://stash.example/prefix/scene/9/scene_marker/42/preview"}]}}}""");
+        })));
+        var instance = Instance(null) with { WebUiUrl = new Uri("https://stash.example/prefix/") };
+        var source = new FeedSource(instance.Id, FeedProvider.Stash) { IncludeStashMarkers = true };
+
+        var marker = Assert.Single(await client.SearchFeedAsync(instance, StashSearchKind.Markers, source, FeedOrder.Newest, 0, 5));
+        Assert.Equal("42", marker.Id);
+        Assert.Equal("9", marker.SceneId);
+        Assert.Equal("Highlight", marker.Title);
+        Assert.Equal(TimeSpan.FromSeconds(30), marker.MarkerStart);
+        Assert.Equal(TimeSpan.FromSeconds(48), marker.MarkerEnd);
+        Assert.Equal(90, marker.Rating100);
+        Assert.True(marker.HasAnimatedPreview);
+        Assert.True(marker.HasPreviewVideo);
+        Assert.Equal("https://stash.example/prefix/scenes/9?t=30", marker.ItemUrl.AbsoluteUri);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

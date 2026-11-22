@@ -1,11 +1,25 @@
 using System.Globalization;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.Search;
 using PersonalServerManager.Stash;
 using PersonalServerManager.SwarmUI;
 
 namespace PersonalServerManager.Feeds;
 
-public sealed record FeedItem(string Id, string Title, string SourceName, string Provider, Uri MediaUrl, Uri SourceUrl, bool IsVideo);
+public sealed record FeedItem(string Id, string Title, string SourceName, string Provider, Uri MediaUrl, Uri SourceUrl, bool IsVideo)
+{
+    public Uri? PosterUrl { get; init; }
+    public Uri? FallbackMediaUrl { get; init; }
+    public bool FallbackIsVideo { get; init; }
+    public string? MediaKind { get; init; }
+    public string? FileFormat { get; init; }
+    public TimeSpan? Duration { get; init; }
+    public TimeSpan? MarkerStart { get; init; }
+    public TimeSpan? MarkerEnd { get; init; }
+    public decimal? RatingOutOfFive { get; init; }
+    public bool IsFavorite { get; init; }
+    public string? Description { get; init; }
+}
 public sealed record FeedPage(IReadOnlyList<FeedItem> Items, IReadOnlyList<string> Errors, bool HasMore);
 
 public sealed class FeedService(
@@ -189,8 +203,17 @@ public sealed class FeedSession
                     var stash = (await stashStore.GetAllAsync(token)).FirstOrDefault(instance => instance.Id == source.InstanceId)
                         ?? throw new MissingInstanceException();
                     instanceName = stash.Name;
-                    if (source.Media != FeedMedia.Images) AddStash(stash, StashSearchKind.Scenes);
-                    AddStash(stash, StashSearchKind.Images);
+                    if (source.HasExplicitStashTypes)
+                    {
+                        if (source.StashScenesEnabled) AddStash(stash, StashSearchKind.Scenes);
+                        if (source.StashMarkersEnabled) AddStash(stash, StashSearchKind.Markers);
+                        if (source.StashImagesEnabled) AddStash(stash, StashSearchKind.Images);
+                    }
+                    else
+                    {
+                        if (source.Media != FeedMedia.Images) AddStash(stash, StashSearchKind.Scenes);
+                        AddStash(stash, StashSearchKind.Images);
+                    }
                     break;
                 case FeedProvider.Hydrus:
                     var hydrus = (await hydrusStore.GetAllAsync(token)).FirstOrDefault(instance => instance.Id == source.InstanceId)
@@ -219,20 +242,81 @@ public sealed class FeedSession
 
         private void AddStash(StashInstance instance, StashSearchKind kind) => streams.Add(new StreamState(async (offset, limit, token) =>
         {
-            var requestSource = kind == StashSearchKind.Images && source.Media == FeedMedia.Videos
+            var requestSource = !source.HasExplicitStashTypes && kind == StashSearchKind.Images && source.Media == FeedMedia.Videos
                 ? source with { Media = FeedMedia.All } : source;
             var files = await stashClient.SearchFeedAsync(instance, kind, requestSource, order, offset, limit, token);
-            return (files.Count, files.Select(file => MapStash(instance, kind, file)).OfType<FeedItem>()
-                .Where(item => source.Media == FeedMedia.All || item.IsVideo == (source.Media == FeedMedia.Videos)).ToArray());
+            var mapped = files.Select(file => MapStash(instance, kind, source, file)).OfType<FeedItem>();
+            if (!source.HasExplicitStashTypes && source.Media != FeedMedia.All)
+                mapped = mapped.Where(item => item.IsVideo == (source.Media == FeedMedia.Videos));
+            return (files.Count, mapped.ToArray());
         }));
 
-        private static FeedItem? MapStash(StashInstance instance, StashSearchKind kind, StashSearchResult file)
+        private static FeedItem? MapStash(StashInstance instance, StashSearchKind kind, FeedSource source, StashSearchResult file)
         {
             if (!long.TryParse(file.Id, NumberStyles.None, CultureInfo.InvariantCulture, out var id) || id <= 0 || !SafeSource(file.ItemUrl)) return null;
-            var category = kind == StashSearchKind.Scenes ? "scenes" : "images";
-            return new FeedItem($"stash:{instance.Id:D}:{category}:{file.Id}", file.Title, instance.Name, "Stash",
-                new Uri($"/media/stash/{instance.Id:D}/{category}/{Uri.EscapeDataString(file.Id)}", UriKind.Relative),
-                file.ItemUrl, kind == StashSearchKind.Scenes || file.IsVideo);
+            var sourceUrl = instance.BrowserUrl(file.ItemUrl);
+            var fileFormat = kind is StashSearchKind.Images or StashSearchKind.Scenes ? FormatFromPath(file.Path) : null;
+            var rating = file.Rating100 / 20m;
+
+            if (kind == StashSearchKind.Markers)
+            {
+                if (!long.TryParse(file.SceneId, NumberStyles.None, CultureInfo.InvariantCulture, out var sceneId) || sceneId <= 0) return null;
+                var sceneSegment = sceneId.ToString(CultureInfo.InvariantCulture);
+                var markerSegment = Uri.EscapeDataString(file.Id);
+                return new FeedItem($"stash:{instance.Id:D}:markers:{file.Id}", file.Title, instance.Name, "Stash",
+                    new Uri($"/media/stash/{instance.Id:D}/markers/{sceneSegment}/{markerSegment}", UriKind.Relative),
+                    sourceUrl, true)
+                {
+                    PosterUrl = PreviewService.CreateLink("stash", instance.Id, "markers", file.Id),
+                    FallbackMediaUrl = new Uri($"/media/stash/{instance.Id:D}/marker-previews/{sceneSegment}/{markerSegment}", UriKind.Relative),
+                    FallbackIsVideo = false,
+                    MediaKind = "Marker",
+                    MarkerStart = file.MarkerStart,
+                    MarkerEnd = file.MarkerEnd,
+                    RatingOutOfFive = rating,
+                    IsFavorite = file.IsFavorite
+                };
+            }
+
+            if (kind == StashSearchKind.Scenes)
+            {
+                var sceneSegment = Uri.EscapeDataString(file.Id);
+                var mediaUrl = source.UseStashScenePreviews
+                    ? new Uri($"/media/stash/{instance.Id:D}/scene-previews/{sceneSegment}", UriKind.Relative)
+                    : new Uri($"/media/stash/{instance.Id:D}/scenes/{sceneSegment}", UriKind.Relative);
+                return new FeedItem($"stash:{instance.Id:D}:scenes:{file.Id}", file.Title, instance.Name, "Stash",
+                    mediaUrl, sourceUrl, true)
+                {
+                    PosterUrl = PreviewService.CreateLink("stash", instance.Id, "scenes", file.Id),
+                    FallbackMediaUrl = source.UseStashScenePreviews
+                        ? new Uri($"/media/stash/{instance.Id:D}/scene-webp/{sceneSegment}", UriKind.Relative) : null,
+                    FallbackIsVideo = false,
+                    MediaKind = "Scene",
+                    FileFormat = fileFormat,
+                    Duration = file.Duration,
+                    RatingOutOfFive = rating,
+                    IsFavorite = file.IsFavorite
+                };
+            }
+
+            var imageSegment = Uri.EscapeDataString(file.Id);
+            var isGif = string.Equals(fileFormat, "GIF", StringComparison.OrdinalIgnoreCase);
+            var usePreview = (isGif || file.IsVideo) && file.HasAnimatedPreview;
+            var imageUrl = usePreview
+                ? new Uri($"/media/stash/{instance.Id:D}/image-previews/{imageSegment}", UriKind.Relative)
+                : new Uri($"/media/stash/{instance.Id:D}/images/{imageSegment}", UriKind.Relative);
+            var isVideo = !isGif && (usePreview || file.IsVideo);
+            return new FeedItem($"stash:{instance.Id:D}:images:{file.Id}", file.Title, instance.Name, "Stash",
+                imageUrl, sourceUrl, isVideo)
+            {
+                PosterUrl = isVideo ? PreviewService.CreateLink("stash", instance.Id, "images", file.Id) : null,
+                FallbackMediaUrl = usePreview ? imageUrl : null,
+                FallbackIsVideo = isGif && usePreview,
+                MediaKind = isGif ? "GIF" : isVideo ? "Video" : "Image",
+                FileFormat = fileFormat,
+                RatingOutOfFive = rating,
+                IsFavorite = file.IsFavorite
+            };
         }
 
         private static FeedItem? MapHydrus(HydrusInstance instance, HydrusFile file)
@@ -240,20 +324,61 @@ public sealed class FeedSession
             if (file.Id <= 0 || string.IsNullOrWhiteSpace(file.Mime) || !HydrusClientMedia.CanDisplay(file.Mime)) return null;
             var mime = file.Mime.Split(';', 2)[0].Trim();
             if (!mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase) && !mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase)) return null;
+            var isVideo = mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
             var link = HydrusClientMedia.CreateLink(instance.Id, file.Id);
+            var fileFormat = FormatFromPath(file.Path) ?? HydrusFileFormat(mime);
             return new FeedItem($"hydrus:{instance.Id:D}:{file.Id.ToString(CultureInfo.InvariantCulture)}", file.Title,
-                instance.Name, "Hydrus", link, link, mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase));
+                instance.Name, "Hydrus", link, link, isVideo)
+            {
+                PosterUrl = isVideo ? PreviewService.CreateLink("hydrus", instance.Id, "files", file.Id.ToString(CultureInfo.InvariantCulture)) : null,
+                MediaKind = isVideo ? "Video" : string.Equals(fileFormat, "GIF", StringComparison.OrdinalIgnoreCase) ? "GIF" : "Image",
+                FileFormat = fileFormat,
+                Duration = file.Duration,
+                IsFavorite = file.IsFavorite
+            };
         }
 
         private static FeedItem? MapSwarm(SwarmUIInstance instance, SwarmUIFile file)
         {
             SwarmUIPaths.ValidateEndpoint(instance.BaseUrl);
             if (!SwarmUIPaths.IsServable(instance, file.Path) || SwarmUIPaths.MediaKind(file.Path) != file.Kind || !SafeSource(instance.BaseUrl)) return null;
-            var baseUri = new Uri(instance.BaseUrl.AbsoluteUri.TrimEnd('/') + "/");
+            var fileLink = SwarmUIPaths.CreateFileLink(instance.Id, file.Path);
+            var isVideo = file.Kind == SwarmUIMediaKind.Video;
+            var fileFormat = FormatFromPath(file.Path);
+            var size = file is { Width: { } width, Height: { } height } ? $"{width}x{height}" : null;
+            var detail = string.Join(" · ", new[] { file.Model, size }.Where(part => !string.IsNullOrWhiteSpace(part)));
             return new FeedItem($"swarmui:{instance.Id:D}:{file.Path}", file.Prompt ?? Path.GetFileNameWithoutExtension(file.Path),
-                instance.Name, "SwarmUI", SwarmUIPaths.CreateFileLink(instance.Id, file.Path),
-                new Uri(baseUri, SwarmUIPaths.ViewPath(file.Path)), file.Kind == SwarmUIMediaKind.Video);
+                instance.Name, "SwarmUI", fileLink, fileLink, isVideo)
+            {
+                PosterUrl = isVideo ? SwarmUIPaths.CreatePreviewLink(instance.Id, file.Path) : null,
+                MediaKind = isVideo ? "Video" : "Image",
+                FileFormat = fileFormat,
+                IsFavorite = file.IsStarred,
+                Description = string.IsNullOrWhiteSpace(detail) ? null : detail
+            };
         }
+
+        private static string? FormatFromPath(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            var extension = Path.GetExtension(path).TrimStart('.');
+            return extension.Length is >= 2 and <= 6 && extension.All(char.IsAsciiLetterOrDigit)
+                ? extension.ToUpperInvariant() : null;
+        }
+
+        private static string? HydrusFileFormat(string mime) => mime.ToLowerInvariant() switch
+        {
+            "image/jpeg" => "JPG",
+            "image/png" => "PNG",
+            "image/gif" => "GIF",
+            "image/webp" => "WEBP",
+            "image/avif" => "AVIF",
+            "image/bmp" => "BMP",
+            "video/mp4" => "MP4",
+            "video/webm" => "WEBM",
+            "video/ogg" => "OGG",
+            _ => null
+        };
 
         private static bool SafeSource(Uri uri) => !uri.IsAbsoluteUri ||
             (uri.Scheme is "http" or "https" && string.IsNullOrEmpty(uri.UserInfo));

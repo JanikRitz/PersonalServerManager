@@ -36,9 +36,33 @@ public sealed class JsonFeedStoreTests : IDisposable
         var store = new JsonFeedStore(path);
         await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(new(Guid.NewGuid(), "Bad", FeedOrder.Newest,
             [new(Guid.NewGuid(), FeedProvider.SwarmUI) { SwarmFolder = "../outside" }])));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(new(Guid.NewGuid(), "NoStashTypes", FeedOrder.Newest,
+            [new(Guid.NewGuid(), FeedProvider.Stash) { IncludeStashImages = false, IncludeStashScenes = false, IncludeStashMarkers = false }])));
         await File.WriteAllTextAsync(path, "invalid");
         await Assert.ThrowsAsync<InvalidDataException>(() => store.GetAllAsync());
         Assert.Equal("invalid", await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
+    public async Task StashContentTypeFlagsRoundTrip()
+    {
+        var path = Path.Combine(_folder, "feeds.json");
+        var feed = new FeedDefinition(Guid.NewGuid(), "Stash Markers", FeedOrder.Random,
+            [new(Guid.NewGuid(), FeedProvider.Stash)
+            {
+                IncludeStashImages = false,
+                IncludeStashScenes = true,
+                IncludeStashMarkers = true,
+                UseStashScenePreviews = true
+            }]);
+        var store = new JsonFeedStore(path);
+        await store.SaveAsync(feed);
+        var loaded = Assert.Single(await new JsonFeedStore(path).GetAllAsync());
+        var source = Assert.Single(loaded.Sources);
+        Assert.False(source.StashImagesEnabled);
+        Assert.True(source.StashScenesEnabled);
+        Assert.True(source.StashMarkersEnabled);
+        Assert.True(source.UseStashScenePreviews);
     }
 
     public void Dispose() => Directory.Delete(_folder, true);
