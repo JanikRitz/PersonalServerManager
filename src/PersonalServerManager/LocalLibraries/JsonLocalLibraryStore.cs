@@ -103,7 +103,9 @@ public sealed class JsonLocalLibraryStore(string filePath) : ILocalLibraryStore
             throw new InvalidDataException("Invalid local library configuration. It was left untouched.");
         }
 
-        if (instance.ManagedPort is < 1024 or > 65535 || (instance.AutoGitPull && instance.Kind != LocalLibraryKind.Notes))
+        if (instance.ManagedPort is < 1024 or > 65535 || (instance.AutoGitPull && instance.Kind != LocalLibraryKind.Notes)
+            || ((instance.HydrusInstanceId is not null || instance.StashInstanceId is not null) && instance.Kind != LocalLibraryKind.Notes)
+            || instance.HydrusInstanceId == Guid.Empty || instance.StashInstanceId == Guid.Empty)
             throw new InvalidDataException("Invalid per-library settings.");
         if (!instance.IsExternal) LocalLibraryPaths.NormalizeRoot(instance.RootPath);
         if (instance.CalibreInstallationFolder is not null) LocalLibraryPaths.NormalizeRoot(instance.CalibreInstallationFolder);

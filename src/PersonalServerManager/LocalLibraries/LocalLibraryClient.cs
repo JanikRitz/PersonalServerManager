@@ -14,6 +14,9 @@ public sealed record LocalLibraryFile(Stream Content, string ContentType, string
     public ValueTask DisposeAsync() => Content.DisposeAsync();
 }
 
+/// <summary>Root-relative (backslash-separated) note and image paths of a Notes library.</summary>
+internal sealed record NoteVault(string Root, IReadOnlyList<string> Notes, IReadOnlyList<string> Images);
+
 public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = null, HttpClient? httpClient = null)
 {
     private static readonly HttpClient DefaultHttp = new(new SocketsHttpHandler { AllowAutoRedirect = false })
@@ -314,7 +317,68 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
         return LibrarySearchService.SortItems(items, sort).Skip(offset).Take(limit).ToArray();
     }
 
-    private static IEnumerable<string> EnumerateNotes(string root, CancellationToken cancellationToken)
+    internal static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp" };
+    private const int MaximumImageBytes = 32 * 1024 * 1024;
+
+    /// <summary>Lists notes and images of a Notes library as root-relative paths.</summary>
+    internal static NoteVault GetNoteVault(LocalLibraryInstance instance, CancellationToken cancellationToken)
+    {
+        if (instance.Kind != LocalLibraryKind.Notes) throw new InvalidDataException("Not a Notes library.");
+        var root = LocalLibraryPaths.Root(instance.RootPath);
+        var notes = new List<string>();
+        var images = new List<string>();
+        foreach (var path in EnumerateFiles(root, extension => NoteExtensions.Contains(extension) || ImageExtensions.Contains(extension), cancellationToken))
+            (NoteExtensions.Contains(Path.GetExtension(path)) ? notes : images).Add(Path.GetRelativePath(root, path));
+        return new NoteVault(root, notes, images);
+    }
+
+    internal static async Task<string?> ReadNoteTextAsync(NoteVault vault, string relativePath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var path = LocalLibraryPaths.Resolve(vault.Root, relativePath);
+            return new FileInfo(path).Length > MaximumNoteBytes ? null : await ReadNoteAsync(vault.Root, path, cancellationToken);
+        }
+        catch (Exception exception) when (IsFileFailure(exception))
+        {
+            return null;
+        }
+    }
+
+    internal static string NoteId(NoteVault vault, string relativePath) => NoteId(vault.Root, Path.Combine(vault.Root, relativePath));
+
+    public Task<LocalLibraryFile?> OpenNoteImageAsync(LocalLibraryInstance instance, string relativePath,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var extension = Path.GetExtension(relativePath);
+        if (instance.Kind != LocalLibraryKind.Notes || !ImageExtensions.Contains(extension)) return Task.FromResult<LocalLibraryFile?>(null);
+        var root = LocalLibraryPaths.Root(instance.RootPath);
+        var path = LocalLibraryPaths.Resolve(root, relativePath.Replace('/', '\\'));
+        if (path.Split('\\').Contains(".git", StringComparer.OrdinalIgnoreCase)) return Task.FromResult<LocalLibraryFile?>(null);
+        var stream = OpenRead(root, path);
+        if (stream.Length > MaximumImageBytes)
+        {
+            stream.Dispose();
+            return Task.FromResult<LocalLibraryFile?>(null);
+        }
+        var contentType = extension.ToLowerInvariant() switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".avif" => "image/avif",
+            _ => "image/bmp"
+        };
+        return Task.FromResult<LocalLibraryFile?>(new LocalLibraryFile(stream, contentType, null));
+    }
+
+    private static IEnumerable<string> EnumerateNotes(string root, CancellationToken cancellationToken) =>
+        EnumerateFiles(root, NoteExtensions.Contains, cancellationToken);
+
+    private static IEnumerable<string> EnumerateFiles(string root, Func<string, bool> includeExtension, CancellationToken cancellationToken)
     {
         var pending = new Stack<string>();
         pending.Push(root);
@@ -356,8 +420,11 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                     continue;
                 }
 
-                if ((attributes & FileAttributes.Directory) != 0) pending.Push(path);
-                else if (NoteExtensions.Contains(Path.GetExtension(path))) yield return path;
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    if (!Path.GetFileName(path).Equals(".git", StringComparison.OrdinalIgnoreCase)) pending.Push(path);
+                }
+                else if (includeExtension(Path.GetExtension(path))) yield return path;
             }
         }
     }

@@ -4,6 +4,8 @@
 @inject ILocalLibraryStore Store
 @inject ManagedCalibreServer Calibre
 @inject IJSRuntime JavaScript
+@inject PersonalServerManager.Hydrus.IHydrusInstanceStore HydrusStore
+@inject PersonalServerManager.Stash.IStashInstanceStore StashStore
 
 <section class="local-libraries" aria-labelledby="@FieldId("heading")">
     <header class="library-heading">
@@ -112,6 +114,22 @@
                         @if (_draftKind == LocalLibraryKind.Notes)
                         {
                             <label class="calibre-checkbox"><input type="checkbox" @bind="_draftAutoGitPull" /> Auto Git pull</label>
+                            <label for="@FieldId("hydrus")">Hydrus instance for @@hydrus references</label>
+                            <select id="@FieldId("hydrus")" @bind="_draftHydrusId">
+                                <option value="">None</option>
+                                @foreach (var hydrus in _hydrusInstances)
+                                {
+                                    <option value="@hydrus.Id">@hydrus.Name</option>
+                                }
+                            </select>
+                            <label for="@FieldId("stash")">Stash instance for @@stash references</label>
+                            <select id="@FieldId("stash")" @bind="_draftStashId">
+                                <option value="">None</option>
+                                @foreach (var stash in _stashInstances)
+                                {
+                                    <option value="@stash.Id">@stash.Name</option>
+                                }
+                            </select>
                         }
                         else if (_draftExternal || !string.IsNullOrWhiteSpace(_draftServerUrl))
                         {
@@ -174,6 +192,10 @@
     private int _draftPort = 8080;
     private bool _draftAutostart;
     private bool _draftAutoGitPull;
+    private Guid? _draftHydrusId;
+    private Guid? _draftStashId;
+    private IReadOnlyList<PersonalServerManager.Hydrus.HydrusInstance> _hydrusInstances = [];
+    private IReadOnlyList<PersonalServerManager.Stash.StashInstance> _stashInstances = [];
     private string? _draftInstallation;
     private bool _calibreBusy;
 
@@ -331,6 +353,7 @@
         _draftPath = string.Empty;
         _draftServerUrl = _draftServerLibrary = null;
         _draftExternal = _draftAutostart = _draftAutoGitPull = false;
+        _draftHydrusId = _draftStashId = null;
         _draftPort = 8080;
         _draftInstallation = null;
         OpenEditor();
@@ -360,6 +383,8 @@
         _draftAutostart = instance.StartWithApp;
         _draftInstallation = instance.CalibreInstallationFolder;
         _draftAutoGitPull = instance.AutoGitPull;
+        _draftHydrusId = instance.HydrusInstanceId;
+        _draftStashId = instance.StashInstanceId;
         OpenEditor();
     }
 
@@ -368,6 +393,28 @@
         _editorError = null;
         _editing = true;
         _focusEditor = true;
+        _ = RefreshLinkTargetsAsync();
+    }
+
+    private async Task LoadLinkTargetsAsync()
+    {
+        if (FilterKind == LocalLibraryKind.Calibre) return;
+        _hydrusInstances = await HydrusStore.GetAllAsync(_token);
+        _stashInstances = await StashStore.GetAllAsync(_token);
+    }
+
+    private async Task RefreshLinkTargetsAsync()
+    {
+        try
+        {
+            await LoadLinkTargetsAsync();
+            if (!_disposed) await InvokeAsync(StateHasChanged);
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (Exception exception) when (IsExpectedFailure(exception))
+        {
+            _editorError = "Could not load Hydrus and Stash instances to link.";
+        }
     }
 
     private void CancelEdit()
@@ -436,7 +483,9 @@
         var kind = existing?.IsCalibre == true && _draftKind != LocalLibraryKind.Notes ? existing.Kind : _draftKind;
         var instance = new LocalLibraryInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), external ? "" : Path.GetFullPath(path), kind, serverUrl, serverLibrary,
             _draftPort, _draftAutostart, string.IsNullOrWhiteSpace(_draftInstallation) ? null : _draftInstallation.Trim(),
-            _draftKind == LocalLibraryKind.Notes && _draftAutoGitPull);
+            _draftKind == LocalLibraryKind.Notes && _draftAutoGitPull,
+            _draftKind == LocalLibraryKind.Notes ? _draftHydrusId : null,
+            _draftKind == LocalLibraryKind.Notes ? _draftStashId : null);
         if (!instance.HasValidReaderConfiguration())
         {
             _editorError = "Enter both a Content Server library ID and an HTTP or HTTPS URL without credentials, a query, or a fragment.";

@@ -36,7 +36,8 @@ public sealed class LocalLibraryStoreTests : IDisposable
             new Uri("https://calibre.example/base/"), "Library ID");
         var managed = new LocalLibraryInstance(Guid.NewGuid(), "Managed", _root, LocalLibraryKind.Calibre,
             ManagedPort: 9090, StartWithApp: true, CalibreInstallationFolder: _root);
-        var notes = new LocalLibraryInstance(Guid.NewGuid(), "Notes", _root, LocalLibraryKind.Notes, AutoGitPull: true);
+        var notes = new LocalLibraryInstance(Guid.NewGuid(), "Notes", _root, LocalLibraryKind.Notes, AutoGitPull: true,
+            HydrusInstanceId: Guid.NewGuid(), StashInstanceId: Guid.NewGuid());
         await store.SaveAsync(external);
         await store.SaveAsync(managed);
         await store.SaveAsync(notes);
@@ -44,6 +45,8 @@ public sealed class LocalLibraryStoreTests : IDisposable
         Assert.Contains(managed, await store.GetAllAsync());
         Assert.Contains(notes, await store.GetAllAsync());
         await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(external with { AutoGitPull = true }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(managed with { StashInstanceId = Guid.NewGuid() }));
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(notes with { HydrusInstanceId = Guid.Empty }));
         await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(managed with { ManagedPort = 80 }));
         await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(external with { ContentServerUrl = null, ContentServerLibraryId = null }));
     }

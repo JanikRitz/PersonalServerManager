@@ -5,7 +5,7 @@ public enum LocalLibraryKind { Notes, CalibreText, CalibreComic, Calibre }
 public sealed record LocalLibraryInstance(Guid Id, string Name, string RootPath, LocalLibraryKind Kind,
     Uri? ContentServerUrl = null, string? ContentServerLibraryId = null,
     int ManagedPort = 8080, bool StartWithApp = false, string? CalibreInstallationFolder = null,
-    bool AutoGitPull = false)
+    bool AutoGitPull = false, Guid? HydrusInstanceId = null, Guid? StashInstanceId = null)
 {
     public bool IsCalibre => Kind is LocalLibraryKind.Calibre or LocalLibraryKind.CalibreText or LocalLibraryKind.CalibreComic;
     public bool IsExternal => IsCalibre && string.IsNullOrWhiteSpace(RootPath) && ContentServerUrl is not null;
