@@ -7,7 +7,7 @@
 @inject ManagedBackendService ManagedBackends
 @inject IJSRuntime JavaScript
 
-<section class="swarmui-instances" aria-labelledby="@FieldId("heading")">
+<section class="backend-group swarmui-instances" aria-labelledby="@FieldId("heading")">
     <header class="swarmui-heading">
         <h2 id="@FieldId("heading")">SwarmUI</h2>
         <button class="icon-button" type="button" title="Add SwarmUI instance" aria-label="Add SwarmUI instance" disabled="@(_busy || _loading)" @onclick="AddInstance">
@@ -31,31 +31,18 @@
         @foreach (var instance in _instances)
         {
             var observation = _observations.GetValueOrDefault(instance.Id);
-            <li @key="instance.Id" class="swarmui-row">
-                <span class="status-dot @(observation is null ? string.Empty : observation.IsReachable ? "online" : "offline")" aria-hidden="true"></span>
-                <div class="instance-copy">
-                    <strong>@instance.Name</strong>
-                    <span class="instance-status" role="status">@(observation is null ? "Checking..." : observation.IsReachable ? "Available" : "Unavailable")</span>
-                    <dl class="instance-details">
-                        <dt>Base URL</dt><dd>@instance.BaseUrl.AbsoluteUri</dd>
-                        <dt>Search paths</dt>
-                        <dd>@string.Join(", ", instance.SearchPaths.Select(path => $"{path.Path} (depth {path.Depth})"))</dd>
-                        <dt>Observation</dt><dd>@(observation?.Message is { Length: > 0 } message ? message : "First check pending")</dd>
-                    </dl>
+            <li @key="instance.Id">
+                <BackendInstanceRow Name="@instance.Name" Type="@(instance.IsManaged ? "Managed" : "External")"
+                                    Status="@(observation is null ? "Unknown" : observation.IsReachable ? "Available" : "Unavailable")"
+                                    StatusClass="@(observation is null ? "unknown" : observation.IsReachable ? "online" : "offline")"
+                                    Selected="@Selection.IsSelected("SwarmUI", instance.Id)" OnSelect="() => SelectInstance(instance.Id)">
+                    <Actions>
                     @if (instance.IsManaged)
                     {
-                        <ManagedBackendControls InstanceId="@instance.Id" StartWithApp="@instance.StartWithApp" StartWithAppChanged="enabled => SaveAutostartAsync(instance, enabled)" />
+                        <ManagedBackendControls InstanceId="@instance.Id" InstanceName="@instance.Name" Compact="true" Disabled="@(_busy || _editing)" />
                     }
-                    <a class="open-link" href="@instance.BaseUrl.AbsoluteUri" target="_blank" rel="noopener noreferrer" aria-label="@($"Open SwarmUI {instance.Name}")">Open SwarmUI<MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" aria-hidden="true" /></a>
-                </div>
-                <div class="row-actions">
-                    <button class="icon-button" type="button" title="Edit SwarmUI instance" aria-label="@($"Edit SwarmUI instance {instance.Name}")" disabled="@_busy" @onclick="() => EditInstance(instance)">
-                        <MudIcon Icon="@Icons.Material.Filled.Edit" aria-hidden="true" />
-                    </button>
-                    <button class="icon-button remove-button" type="button" title="Remove SwarmUI instance" aria-label="@($"Remove SwarmUI instance {instance.Name}")" disabled="@_busy" @onclick="() => RemoveAsync(instance)">
-                        <MudIcon Icon="@Icons.Material.Filled.DeleteOutline" aria-hidden="true" />
-                    </button>
-                </div>
+                    </Actions>
+                </BackendInstanceRow>
             </li>
         }
     </ul>
@@ -64,6 +51,7 @@
     {
         <div class="swarmui-backdrop" @onkeydown="HandleEditorKey">
             <dialog open class="swarmui-dialog" aria-modal="true" aria-labelledby="@FieldId("editor-title")">
+                <MudFocusTrap>
                 <header class="editor-heading">
                     <h3 id="@FieldId("editor-title")">@(_editingId is null ? "Add SwarmUI instance" : "Edit SwarmUI instance")</h3>
                     <button class="icon-button" type="button" title="Close SwarmUI editor" aria-label="Close SwarmUI editor" disabled="@_busy" @onclick="CancelEdit">
@@ -122,15 +110,43 @@
                         </div>
                     </fieldset>
                 </form>
+                </MudFocusTrap>
             </dialog>
         </div>
     }
 </section>
 
+@foreach (var instance in _instances.Where(instance => Selection.IsSelected("SwarmUI", instance.Id)))
+{
+    var observation = _observations.GetValueOrDefault(instance.Id);
+    <section class="backend-details swarmui-instances" aria-label="@($"SwarmUI details for {instance.Name}")">
+        <header class="details-heading"><h3>@instance.Name</h3><span role="status">@(observation is null ? "Unknown" : observation.IsReachable ? "Available" : "Unavailable")</span></header>
+        <dl class="instance-details">
+            <dt>Mode</dt><dd>@(instance.IsManaged ? "Managed" : "External")</dd>
+            <dt>Base URL</dt><dd>@instance.BaseUrl.AbsoluteUri</dd>
+            @if (instance.IsManaged) { <dt>Installation</dt><dd>@instance.InstallationFolder</dd> }
+            <dt>Search paths</dt><dd>@string.Join(", ", instance.SearchPaths.Select(path => $"{path.Path} (depth {path.Depth})"))</dd>
+            <dt>Observation</dt><dd>@(observation?.Message is { Length: > 0 } message ? message : "First check pending")</dd>
+            @if (observation is not null) { <dt>Last checked</dt><dd>@observation.CheckedAt.ToLocalTime().ToString("g")</dd> }
+        </dl>
+        @if (instance.IsManaged)
+        {
+            <ManagedBackendControls @key="instance.Id" InstanceId="@instance.Id" SettingsOnly="true" Disabled="@(_busy || _editing)" StartWithApp="@instance.StartWithApp" StartWithAppChanged="enabled => SaveAutostartAsync(instance, enabled)" />
+        }
+        <div class="detail-actions">
+            <a class="detail-action" href="@instance.BaseUrl.AbsoluteUri" target="_blank" rel="noopener noreferrer" aria-label="@($"Open SwarmUI {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" />Open SwarmUI</a>
+            <button class="detail-action" type="button" disabled="@_busy" @onclick="() => EditInstance(instance)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" />Edit</button>
+            <button class="detail-action remove-button" type="button" disabled="@_busy" @onclick="() => RemoveAsync(instance)"><MudIcon Icon="@Icons.Material.Filled.DeleteOutline" Size="Size.Small" />Remove</button>
+        </div>
+    </section>
+}
+
 @code {
     private const string DefaultUrl = "http://localhost:7801/";
 
     [Parameter] public EventCallback Changed { get; set; }
+    [CascadingParameter] public BackendSelection Selection { get; set; } = new();
+    private BackendSelection? _subscribedSelection;
 
     private readonly CancellationTokenSource _lifetime = new();
     private readonly string _id = $"swarmui-{Guid.NewGuid():N}";
@@ -159,6 +175,17 @@
     }
 
     private string FieldId(string suffix) => $"{_id}-{suffix}";
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(_subscribedSelection, Selection)) return;
+        if (_subscribedSelection is not null) _subscribedSelection.Changed -= SelectionChanged;
+        _subscribedSelection = Selection;
+        _subscribedSelection.Changed += SelectionChanged;
+    }
+
+    private void SelectionChanged() => _ = InvokeAsync(StateHasChanged);
+    private void SelectInstance(Guid instanceId) => Selection.Select("SwarmUI", instanceId);
 
     protected override async Task OnInitializedAsync()
     {
@@ -335,12 +362,11 @@
         _busy = true;
         try
         {
-            if (_editingId is { } existingId && ManagedBackends.GetStatus(existingId).IsRunning)
-                throw new InvalidDataException("Stop SwarmUI before editing its configuration.");
             var instance = new SwarmUIInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), baseUrl,
                 _draftPaths.Select(row => new SwarmUISearchPath(row.Path, row.Depth)).ToArray(),
                 _draftManaged ? _draftInstallation.Trim() : null, _draftPort, _draftManaged && _draftAutostart);
-            await Store.SaveAsync(instance, _token);
+            if (_editingId is null) await Store.SaveAsync(instance, _token);
+            else await ManagedBackends.UpdateInstanceAsync(instance, _token);
             _editing = false;
             _editingId = null;
             await ReloadAsync();
@@ -372,15 +398,16 @@
         _error = null;
         try
         {
-            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, $"Remove {instance.Name} from this manager? SwarmUI and its outputs will not be changed."))
+            var confirmation = instance.IsManaged
+                ? $"Remove {instance.Name}? Its PSM-managed SwarmUI service will be stopped. Local files and outputs will be kept."
+                : $"Remove {instance.Name}? The external SwarmUI service will keep running and its outputs will not be changed.";
+            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, confirmation))
             {
                 return;
             }
 
-            await ManagedBackends.StopInstanceAsync(instance.Id);
-            if (ManagedBackends.GetStatus(instance.Id).IsRunning)
-                throw new InvalidDataException("SwarmUI could not stop. Retry Stop before removing the instance.");
-            await Store.RemoveAsync(instance.Id, _token);
+            await ManagedBackends.RemoveInstanceAsync("SwarmUI", instance.Id, _token);
+            Selection.Clear("SwarmUI", instance.Id);
             await ReloadAsync();
             await NotifyChangedAsync();
         }
@@ -403,13 +430,14 @@
     {
         try
         {
-            await Store.SaveAsync(instance with { StartWithApp = enabled }, _token);
+            await Store.UpdateAsync(instance with { StartWithApp = enabled }, _token);
             _instances = await Store.GetAllAsync(_token);
             await NotifyChangedAsync();
         }
         catch (Exception exception) when (IsExpectedFailure(exception))
         {
-            _error = "Could not save the autostart setting.";
+            _error = exception is InvalidDataException && exception.Message == "The SwarmUI instance no longer exists."
+                ? exception.Message : "Could not save the autostart setting.";
         }
     }
 
@@ -444,6 +472,7 @@
         }
 
         _disposed = true;
+        if (_subscribedSelection is not null) _subscribedSelection.Changed -= SelectionChanged;
         _instances = [];
         _observations.Clear();
         _lifetime.Cancel();

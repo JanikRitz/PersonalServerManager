@@ -20,7 +20,13 @@ public sealed class JsonLocalLibraryStore(string filePath) : ILocalLibraryStore
         }
     }
 
-    public async Task SaveAsync(LocalLibraryInstance instance, CancellationToken cancellationToken = default)
+    public Task SaveAsync(LocalLibraryInstance instance, CancellationToken cancellationToken = default) =>
+        SaveCoreAsync(instance, false, cancellationToken);
+
+    public Task UpdateAsync(LocalLibraryInstance instance, CancellationToken cancellationToken = default) =>
+        SaveCoreAsync(instance, true, cancellationToken);
+
+    private async Task SaveCoreAsync(LocalLibraryInstance instance, bool requireExisting, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         Validate(instance);
@@ -30,6 +36,8 @@ public sealed class JsonLocalLibraryStore(string filePath) : ILocalLibraryStore
         {
             var stored = await ReadAsync(cancellationToken);
             var index = stored.FindIndex(item => item.Id == instance.Id);
+            if (requireExisting && index < 0)
+                throw new InvalidDataException("The local library no longer exists.");
             if (index < 0)
             {
                 stored.Add(instance);

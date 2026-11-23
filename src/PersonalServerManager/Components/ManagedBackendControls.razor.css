@@ -14,12 +14,18 @@
     min-height: 1.75rem;
     padding: 0.125rem 0.5rem;
     border: 1px solid currentColor;
-    border-radius: 4px;
+    border-radius: var(--backend-icon-radius, 4px);
     font-size: 0.8rem;
 }
 
 .managed-backend-badge.running { color: var(--mud-palette-success); }
 .managed-backend-badge.stopped { color: var(--mud-palette-text-secondary); }
+
+.compact { flex-wrap: wrap; gap: 0; max-width: 13rem; }
+.compact .managed-backend-badge { min-width: 0; padding: 0 0.25rem; border: 0; }
+.compact .managed-backend-message { flex: 1 0 100%; padding: 0 0.25rem; }
+.settings-only { align-items: flex-start; flex-direction: column; }
+.settings-only .managed-backend-message { flex: initial; }
 
 .managed-backend-autostart {
     display: inline-flex;
@@ -28,7 +34,7 @@
     font-size: 0.875rem;
 }
 
-.managed-backend-autostart input { accent-color: var(--mud-palette-primary); }
+.managed-backend-autostart input { accent-color: var(--teal, var(--mud-palette-primary)); }
 
 .managed-backend-message {
     flex: 1 1 14rem;

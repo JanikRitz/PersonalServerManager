@@ -74,6 +74,7 @@ builder.Services.AddSingleton<IAdminCredentialStore>(services => new JsonAdminCr
     services.GetRequiredService<IDataProtectionProvider>().CreateProtector("OwnerPasswordHash.v1")));
 builder.Services.AddHttpClient<IStashGraphQlClient, StashGraphQlClient>(client =>
     client.Timeout = Timeout.InfiniteTimeSpan);
+builder.Services.AddSingleton<StashJobState>();
 builder.Services.AddSingleton<IHydrusClient>(_ => new HydrusClient());
 builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusInstanceStore(
     Path.Combine(dataDirectory, "hydrus-instances.json"),

@@ -10,6 +10,355 @@ namespace PersonalServerManager.Tests;
 
 public sealed class StashGraphQlClientTests
 {
+    [Fact]
+    public async Task StartMetadataScanAsync_SendsAllOptionsAndAuthenticates()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((request, body) =>
+        {
+            Assert.Equal(Instance("test-key").GraphQlEndpoint, request.RequestUri);
+            Assert.Equal("Bearer test-key", request.Headers.Authorization?.ToString());
+            using var payload = JsonDocument.Parse(body);
+            Assert.Contains("mutation Job($input: ScanMetadataInput!) { metadataScan(input: $input) }", payload.RootElement.GetProperty("query").GetString());
+            using var expected = JsonDocument.Parse("""
+                {"paths":["/library"],"rescan":true,"scanGenerateCovers":true,"scanGeneratePreviews":true,
+                 "scanGenerateImagePreviews":true,"scanGenerateSprites":true,"scanGeneratePhashes":true,
+                 "scanGenerateImagePhashes":true,"scanGenerateThumbnails":true,"scanGenerateClipPreviews":true,
+                 "filter":{"minModTime":"2025-01-02T03:04:05Z"}}
+                """);
+            Assert.True(JsonElement.DeepEquals(expected.RootElement, payload.RootElement.GetProperty("variables").GetProperty("input")));
+            return Json("""{"data":{"metadataScan":"123"}}""");
+        })));
+        IStashGraphQlClient contract = client;
+
+        var id = await contract.StartMetadataScanAsync(Instance("test-key"), new StashScanOptions
+        {
+            Paths = ["/library"], Rescan = true, ScanGenerateCovers = true, ScanGeneratePreviews = true,
+            ScanGenerateImagePreviews = true, ScanGenerateSprites = true, ScanGeneratePhashes = true,
+            ScanGenerateImagePhashes = true, ScanGenerateThumbnails = true, ScanGenerateClipPreviews = true,
+            Filter = new StashScanFilter { MinModTime = "2025-01-02T03:04:05Z" }
+        });
+
+        Assert.Equal("123", id);
+    }
+
+    [Fact]
+    public async Task StartMetadataGenerateAsync_SendsAllOptionsWithGraphQlNames()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((request, body) =>
+        {
+            Assert.Null(request.Headers.Authorization);
+            using var payload = JsonDocument.Parse(body);
+            Assert.Contains("mutation Job($input: GenerateMetadataInput!) { metadataGenerate(input: $input) }", payload.RootElement.GetProperty("query").GetString());
+            using var expected = JsonDocument.Parse("""
+                {"covers":true,"sprites":true,"previews":true,"imagePreviews":true,
+                 "previewOptions":{"previewSegments":3,"previewSegmentDuration":1.5,"previewExcludeStart":"10%","previewExcludeEnd":"5s","previewPreset":"fast"},
+                 "markers":true,"markerImagePreviews":true,"markerScreenshots":true,"transcodes":true,
+                 "forceTranscodes":true,"phashes":true,"interactiveHeatmapsSpeeds":true,"imagePhashes":true,
+                 "imageThumbnails":true,"clipPreviews":true,"sceneIDs":["1"],"markerIDs":["2"],
+                 "imageIDs":["3"],"galleryIDs":["4"],"paths":["/library"],"overwrite":true}
+                """);
+            Assert.True(JsonElement.DeepEquals(expected.RootElement, payload.RootElement.GetProperty("variables").GetProperty("input")));
+            return Json("""{"data":{"metadataGenerate":"456"}}""");
+        })));
+
+        var id = await client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions
+        {
+            Covers = true, Sprites = true, Previews = true, ImagePreviews = true,
+            PreviewOptions = new StashPreviewOptions { PreviewSegments = 3, PreviewSegmentDuration = 1.5, PreviewExcludeStart = "10%", PreviewExcludeEnd = "5s", PreviewPreset = "fast" },
+            Markers = true, MarkerImagePreviews = true, MarkerScreenshots = true, Transcodes = true,
+            ForceTranscodes = true, Phashes = true, InteractiveHeatmapsSpeeds = true, ImagePhashes = true,
+            ImageThumbnails = true, ClipPreviews = true, SceneIDs = ["1"], MarkerIDs = ["2"], ImageIDs = ["3"],
+            GalleryIDs = ["4"], Paths = ["/library"], Overwrite = true
+        });
+
+        Assert.Equal("456", id);
+    }
+
+    [Fact]
+    public async Task JobInputs_OmitNullsButPreserveFalseEmptyAndZeroValues()
+    {
+        var calls = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((request, body) =>
+        {
+            using var payload = JsonDocument.Parse(body);
+            var input = payload.RootElement.GetProperty("variables").GetProperty("input");
+            if (calls++ == 0)
+            {
+                Assert.False(input.TryGetProperty("paths", out _));
+                Assert.False(input.GetProperty("rescan").GetBoolean());
+                Assert.Empty(input.GetProperty("filter").EnumerateObject());
+                return Json("""{"data":{"metadataScan":"1"}}""");
+            }
+            Assert.False(input.TryGetProperty("markerIDs", out _));
+            Assert.Empty(input.GetProperty("sceneIDs").EnumerateArray());
+            Assert.False(input.GetProperty("covers").GetBoolean());
+            var preview = input.GetProperty("previewOptions");
+            Assert.Equal(0, preview.GetProperty("previewSegments").GetInt32());
+            Assert.False(preview.TryGetProperty("previewPreset", out _));
+            return Json("""{"data":{"metadataGenerate":"2"}}""");
+        })));
+
+        await client.StartMetadataScanAsync(Instance(null), new StashScanOptions { Filter = new StashScanFilter() });
+        await client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions { SceneIDs = [], PreviewOptions = new StashPreviewOptions { PreviewSegments = 0 } });
+        Assert.Equal(2, calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task JobInputs_OmitUnsupportedFalseFieldsButKeepSupportedFalseFields(bool generate)
+    {
+        var mutations = 0;
+        var schemaQueries = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, body) =>
+        {
+            mutations++;
+            using var payload = JsonDocument.Parse(body);
+            var input = payload.RootElement.GetProperty("variables").GetProperty("input");
+            Assert.False(input.GetProperty(generate ? "covers" : "rescan").GetBoolean());
+            Assert.False(input.TryGetProperty(generate ? "clipPreviews" : "scanGenerateClipPreviews", out var _));
+            return Json(generate ? """{"data":{"metadataGenerate":"2"}}""" : """{"data":{"metadataScan":"1"}}""");
+        }, (_, body) =>
+        {
+            schemaQueries++;
+            return JobSchema(body, generate ? ["covers"] : ["rescan"]);
+        })));
+
+        var id = generate
+            ? await client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions())
+            : await client.StartMetadataScanAsync(Instance(null), new StashScanOptions());
+
+        Assert.Equal(generate ? "2" : "1", id);
+        Assert.Equal(1, schemaQueries);
+        Assert.Equal(1, mutations);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task JobInputs_RejectUnsupportedTrueWithoutMutation(bool generate)
+    {
+        var mutations = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+        {
+            mutations++;
+            return Json("{}");
+        }, (_, body) => JobSchema(body, []))));
+
+        var exception = await Assert.ThrowsAsync<StashJobOptionNotSupportedException>(() => generate
+            ? client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions { ClipPreviews = true })
+            : client.StartMetadataScanAsync(Instance(null), new StashScanOptions { ScanGenerateClipPreviews = true }));
+
+        Assert.Contains(generate ? "clipPreviews" : "scanGenerateClipPreviews", exception.Message);
+        Assert.Equal(0, mutations);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task JobInputs_RejectUnsupportedNestedOptionsWithoutMutation(bool generate, bool parentUnsupported)
+    {
+        var mutations = 0;
+        var parent = generate ? "previewOptions" : "filter";
+        var child = generate ? "previewSegments" : "minModTime";
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+        {
+            mutations++;
+            return Json("{}");
+        }, (_, body) => JobSchema(body, parentUnsupported ? [] : [parent], []))));
+
+        var exception = await Assert.ThrowsAsync<StashJobOptionNotSupportedException>(() => generate
+            ? client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions { PreviewOptions = new StashPreviewOptions { PreviewSegments = 0 } })
+            : client.StartMetadataScanAsync(Instance(null), new StashScanOptions { Filter = new StashScanFilter { MinModTime = "2025-01-02T03:04:05Z" } }));
+
+        Assert.Contains(parentUnsupported ? parent : child, exception.Message);
+        Assert.Equal(0, mutations);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"errors\":[{\"message\":\"introspection disabled\"}]}")]
+    [InlineData("{\"data\":{\"input\":null}}")]
+    [InlineData("{\"data\":{\"input\":{\"kind\":\"OBJECT\",\"inputFields\":[]}}}")]
+    [InlineData("{\"data\":{\"input\":{\"kind\":\"INPUT_OBJECT\",\"inputFields\":[{}]}}}")]
+    [InlineData("{\"data\":{\"input\":{\"kind\":\"INPUT_OBJECT\",\"inputFields\":[{\"name\":\"rescan\"},{\"name\":\"rescan\"}]}}}")]
+    public async Task JobInputs_RejectInvalidSchemaWithoutMutation(string schema)
+    {
+        var mutations = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+        {
+            mutations++;
+            return Json("{}");
+        }, (_, _) => Json(schema))));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.StartMetadataScanAsync(Instance(null), new StashScanOptions()));
+        Assert.Equal(0, mutations);
+    }
+
+    [Fact]
+    public async Task JobInputs_AuthenticateSchemaQueryAndRejectUnavailableNestedSchema()
+    {
+        var schemaQueries = 0;
+        var mutations = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+        {
+            mutations++;
+            return Json("{}");
+        }, (request, body) =>
+        {
+            schemaQueries++;
+            Assert.Equal("Bearer test-key", request.Headers.Authorization?.ToString());
+            using var payload = JsonDocument.Parse(body);
+            var variables = payload.RootElement.GetProperty("variables");
+            Assert.Equal("GenerateMetadataInput", variables.GetProperty("inputType").GetString());
+            Assert.Equal("GeneratePreviewOptionsInput", variables.GetProperty("nestedType").GetString());
+            return Json("""{"data":{"input":{"kind":"INPUT_OBJECT","inputFields":[{"name":"previewOptions"}]},"nested":null}}""");
+        })));
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() => client.StartMetadataGenerateAsync(
+            Instance("test-key"), new StashGenerateOptions { PreviewOptions = new StashPreviewOptions() }));
+        Assert.Contains("GeneratePreviewOptionsInput", exception.Message);
+        Assert.Equal(1, schemaQueries);
+        Assert.Equal(0, mutations);
+    }
+
+    [Fact]
+    public async Task JobInputs_PropagateSchemaTransportFailureWithoutMutation()
+    {
+        var mutations = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+        {
+            mutations++;
+            return Json("{}");
+        }, (_, _) => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable))));
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => client.StartMetadataScanAsync(Instance(null), new StashScanOptions()));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+        Assert.Equal(0, mutations);
+    }
+
+    [Fact]
+    public async Task JobInputs_RejectUnsupportedNonBooleanWithoutMutation()
+    {
+        var mutations = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+        {
+            mutations++;
+            return Json("{}");
+        }, (_, body) => JobSchema(body, []))));
+
+        var exception = await Assert.ThrowsAsync<StashJobOptionNotSupportedException>(() => client.StartMetadataGenerateAsync(
+            Instance(null), new StashGenerateOptions { SceneIDs = [] }));
+        Assert.Contains("sceneIDs", exception.Message);
+        Assert.Equal(0, mutations);
+    }
+
+    [Fact]
+    public async Task JobInputs_DoNotRetryMutationAfterTransportError()
+    {
+        var mutations = 0;
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) =>
+        {
+            mutations++;
+            throw new HttpRequestException("connection lost after submission");
+        })));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.StartMetadataScanAsync(Instance(null), new StashScanOptions()));
+        Assert.Equal(1, mutations);
+    }
+
+    [Fact]
+    public async Task FindJobAsync_PollsAndMapsStatusErrorAndMissingJob()
+    {
+        var responses = new Queue<string>(["""{"data":{"findJob":{"id":"42","status":"RUNNING","error":null}}}""",
+            """{"data":{"findJob":{"id":"42","status":"FAILED","error":"failed"}}}""", """{"data":{"findJob":null}}"""]);
+        IStashGraphQlClient client = new StashGraphQlClient(new HttpClient(new StubHandler((request, body) =>
+        {
+            Assert.Equal("Bearer test-key", request.Headers.Authorization?.ToString());
+            using var payload = JsonDocument.Parse(body);
+            Assert.Equal("query Job($id: ID!) { findJob(input: {id: $id}) { id status error } }", payload.RootElement.GetProperty("query").GetString());
+            Assert.Equal("42", payload.RootElement.GetProperty("variables").GetProperty("id").GetString());
+            return Json(responses.Dequeue());
+        })));
+
+        Assert.Equal(new StashJob("42", "RUNNING", null), await client.FindJobAsync(Instance("test-key"), "42"));
+        Assert.Equal(new StashJob("42", "FAILED", "failed"), await client.FindJobAsync(Instance("test-key"), "42"));
+        Assert.Null(await client.FindJobAsync(Instance("test-key"), "42"));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("[]")]
+    [InlineData("{\"data\":null}")]
+    [InlineData("{\"data\":{\"metadataScan\":null}}")]
+    [InlineData("{\"data\":{\"metadataScan\":42}}")]
+    [InlineData("{\"data\":{\"metadataScan\":\" \"}}")]
+    [InlineData("{\"data\":{\"metadataScan\":\"42\"},\"errors\":[{\"message\":\"bad query\"}]}")]
+    [InlineData("{\"errors\":[null]}")]
+    [InlineData("{\"errors\":[{\"message\":42}]}")]
+    public async Task StartMetadataScanAsync_RejectsInvalidResponses(string response)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(response))));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.StartMetadataScanAsync(Instance(null), new StashScanOptions()));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"data\":{\"metadataGenerate\":null}}")]
+    [InlineData("{\"errors\":[{\"message\":\"bad query\"}]}")]
+    public async Task StartMetadataGenerateAsync_RejectsInvalidResponses(string response)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(response))));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions()));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"data\":{\"findJob\":[]}}")]
+    [InlineData("{\"data\":{\"findJob\":{\"id\":\"43\",\"status\":\"RUNNING\",\"error\":null}}}")]
+    [InlineData("{\"data\":{\"findJob\":{\"id\":\"42\",\"status\":\"\",\"error\":null}}}")]
+    [InlineData("{\"data\":{\"findJob\":{\"id\":\"42\",\"status\":\"RUNNING\"}}}")]
+    [InlineData("{\"data\":{\"findJob\":{\"id\":\"42\",\"status\":\"RUNNING\",\"error\":3}}}")]
+    [InlineData("{\"errors\":[{\"message\":\"bad query\"}]}")]
+    public async Task FindJobAsync_RejectsInvalidResponses(string response)
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(response))));
+        await Assert.ThrowsAsync<InvalidDataException>(() => client.FindJobAsync(Instance(null), "42"));
+    }
+
+    [Fact]
+    public async Task JobOperations_RejectOversizedResponsesAndHonorCancellation()
+    {
+        var client = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => Json(new string(' ', 65537)))));
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.StartMetadataScanAsync(Instance(null), new StashScanOptions()));
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions()));
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.FindJobAsync(Instance(null), "42"));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.StartMetadataScanAsync(Instance(null), new StashScanOptions(), cancellation.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.StartMetadataGenerateAsync(Instance(null), new StashGenerateOptions(), cancellation.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.FindJobAsync(Instance(null), "42", cancellation.Token));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.FindJobAsync(Instance(null), " "));
+    }
+
+    [Fact]
+    public async Task JobOperations_PropagateHttpErrorsAndInFlightCancellation()
+    {
+        var unavailable = new StashGraphQlClient(new HttpClient(new StubHandler((_, _) => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable))));
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => unavailable.StartMetadataScanAsync(Instance(null), new StashScanOptions()));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+
+        var handler = new WaitingHandler();
+        var client = new StashGraphQlClient(new HttpClient(handler));
+        using var cancellation = new CancellationTokenSource();
+        var job = client.FindJobAsync(Instance(null), "42", cancellation.Token);
+        await handler.Started.Task;
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => job);
+    }
+
     [Theory]
     [InlineData(StashSearchKind.Scenes, "findScenes", "scenes", 5)]
     [InlineData(StashSearchKind.Images, "findImages", "images", 5)]
@@ -731,12 +1080,50 @@ public sealed class StashGraphQlClientTests
         Content = new StringContent(content, Encoding.UTF8, "application/json")
     };
 
-    private sealed class StubHandler(Func<HttpRequestMessage, string, HttpResponseMessage> respond) : HttpMessageHandler
+    private static HttpResponseMessage JobSchema(string body, string[]? inputFields = null, string[]? nestedFields = null)
+    {
+        using var payload = JsonDocument.Parse(body);
+        var variables = payload.RootElement.GetProperty("variables");
+        var inputType = variables.GetProperty("inputType").GetString();
+        inputFields ??= inputType == "ScanMetadataInput"
+            ? ["paths", "rescan", "scanGenerateCovers", "scanGeneratePreviews", "scanGenerateImagePreviews", "scanGenerateSprites", "scanGeneratePhashes", "scanGenerateImagePhashes", "scanGenerateThumbnails", "scanGenerateClipPreviews", "filter"]
+            : ["covers", "sprites", "previews", "imagePreviews", "previewOptions", "markers", "markerImagePreviews", "markerScreenshots", "transcodes", "forceTranscodes", "phashes", "interactiveHeatmapsSpeeds", "imagePhashes", "imageThumbnails", "clipPreviews", "sceneIDs", "markerIDs", "imageIDs", "galleryIDs", "paths", "overwrite"];
+        nestedFields ??= inputType == "ScanMetadataInput"
+            ? ["minModTime"]
+            : ["previewSegments", "previewSegmentDuration", "previewExcludeStart", "previewExcludeEnd", "previewPreset"];
+        return Json(JsonSerializer.Serialize(new
+        {
+            data = new
+            {
+                input = new { kind = "INPUT_OBJECT", inputFields = inputFields.Select(name => new { name }) },
+                nested = new { kind = "INPUT_OBJECT", inputFields = nestedFields.Select(name => new { name }) }
+            }
+        }));
+    }
+
+    private sealed class StubHandler(
+        Func<HttpRequestMessage, string, HttpResponseMessage> respond,
+        Func<HttpRequestMessage, string, HttpResponseMessage>? respondToSchema = null) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using var payload = JsonDocument.Parse(body);
+            if (payload.RootElement.GetProperty("query").GetString()!.StartsWith("query JobInputFields(", StringComparison.Ordinal))
+                return respondToSchema is null ? JobSchema(body) : respondToSchema(request, body);
             return respond(request, body);
+        }
+    }
+
+    private sealed class WaitingHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Started.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("Request should have been canceled.");
         }
     }
 }

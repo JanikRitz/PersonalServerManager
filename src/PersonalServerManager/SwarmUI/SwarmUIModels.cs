@@ -58,6 +58,8 @@ public interface ISwarmUIInstanceStore
 {
     Task<IReadOnlyList<SwarmUIInstance>> GetAllAsync(CancellationToken cancellationToken = default);
     Task SaveAsync(SwarmUIInstance instance, CancellationToken cancellationToken = default);
+    Task UpdateAsync(SwarmUIInstance instance, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Atomic updates are not supported by this store.");
     Task RemoveAsync(Guid id, CancellationToken cancellationToken = default);
 }
 

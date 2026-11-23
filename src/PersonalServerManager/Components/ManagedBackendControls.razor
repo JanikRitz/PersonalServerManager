@@ -2,30 +2,56 @@
 @implements IAsyncDisposable
 @inject ManagedBackendService BackendService
 
-<div class="managed-backend-controls" aria-busy="@_busy">
-    <span class="managed-backend-badge">Managed</span>
-    <span class="managed-backend-badge @(_status.IsRunning ? "running" : "stopped")">
-        @(_status.IsRunning ? "Running" : "Stopped")
-    </span>
-    <MudIconButton Icon="@Icons.Material.Filled.PlayArrow" title="Start backend" aria-label="Start backend"
-                   Disabled="@(_busy || _status.IsRunning)" OnClick="StartAsync" Size="Size.Small" />
-    <MudIconButton Icon="@Icons.Material.Filled.Stop" title="Stop backend" aria-label="Stop backend"
-                   Disabled="@(_busy || !_status.IsRunning)" OnClick="StopAsync" Size="Size.Small" />
-    <label class="managed-backend-autostart">
-        <input type="checkbox" checked="@StartWithApp" disabled="@(_busy || !StartWithAppChanged.HasDelegate)"
-               @onchange="ChangeAutostartAsync" />
-        Start with Personal Server Manager
-    </label>
-    <span class="managed-backend-message" role="status" aria-live="polite">@_status.Message</span>
+<div class="managed-backend-controls @(Compact ? "compact" : null) @(SettingsOnly ? "settings-only" : null)" aria-busy="@_busy">
+    @if (!SettingsOnly)
+    {
+        @if (!Compact) { <span class="managed-backend-badge">Managed</span> }
+        @if (!Compact)
+        {
+        <span class="managed-backend-badge @(_status.IsRunning ? "running" : "stopped")">
+            @(_status.IsRunning ? "Running" : "Stopped")
+        </span>
+        }
+        @if (Compact)
+        {
+            <span class="backend-process-status" role="status">@(_status.IsRunning ? "Running" : "Stopped")</span>
+        }
+        <MudIconButton Icon="@Icons.Material.Filled.PlayArrow" title="Start backend" aria-label="@($"Start {InstanceName}")"
+                       Disabled="@(Disabled || _busy || _status.IsRunning)" OnClick="StartAsync" Size="Size.Small" />
+        <MudIconButton Icon="@Icons.Material.Filled.Stop" title="Stop backend" aria-label="@($"Stop {InstanceName}")"
+                       Disabled="@(Disabled || _busy || !_status.IsRunning)" OnClick="StopAsync" Size="Size.Small" />
+        @if (Compact)
+        {
+            <MudIconButton Icon="@Icons.Material.Filled.RestartAlt" title="Restart backend" aria-label="@($"Restart {InstanceName}")"
+                           Disabled="@(Disabled || _busy || !_status.IsRunning)" OnClick="RestartAsync" Size="Size.Small" />
+        }
+    }
+    @if (!Compact || SettingsOnly)
+    {
+        <label class="managed-backend-autostart">
+            <input type="checkbox" checked="@StartWithApp" disabled="@(Disabled || _busy || !StartWithAppChanged.HasDelegate)"
+                   @onchange="ChangeAutostartAsync" />
+            Start with Personal Server Manager
+        </label>
+    }
+    @if (!Compact || _error is not null || (_status.Message != "Stopped" && _status.Message != "Running (API readiness is checked separately)"))
+    {
+        <span class="managed-backend-message" role="status" aria-live="polite">@(_error ?? _status.Message)</span>
+    }
 </div>
 
 @code {
     [Parameter, EditorRequired] public Guid InstanceId { get; set; }
+    [Parameter] public string InstanceName { get; set; } = "backend";
     [Parameter] public bool StartWithApp { get; set; }
     [Parameter] public EventCallback<bool> StartWithAppChanged { get; set; }
+    [Parameter] public bool Compact { get; set; }
+    [Parameter] public bool SettingsOnly { get; set; }
+    [Parameter] public bool Disabled { get; set; }
 
     private ManagedBackendStatus _status = new("Stopped", false);
     private bool _busy;
+    private string? _error;
     private readonly CancellationTokenSource _lifetime = new();
     private Task? _refreshTask;
 
@@ -56,12 +82,23 @@
 
     private Task StartAsync() => RunAsync(() => BackendService.StartInstanceAsync(InstanceId, _lifetime.Token));
     private Task StopAsync() => RunAsync(() => BackendService.StopInstanceAsync(InstanceId));
+    private Task RestartAsync() => RunAsync(async () =>
+    {
+        if (!await BackendService.RestartInstanceAsync(InstanceId, _lifetime.Token))
+            _error = BackendService.GetStatus(InstanceId).Message;
+    });
 
     private async Task RunAsync(Func<Task> action)
     {
+        if (_busy || Disabled) return;
         _busy = true;
+        _error = null;
         try { await action(); }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _error = "The backend operation failed. Check its status and retry.";
+        }
         finally
         {
             _busy = false;

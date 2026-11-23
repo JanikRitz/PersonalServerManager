@@ -6,7 +6,7 @@
 
 @if (_service is not null)
 {
-    <section class="comic-instances" aria-labelledby="comic-companion-heading" aria-busy="@_busy">
+    <section class="backend-group comic-instances" aria-labelledby="comic-companion-heading" aria-busy="@_busy">
         <div class="section-heading">
             <h2 id="comic-companion-heading">Comic Companion</h2>
             <button class="icon-action" type="button" title="Add Comic Companion instance" aria-label="Add Comic Companion instance" disabled="@(_busy || !_loaded)" @onclick="() => OpenEditor(null)"><MudIcon Icon="@Icons.Material.Filled.Add" /></button>
@@ -15,7 +15,11 @@
         {
             <p role="alert">@_error</p>
         }
-        @if (_loaded && _instances.Count == 0)
+        @if (!_loaded && _error is null)
+        {
+            <p class="empty-message" role="status">Loading Comic Companion instances...</p>
+        }
+        else if (_loaded && _instances.Count == 0 && _error is null)
         {
             <p class="empty-message">No Comic Companion instances configured.</p>
         }
@@ -24,28 +28,21 @@
             {
                 var status = _service.GetStatus(instance.Id);
                 _catalogAvailability.TryGetValue(instance.Id, out var available);
-                <li class="instance-row" @key="instance.Id">
-                    <span class="status-dot @(available is true ? "online" : available is false ? "offline" : null)" aria-hidden="true"></span>
-                    <div class="instance-copy">
-                        <strong>@instance.Name</strong>
-                        <small>@instance.ApiUrl?.AbsoluteUri</small>
-                        <small role="status">@(instance.IsManaged ? $"Managed: {status.Message}" : "External")</small>
-                        <small role="status">Catalog API: @(available is true ? "Available" : available is false ? "Unavailable" : "Checking...")</small>
-                    </div>
-                    <div class="actions">
+                <li @key="instance.Id">
+                    <BackendInstanceRow Name="@instance.Name" Type="@(instance.IsManaged ? "Managed" : "External")"
+                        Status="@(available is true ? "Available" : available is false ? "Unavailable" : "Unknown")"
+                        StatusClass="@(available is true ? "online" : available is false ? "offline" : "unknown")"
+                        Selected="@Selection.IsSelected("Comic Companion", instance.Id)" OnSelect='() => Selection.Select("Comic Companion", instance.Id)'>
+                        <Actions>
                         @if (instance.IsManaged)
                         {
-                            <MudIconButton Icon="@Icons.Material.Filled.PlayArrow" title="Start" aria-label="@($"Start {instance.Name}")" Disabled="@(_busy || status.IsRunning)" OnClick="() => RunAsync(() => _service.StartInstanceAsync(instance.Id, _lifetime.Token))" Size="Size.Small" />
-                            <MudIconButton Icon="@Icons.Material.Filled.Stop" title="Stop" aria-label="@($"Stop {instance.Name}")" Disabled="@(_busy || !status.IsRunning)" OnClick="() => RunAsync(() => _service.StopInstanceAsync(instance.Id))" Size="Size.Small" />
-                            <MudIconButton Icon="@Icons.Material.Filled.Refresh" title="Restart" aria-label="@($"Restart {instance.Name}")" Disabled="@(_busy || !status.IsRunning)" OnClick="() => RunAsync(() => _service.RestartInstanceAsync(instance.Id, _lifetime.Token))" Size="Size.Small" />
+                            <span class="backend-process-status" role="status">@(status.IsRunning ? "Running" : "Stopped")</span>
+                            <MudIconButton Icon="@Icons.Material.Filled.PlayArrow" title="Start" aria-label="@($"Start {instance.Name}")" Disabled="@(_busy || _draft is not null || status.IsRunning)" OnClick="() => RunAsync(() => _service.StartInstanceAsync(instance.Id, _lifetime.Token))" Size="Size.Small" />
+                            <MudIconButton Icon="@Icons.Material.Filled.Stop" title="Stop" aria-label="@($"Stop {instance.Name}")" Disabled="@(_busy || _draft is not null || !status.IsRunning)" OnClick="() => RunAsync(() => _service.StopInstanceAsync(instance.Id))" Size="Size.Small" />
+                            <MudIconButton Icon="@Icons.Material.Filled.Refresh" title="Restart" aria-label="@($"Restart {instance.Name}")" Disabled="@(_busy || _draft is not null || !status.IsRunning)" OnClick="() => RunAsync(() => _service.RestartInstanceAsync(instance.Id, _lifetime.Token))" Size="Size.Small" />
                         }
-                        @if (instance.EffectiveBrowserUrl is { } browser)
-                        {
-                            <MudIconButton Icon="@Icons.Material.Filled.OpenInNew" Href="@instance.BrowserLink(browser).ToString()" Target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="@($"Open {instance.Name}")" Size="Size.Small" />
-                        }
-                        <MudIconButton Icon="@Icons.Material.Filled.Edit" title="Edit" aria-label="@($"Edit {instance.Name}")" Disabled="@(_busy || status.IsRunning)" OnClick="() => OpenEditor(instance)" Size="Size.Small" />
-                        <MudIconButton Icon="@Icons.Material.Filled.DeleteOutline" title="Remove" aria-label="@($"Remove {instance.Name}")" Color="Color.Error" Disabled="@(_busy || status.IsRunning)" OnClick="() => RemoveAsync(instance)" Size="Size.Small" />
-                    </div>
+                        </Actions>
+                    </BackendInstanceRow>
                 </li>
             }
         </ul>
@@ -92,9 +89,39 @@
             </div>
         }
     </section>
+    @if (_instances.FirstOrDefault(instance => Selection.IsSelected("Comic Companion", instance.Id)) is { } selected)
+    {
+        var status = _service.GetStatus(selected.Id);
+        _catalogAvailability.TryGetValue(selected.Id, out var available);
+        <section class="backend-details comic-details" aria-label="@($"{selected.Name} details")">
+            <h2>@selected.Name</h2>
+            <dl>
+                <dt>Type</dt><dd>@(selected.IsManaged ? "Managed" : "External")</dd>
+                <dt>API URL</dt><dd>@selected.ApiUrl?.AbsoluteUri</dd>
+                <dt>Browser URL</dt><dd>@selected.EffectiveBrowserUrl?.AbsoluteUri</dd>
+                <dt>Catalog API</dt><dd role="status">@(available is true ? "Available" : available is false ? "Unavailable" : "Unknown")</dd>
+                @if (selected.IsManaged)
+                {
+                    <dt>Process</dt><dd role="status">@status.Message</dd>
+                    <dt>Installation</dt><dd>@selected.InstallationFolder</dd>
+                    <dt>Start with app</dt><dd>@(selected.StartWithApp ? "Yes" : "No")</dd>
+                    <dt>Automatic sync</dt><dd>@(selected.AutomaticSync ? $"Every {selected.SyncIntervalMinutes} minutes" : "Off")</dd>
+                }
+            </dl>
+            <div class="actions detail-actions">
+                @if (selected.EffectiveBrowserUrl is { } browser)
+                {
+                    <MudIconButton Icon="@Icons.Material.Filled.OpenInNew" Href="@selected.BrowserLink(browser).ToString()" Target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="@($"Open {selected.Name}")" Size="Size.Small" />
+                }
+                <MudIconButton Icon="@Icons.Material.Filled.Edit" title="Edit" aria-label="@($"Edit {selected.Name}")" Disabled="@(_busy || _draft is not null || status.IsRunning)" OnClick="() => OpenEditor(selected)" Size="Size.Small" />
+                <MudIconButton Icon="@Icons.Material.Filled.DeleteOutline" title="Remove" aria-label="@($"Remove {selected.Name}")" Color="Color.Error" Disabled="@(_busy || _draft is not null)" OnClick="() => RemoveAsync(selected)" Size="Size.Small" />
+            </div>
+        </section>
+    }
 }
 
 @code {
+    [CascadingParameter] public BackendSelection Selection { get; set; } = null!;
     [Parameter] public EventCallback<int> CountChanged { get; set; }
 
     private readonly CancellationTokenSource _lifetime = new();
@@ -113,10 +140,13 @@
 
     protected override async Task OnInitializedAsync()
     {
+        Selection.Changed += SelectionChanged;
         _service = Services.GetService<ComicCompanionService>();
         if (_service is null) return;
         await RunAsync(ReloadAsync);
     }
+
+    private void SelectionChanged() => _ = InvokeAsync(StateHasChanged);
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -217,16 +247,20 @@
     {
         if (_draft is not { } draft) return;
         if (_managed && string.IsNullOrWhiteSpace(_folder)) throw new InvalidDataException("Enter the installation folder.");
-        await _service!.SaveSettingsAsync(new(ParseUrl(_apiUrl), ParseUrl(_browserUrl),
-            _managed ? _folder : null, _autostart, _automaticSync, _syncMinutes) { Id = draft.Id, Name = _name ?? string.Empty }, _lifetime.Token);
+        var settings = new ComicCompanionSettings(ParseUrl(_apiUrl), ParseUrl(_browserUrl),
+            _managed ? _folder : null, _autostart, _automaticSync, _syncMinutes) { Id = draft.Id, Name = _name ?? string.Empty };
+        if (draft.ApiUrl is null) await _service!.SaveSettingsAsync(settings, _lifetime.Token);
+        else await _service!.UpdateSettingsAsync(settings, _lifetime.Token);
         await ReloadAsync();
         _draft = null;
     }, editor: true);
 
     private Task RemoveAsync(ComicCompanionSettings instance) => RunAsync(async () =>
     {
-        if (!await JavaScript.InvokeAsync<bool>("confirm", _lifetime.Token, $"Remove {instance.Name}?")) return;
+        var consequence = instance.IsManaged ? "Its managed process will be stopped and local files will be kept." : "The external service will remain running and local files will be kept.";
+        if (!await JavaScript.InvokeAsync<bool>("confirm", _lifetime.Token, $"Remove {instance.Name}? {consequence} Only its configuration will be removed.")) return;
         await _service!.RemoveSettingsAsync(instance.Id, _lifetime.Token);
+        Selection.Clear("Comic Companion", instance.Id);
         await ReloadAsync();
     });
 
@@ -238,7 +272,7 @@
         try { await action(); }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (InvalidDataException exception) { SetError(exception.Message); }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or JsonException or NotSupportedException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or JsonException or NotSupportedException or JSException)
         {
             SetError("Unable to read or save Comic Companion settings.");
         }
@@ -264,6 +298,7 @@
 
     public async ValueTask DisposeAsync()
     {
+        Selection.Changed -= SelectionChanged;
         await _lifetime.CancelAsync();
         if (_refreshTask is not null) await _refreshTask;
         if (_observationTask is not null) await _observationTask;

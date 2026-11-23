@@ -325,6 +325,223 @@ public sealed class ManagedCalibreTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task RemovalSerializesQueuedStartAndRestart()
+    {
+        var store = new ControlledLibraryStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await File.WriteAllTextAsync(Path.Combine(_root, "calibre-server.exe"), "fixture");
+        var library = await LibraryAsync(store, "first", FreePort(), _root);
+        using var http = new HttpClient(new ReadyHandler(library.ManagedPort));
+        var launches = 0;
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
+            NullLogger<ManagedCalibreServer>.Instance, http, _ => { launches++; return StandInProcess(); });
+        await server.StartServerAsync(library.Id);
+        Assert.True(server.GetStatus(library.Id).IsRunning);
+        var remove = server.RemoveLibraryAsync(library.Id);
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var start = server.StartServerAsync(library.Id);
+        var restart = server.RestartServerAsync(library.Id);
+        try
+        {
+            Assert.False(start.IsCompleted);
+            Assert.False(restart.IsCompleted);
+        }
+        finally { store.Continue.TrySetResult(); }
+        await Task.WhenAll(remove, start, restart).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(await store.GetAllAsync());
+        Assert.Equal(1, launches);
+        Assert.False(server.GetStatus(library.Id).IsRunning);
+    }
+
+    [Fact]
+    public async Task RestartSerializesRemovalAndQueuedStart()
+    {
+        var store = new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"));
+        await File.WriteAllTextAsync(Path.Combine(_root, "calibre-server.exe"), "fixture");
+        var library = await LibraryAsync(store, "first", FreePort(), _root);
+        using var http = new HttpClient(new ReadyHandler(library.ManagedPort));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var launches = 0;
+        var stops = 0;
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
+            NullLogger<ManagedCalibreServer>.Instance, http, _ => { launches++; return StandInProcess(); }, async process =>
+            {
+                if (++stops == 1)
+                {
+                    entered.TrySetResult();
+                    await resume.Task;
+                }
+                await TerminateStandInAsync(process);
+            });
+        await server.StartServerAsync(library.Id);
+        var restart = server.RestartServerAsync(library.Id);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var remove = server.RemoveLibraryAsync(library.Id);
+        var start = server.StartServerAsync(library.Id);
+        try
+        {
+            Assert.False(remove.IsCompleted);
+            Assert.False(start.IsCompleted);
+        }
+        finally { resume.TrySetResult(); }
+        await Task.WhenAll(restart, remove, start).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(2, launches);
+        Assert.Equal(2, stops);
+        Assert.Empty(await store.GetAllAsync());
+        Assert.False(server.GetStatus(library.Id).IsRunning);
+    }
+
+    [Fact]
+    public async Task FailedStopPreventsRemovalAndRestart()
+    {
+        var store = new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"));
+        await File.WriteAllTextAsync(Path.Combine(_root, "calibre-server.exe"), "fixture");
+        var library = await LibraryAsync(store, "first", FreePort(), _root);
+        using var http = new HttpClient(new ReadyHandler(library.ManagedPort));
+        using var process = StandInProcess();
+        var fail = true;
+        var launches = 0;
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
+            NullLogger<ManagedCalibreServer>.Instance, http, _ => { launches++; return process; },
+            owned => fail ? Task.FromException(new InvalidOperationException()) : TerminateStandInAsync(owned));
+        try
+        {
+            await server.StartServerAsync(library.Id);
+            await Assert.ThrowsAsync<InvalidDataException>(() => server.RemoveLibraryAsync(library.Id));
+            await Assert.ThrowsAsync<InvalidDataException>(() => server.RestartServerAsync(library.Id));
+            Assert.Single(await store.GetAllAsync());
+            Assert.True(server.GetStatus(library.Id).IsRunning);
+            Assert.Equal(1, launches);
+        }
+        finally
+        {
+            fail = false;
+            await server.StopServerAsync(library.Id);
+            KillStandIn(process);
+        }
+    }
+
+    [Fact]
+    public async Task RemovalWriteFailureRetainsConfigurationAfterStopping()
+    {
+        var store = new ControlledLibraryStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"))) { FailRemoval = true };
+        store.Continue.TrySetResult();
+        await File.WriteAllTextAsync(Path.Combine(_root, "calibre-server.exe"), "fixture");
+        var library = await LibraryAsync(store, "first", FreePort(), _root);
+        using var http = new HttpClient(new ReadyHandler(library.ManagedPort));
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
+            NullLogger<ManagedCalibreServer>.Instance, http, _ => StandInProcess());
+        await server.StartServerAsync(library.Id);
+        await Assert.ThrowsAsync<IOException>(() => server.RemoveLibraryAsync(library.Id));
+        Assert.Single(await store.GetAllAsync());
+        Assert.False(server.GetStatus(library.Id).IsRunning);
+    }
+
+    [Fact]
+    public async Task EditQueuedDuringStartRechecksOwnedProcessForExternalDraft()
+    {
+        var store = new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"));
+        await File.WriteAllTextAsync(Path.Combine(_root, "calibre-server.exe"), "fixture");
+        var library = await LibraryAsync(store, "first", FreePort(), _root);
+        using var handler = new PausedReadyHandler();
+        using var http = new HttpClient(handler);
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
+            NullLogger<ManagedCalibreServer>.Instance, http, _ => StandInProcess());
+        var start = server.StartServerAsync(library.Id);
+        try
+        {
+            await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var external = library with { Name = "Edited", RootPath = "", ContentServerUrl = new Uri("https://example.test/"), ContentServerLibraryId = "library" };
+            var edit = server.UpdateLibraryAsync(external);
+            Assert.False(edit.IsCompleted);
+            handler.Continue.TrySetResult();
+            await start.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("Stop Calibre before editing its configuration.",
+                (await Assert.ThrowsAsync<InvalidDataException>(() => edit)).Message);
+            Assert.True(server.GetStatus(library.Id).IsRunning);
+            Assert.Equal("first", Assert.Single(await store.GetAllAsync()).Name);
+            await server.StopServerAsync(library.Id);
+            await server.UpdateLibraryAsync(external);
+            Assert.True(Assert.Single(await store.GetAllAsync()).IsExternal);
+        }
+        finally
+        {
+            handler.Continue.TrySetResult();
+            await start;
+            await server.StopServerAsync(library.Id);
+        }
+    }
+
+    [Fact]
+    public async Task EditQueuedBehindRemovalDoesNotRecreateLibrary()
+    {
+        var store = new ControlledLibraryStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        var library = await LibraryAsync(store, "first", FreePort(), _root);
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store, NullLogger<ManagedCalibreServer>.Instance);
+        var remove = server.RemoveLibraryAsync(library.Id);
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var edit = server.UpdateLibraryAsync(library with { Name = "Edited" });
+        try { Assert.False(edit.IsCompleted); }
+        finally { store.Continue.TrySetResult(); }
+        await remove.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("no longer exists", (await Assert.ThrowsAsync<InvalidDataException>(() => edit)).Message);
+        Assert.Empty(await store.GetAllAsync());
+    }
+
+    [Fact]
+    public async Task RemovalWaitsForUpdateAndRemovesUpdatedLibrary()
+    {
+        var store = new ControlledLibraryStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json"))) { PauseUpdate = true };
+        var library = await LibraryAsync(store, "first", FreePort(), _root);
+        using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store, NullLogger<ManagedCalibreServer>.Instance);
+        var edit = server.UpdateLibraryAsync(library with { Name = "Edited" });
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var remove = server.RemoveLibraryAsync(library.Id);
+        try { Assert.False(remove.IsCompleted); }
+        finally { store.Continue.TrySetResult(); }
+        await Task.WhenAll(edit, remove).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(await store.GetAllAsync());
+    }
+
+    private sealed class PausedReadyHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Entered.TrySetResult();
+            await Continue.Task.WaitAsync(token);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"library_map\":{\"first-id\":\"first\"}}") };
+        }
+    }
+
+    private sealed class ControlledLibraryStore(ILocalLibraryStore inner) : ILocalLibraryStore
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool FailRemoval { get; init; }
+        public bool PauseUpdate { get; init; }
+        public Task<IReadOnlyList<LocalLibraryInstance>> GetAllAsync(CancellationToken cancellationToken = default) => inner.GetAllAsync(cancellationToken);
+        public Task SaveAsync(LocalLibraryInstance instance, CancellationToken cancellationToken = default) => inner.SaveAsync(instance, cancellationToken);
+        public async Task UpdateAsync(LocalLibraryInstance instance, CancellationToken cancellationToken = default)
+        {
+            if (PauseUpdate)
+            {
+                Entered.TrySetResult();
+                await Continue.Task.WaitAsync(cancellationToken);
+            }
+            await inner.UpdateAsync(instance, cancellationToken);
+        }
+        public async Task RemoveAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            Entered.TrySetResult();
+            await Continue.Task.WaitAsync(cancellationToken);
+            if (FailRemoval) throw new IOException("Simulated configuration write failure.");
+            await inner.RemoveAsync(id, cancellationToken);
+        }
+    }
+
     [InstalledCalibreFact]
     public async Task InstalledCalibreServesTwoLibrariesAndStopsThemIndependently()
     {

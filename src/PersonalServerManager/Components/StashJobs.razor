@@ -1,0 +1,200 @@
+@using System.Text.Json
+@using PersonalServerManager.Stash
+@implements IDisposable
+@inject IStashInstanceStore Store
+@inject IStashGraphQlClient Client
+@inject StashJobState JobState
+
+<section class="stash-jobs" aria-label="Stash jobs">
+    <h4>Stash jobs</h4>
+    @if (_message is not null)
+    {
+        <p class="job-message" role="status">@_message</p>
+    }
+    @if (_error is not null)
+    {
+        <p class="job-error" role="alert">@_error</p>
+    }
+    <div class="job-actions">
+        <button type="button" disabled="@Busy" @onclick="() => StartAsync(true)">Start scan</button>
+        <button type="button" disabled="@Busy" @onclick="() => StartAsync(false)">Start generate</button>
+    </div>
+    <p class="hint">Jobs use the saved options.</p>
+    @foreach (var job in JobState.Jobs(Instance.Id))
+    {
+        <div class="job-status" @key="job">
+            <strong>@job.Kind</strong> <span>ID: @job.Id</span>
+            <span role="status">@(job.StatusUnavailable ? "Status unavailable" : job.Status ?? "Checking status")</span>
+            @if (!string.IsNullOrWhiteSpace(job.Error)) { <span class="job-error">@job.Error</span> }
+        </div>
+    }
+    <details>
+        <summary>Job options</summary>
+        <fieldset disabled="@Busy">
+            <h5>Scan</h5>
+            <label class="field">Paths <span>One per line</span><textarea rows="2" @bind="_scanPaths"></textarea></label>
+            <label class="field">Minimum modification time <span>RFC 3339 or relative time, e.g. &lt;4h</span><input type="text" placeholder="2026-01-01T00:00:00Z" @bind="_minModTime" /></label>
+            <div class="checks">
+                <label><input type="checkbox" @bind="_draft.Scan.Rescan" />Rescan</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGenerateCovers" />Covers</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGeneratePreviews" />Video previews</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGenerateImagePreviews" />Image previews</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGenerateSprites" />Sprites</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGeneratePhashes" />Video perceptual hashes</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGenerateImagePhashes" />Image perceptual hashes</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGenerateThumbnails" />Thumbnails</label>
+                <label><input type="checkbox" @bind="_draft.Scan.ScanGenerateClipPreviews" />Clip previews</label>
+            </div>
+            <h5>Generate</h5>
+            <div class="checks">
+                <label><input type="checkbox" @bind="_draft.Generate.Covers" />Covers</label>
+                <label><input type="checkbox" @bind="_draft.Generate.Sprites" />Sprites</label>
+                <label><input type="checkbox" @bind="_draft.Generate.Previews" />Video previews</label>
+                <label><input type="checkbox" @bind="_draft.Generate.ImagePreviews" />Image previews</label>
+                <label><input type="checkbox" @bind="_draft.Generate.Markers" />Marker previews</label>
+                <label><input type="checkbox" @bind="_draft.Generate.MarkerImagePreviews" />Marker image previews</label>
+                <label><input type="checkbox" @bind="_draft.Generate.MarkerScreenshots" />Marker screenshots</label>
+                <label><input type="checkbox" @bind="_draft.Generate.Transcodes" />Transcodes</label>
+                <label><input type="checkbox" @bind="_draft.Generate.ForceTranscodes" />Force transcodes</label>
+                <label><input type="checkbox" @bind="_draft.Generate.Phashes" />Video perceptual hashes</label>
+                <label><input type="checkbox" @bind="_draft.Generate.InteractiveHeatmapsSpeeds" />Interactive heatmaps and speeds</label>
+                <label><input type="checkbox" @bind="_draft.Generate.ImagePhashes" />Image perceptual hashes</label>
+                <label><input type="checkbox" @bind="_draft.Generate.ImageThumbnails" />Image thumbnails</label>
+                <label><input type="checkbox" @bind="_draft.Generate.ClipPreviews" />Clip previews</label>
+                <label><input type="checkbox" @bind="_draft.Generate.Overwrite" />Overwrite existing</label>
+            </div>
+            <h5>Generate targets</h5>
+            <div class="fields">
+                <label class="field">Paths<textarea rows="2" @bind="_generatePaths"></textarea></label>
+                <label class="field">Scene IDs<textarea rows="2" @bind="_sceneIds"></textarea></label>
+                <label class="field">Marker IDs<textarea rows="2" @bind="_markerIds"></textarea></label>
+                <label class="field">Image IDs<textarea rows="2" @bind="_imageIds"></textarea></label>
+                <label class="field">Gallery IDs<textarea rows="2" @bind="_galleryIds"></textarea></label>
+            </div>
+            <p class="hint">Paths: one per line. IDs: one per line or comma-separated.</p>
+            <h5>Preview options</h5>
+            <div class="fields">
+                <label class="field">Segments<input type="number" @bind="_preview.PreviewSegments" /></label>
+                <label class="field">Segment duration (seconds)<input type="number" step="any" @bind="_preview.PreviewSegmentDuration" /></label>
+                <label class="field">Exclude start<input type="text" placeholder="e.g. 10% or 5s" @bind="_preview.PreviewExcludeStart" /></label>
+                <label class="field">Exclude end<input type="text" placeholder="e.g. 10% or 5s" @bind="_preview.PreviewExcludeEnd" /></label>
+                <label class="field">Preset<select @bind="_preview.PreviewPreset"><option value="">Stash default</option>@foreach (var preset in Presets) { <option value="@preset">@preset</option> }</select></label>
+            </div>
+            <button type="button" @onclick="SaveAsync">Save job options</button>
+        </fieldset>
+    </details>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public StashInstance Instance { get; set; } = default!;
+    [Parameter] public EventCallback SettingsSaved { get; set; }
+
+    private static readonly string[] Presets = ["ultrafast", "veryfast", "fast", "medium", "slow", "slower", "veryslow"];
+    private readonly CancellationTokenSource _lifetime = new();
+    private StashJobSettings _draft = new();
+    private StashPreviewOptions _preview = new();
+    private string _scanPaths = "", _generatePaths = "", _sceneIds = "", _markerIds = "", _imageIds = "", _galleryIds = "", _minModTime = "";
+    private string? _message, _error;
+    private bool _saving, _disposed;
+    private bool Busy => _saving || JobState.IsStarting(Instance.Id);
+
+    protected override void OnInitialized()
+    {
+        _draft = Clone(Instance.JobSettings);
+        _preview = _draft.Generate.PreviewOptions ?? new();
+        _scanPaths = Join(_draft.Scan.Paths);
+        _generatePaths = Join(_draft.Generate.Paths);
+        _sceneIds = Join(_draft.Generate.SceneIDs);
+        _markerIds = Join(_draft.Generate.MarkerIDs);
+        _imageIds = Join(_draft.Generate.ImageIDs);
+        _galleryIds = Join(_draft.Generate.GalleryIDs);
+        _minModTime = _draft.Scan.Filter?.MinModTime ?? "";
+        JobState.Changed += OnJobsChanged;
+        _ = PollAsync();
+    }
+
+    private async Task SaveAsync()
+    {
+        if (Busy) return;
+        _saving = true;
+        _error = _message = null;
+        try
+        {
+            var settings = Clone(_draft);
+            settings.Scan.Paths = SplitPaths(_scanPaths);
+            settings.Scan.Filter = string.IsNullOrWhiteSpace(_minModTime) ? null : new() { MinModTime = _minModTime.Trim() };
+            settings.Generate.Paths = SplitPaths(_generatePaths);
+            settings.Generate.SceneIDs = Split(_sceneIds);
+            settings.Generate.MarkerIDs = Split(_markerIds);
+            settings.Generate.ImageIDs = Split(_imageIds);
+            settings.Generate.GalleryIDs = Split(_galleryIds);
+            var preview = ClonePreview(_preview);
+            preview.PreviewExcludeStart = EmptyToNull(preview.PreviewExcludeStart);
+            preview.PreviewExcludeEnd = EmptyToNull(preview.PreviewExcludeEnd);
+            preview.PreviewPreset = EmptyToNull(preview.PreviewPreset);
+            settings.Generate.PreviewOptions = preview.PreviewSegments is null && preview.PreviewSegmentDuration is null && preview.PreviewExcludeStart is null && preview.PreviewExcludeEnd is null && preview.PreviewPreset is null ? null : preview;
+            var current = (await Store.GetAllAsync(_lifetime.Token)).FirstOrDefault(item => item.Id == Instance.Id)
+                ?? throw new InvalidOperationException("Instance no longer exists.");
+            await Store.UpdateAsync(current with { JobSettings = settings }, _lifetime.Token);
+            await SettingsSaved.InvokeAsync();
+            _message = "Job options saved.";
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (InvalidDataException exception) when (exception.Message == "The Stash instance no longer exists.") { _error = exception.Message; }
+        catch (InvalidOperationException exception) when (exception.Message == "Instance no longer exists.") { _error = exception.Message; }
+        catch (Exception) { _error = "Job options could not be saved. Check the instance configuration and try again."; }
+        finally { _saving = false; }
+    }
+
+    private async Task StartAsync(bool scan)
+    {
+        if (Busy) return;
+        _error = _message = null;
+        try
+        {
+            await JobState.StartAsync(Instance.Id, scan ? "Scan" : "Generate", async () =>
+            {
+                var instance = (await Store.GetAllAsync()).FirstOrDefault(item => item.Id == Instance.Id)
+                    ?? throw new InvalidOperationException("Instance no longer exists.");
+                return scan
+                    ? await Client.StartMetadataScanAsync(instance, Clone(instance.JobSettings).Scan)
+                    : await Client.StartMetadataGenerateAsync(instance, Clone(instance.JobSettings).Generate);
+            });
+        }
+        catch (StashJobOptionNotSupportedException exception) { if (!_disposed) _error = $"Job not started: {exception.Message}"; }
+        catch (Exception) { if (!_disposed) _error = "Could not confirm the job started. It may have started in Stash; check there before retrying."; }
+    }
+
+    private async Task PollAsync()
+    {
+        try
+        {
+            while (!_lifetime.IsCancellationRequested)
+            {
+                foreach (var tracked in JobState.Jobs(Instance.Id).Where(job => !job.IsTerminal).ToArray())
+                {
+                    try
+                    {
+                        var job = await Client.FindJobAsync(Instance, tracked.Id, _lifetime.Token);
+                        tracked.StatusUnavailable = job is null;
+                        if (job is not null) { tracked.Status = job.Status; tracked.Error = job.Error; }
+                    }
+                    catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { throw; }
+                    catch (Exception) { tracked.StatusUnavailable = true; }
+                }
+                if (!_disposed) await InvokeAsync(StateHasChanged);
+                await Task.Delay(TimeSpan.FromSeconds(3), _lifetime.Token);
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+    }
+
+    private void OnJobsChanged() { if (!_disposed) _ = InvokeAsync(StateHasChanged); }
+    private static StashJobSettings Clone(StashJobSettings settings) => JsonSerializer.Deserialize<StashJobSettings>(JsonSerializer.Serialize(settings))!;
+    private static StashPreviewOptions ClonePreview(StashPreviewOptions options) => JsonSerializer.Deserialize<StashPreviewOptions>(JsonSerializer.Serialize(options))!;
+    private static string Join(string[]? values) => string.Join("\n", values ?? []);
+    private static string[]? SplitPaths(string value) { var values = value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); return values.Length == 0 ? null : values; }
+    private static string[]? Split(string value) { var values = value.Split([',', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); return values.Length == 0 ? null : values; }
+    private static string? EmptyToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    public void Dispose() { _disposed = true; JobState.Changed -= OnJobsChanged; _lifetime.Cancel(); }
+}

@@ -18,7 +18,8 @@ public sealed class ManagedBackendService(
     IStashInstanceStore stashStore,
     IHydrusInstanceStore hydrusStore,
     ILogger<ManagedBackendService> logger,
-    ISwarmUIInstanceStore? swarmStore = null) : BackgroundService
+    ISwarmUIInstanceStore? swarmStore = null,
+    Func<ProcessStartInfo, Process?>? launchProcess = null) : BackgroundService
 {
     private static readonly string SwarmUIExecutable = Path.Combine("src", "bin", "live_release", "SwarmUI.exe");
 
@@ -83,98 +84,160 @@ public sealed class ManagedBackendService(
     public async Task StartInstanceAsync(Guid instanceId, CancellationToken cancellationToken = default)
     {
         await _gate.WaitAsync(cancellationToken);
+        try { await StartInstanceLockedAsync(instanceId, cancellationToken); }
+        finally { _gate.Release(); }
+    }
+
+    public Task UpdateInstanceAsync(StashInstance instance, CancellationToken cancellationToken = default) =>
+        UpdateInstanceLockedAsync(instance.Id, "Stash", () => stashStore.UpdateAsync(instance, cancellationToken), cancellationToken);
+
+    public Task UpdateInstanceAsync(HydrusInstance instance, CancellationToken cancellationToken = default) =>
+        UpdateInstanceLockedAsync(instance.Id, "Hydrus", () => hydrusStore.UpdateAsync(instance, cancellationToken), cancellationToken);
+
+    public Task UpdateInstanceAsync(SwarmUIInstance instance, CancellationToken cancellationToken = default) =>
+        UpdateInstanceLockedAsync(instance.Id, "SwarmUI", () => (swarmStore ?? throw new InvalidDataException("The selected backend instance no longer exists.")).UpdateAsync(instance, cancellationToken), cancellationToken);
+
+    private async Task UpdateInstanceLockedAsync(Guid instanceId, string backend, Func<Task> update, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
         try
         {
-            if (_stopping)
-            {
-                SetStatus(instanceId, "PSM is shutting down.");
-                return;
-            }
-            if (_owned.TryGetValue(instanceId, out var owned))
-            {
-                if (!owned.HasExited) return;
-                owned.Dispose();
-                _owned.Remove(instanceId);
-            }
-            SetStatus(instanceId, "Starting");
-            try
-            {
-                var stash = (await stashStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
-                var hydrus = (await hydrusStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
-                var swarm = swarmStore is null ? null
-                    : (await swarmStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
-                if ((stash is null ? 0 : 1) + (hydrus is null ? 0 : 1) + (swarm is null ? 0 : 1) > 1)
-                    throw new InvalidDataException("The instance ID is shared by two backends.");
-                string folder;
-                string executable;
-                Uri endpoint;
-                IEnumerable<string> arguments = [];
-                if (stash is not null && stash.IsManaged)
-                {
-                    ValidateStashInstance(stash);
-                    folder = Path.GetFullPath(stash.InstallationFolder!);
-                    executable = Path.Combine(folder, "stash-win.exe");
-                    endpoint = stash.WebUiUrl;
-                }
-                else if (hydrus is not null && hydrus.IsManaged)
-                {
-                    ValidateHydrusInstance(hydrus);
-                    folder = Path.GetFullPath(hydrus.InstallationFolder!);
-                    executable = Path.Combine(folder, "hydrus_client.exe");
-                    endpoint = hydrus.ApiEndpoint;
-                }
-                else if (swarm is not null && swarm.IsManaged)
-                {
-                    ValidateSwarmUIInstance(swarm);
-                    folder = Path.GetFullPath(swarm.InstallationFolder!);
-                    executable = Path.Combine(folder, SwarmUIExecutable);
-                    endpoint = swarm.BaseUrl;
-                    arguments = ["--launch_mode", "none", "--host", "127.0.0.1", "--port", swarm.Port.ToString(CultureInfo.InvariantCulture)];
-                }
-                else
-                {
-                    throw new InvalidDataException("No managed backend exists for this instance.");
-                }
-                EnsureExecutableStopped(executable);
-                EnsureLocalPortAvailable(endpoint);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (stash is not null)
-                    await WriteStashConfigAsync(folder, stash.Port, cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                var startInfo = new ProcessStartInfo(executable) { WorkingDirectory = folder, UseShellExecute = false };
-                foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
-                if (swarm is not null)
-                {
-                    startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
-                    startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
-                }
-                var process = Process.Start(startInfo) ?? throw new InvalidDataException("The backend process could not be started.");
-                _owned.Add(instanceId, process);
-                SetStatus(instanceId, "Running (API readiness is checked separately)", true);
-            }
-            catch (OperationCanceledException)
-            {
-                SetStatus(instanceId, "Start cancelled.");
-                throw;
-            }
-            catch (InvalidDataException exception)
-            {
-                SetStatus(instanceId, exception.Message);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or Win32Exception
-                or ArgumentException or InvalidOperationException or System.Security.Cryptography.CryptographicException)
-            {
-                SetStatus(instanceId, "Unable to start backend. Check installation, configuration and access permissions.");
-                logger.LogWarning("Managed backend {InstanceId} failed to start ({ErrorType}).", instanceId, exception.GetType().Name);
-            }
+            if (_owned.TryGetValue(instanceId, out var process) && !process.HasExited)
+                throw new InvalidDataException($"Stop {backend} before editing its configuration.");
+            await update();
         }
         finally { _gate.Release(); }
+    }
+
+    private async Task StartInstanceLockedAsync(Guid instanceId, CancellationToken cancellationToken)
+    {
+        if (_stopping)
+        {
+            SetStatus(instanceId, "PSM is shutting down.");
+            return;
+        }
+        if (_owned.TryGetValue(instanceId, out var owned))
+        {
+            if (!owned.HasExited) return;
+            owned.Dispose();
+            _owned.Remove(instanceId);
+        }
+        SetStatus(instanceId, "Starting");
+        try
+        {
+            var stash = (await stashStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
+            var hydrus = (await hydrusStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
+            var swarm = swarmStore is null ? null
+                : (await swarmStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
+            if ((stash is null ? 0 : 1) + (hydrus is null ? 0 : 1) + (swarm is null ? 0 : 1) > 1)
+                throw new InvalidDataException("The instance ID is shared by two backends.");
+            string folder;
+            string executable;
+            Uri endpoint;
+            IEnumerable<string> arguments = [];
+            if (stash is not null && stash.IsManaged)
+            {
+                ValidateStashInstance(stash);
+                folder = Path.GetFullPath(stash.InstallationFolder!);
+                executable = Path.Combine(folder, "stash-win.exe");
+                endpoint = stash.WebUiUrl;
+            }
+            else if (hydrus is not null && hydrus.IsManaged)
+            {
+                ValidateHydrusInstance(hydrus);
+                folder = Path.GetFullPath(hydrus.InstallationFolder!);
+                executable = Path.Combine(folder, "hydrus_client.exe");
+                endpoint = hydrus.ApiEndpoint;
+            }
+            else if (swarm is not null && swarm.IsManaged)
+            {
+                ValidateSwarmUIInstance(swarm);
+                folder = Path.GetFullPath(swarm.InstallationFolder!);
+                executable = Path.Combine(folder, SwarmUIExecutable);
+                endpoint = swarm.BaseUrl;
+                arguments = ["--launch_mode", "none", "--host", "127.0.0.1", "--port", swarm.Port.ToString(CultureInfo.InvariantCulture)];
+            }
+            else
+            {
+                throw new InvalidDataException("No managed backend exists for this instance.");
+            }
+            EnsureExecutableStopped(executable);
+            EnsureLocalPortAvailable(endpoint);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (stash is not null)
+                await WriteStashConfigAsync(folder, stash.Port, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var startInfo = new ProcessStartInfo(executable) { WorkingDirectory = folder, UseShellExecute = false };
+            foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+            if (swarm is not null)
+            {
+                startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
+                startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+            }
+            var process = (launchProcess is null ? Process.Start(startInfo) : launchProcess(startInfo))
+                ?? throw new InvalidDataException("The backend process could not be started.");
+            _owned.Add(instanceId, process);
+            SetStatus(instanceId, "Running (API readiness is checked separately)", true);
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus(instanceId, "Start cancelled.");
+            throw;
+        }
+        catch (InvalidDataException exception)
+        {
+            SetStatus(instanceId, exception.Message);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or Win32Exception
+            or ArgumentException or InvalidOperationException or System.Security.Cryptography.CryptographicException)
+        {
+            SetStatus(instanceId, "Unable to start backend. Check installation, configuration and access permissions.");
+            logger.LogWarning("Managed backend {InstanceId} failed to start ({ErrorType}).", instanceId, exception.GetType().Name);
+        }
     }
 
     public async Task StopInstanceAsync(Guid instanceId)
     {
         await _gate.WaitAsync();
         try { await StopOwnedAsync(instanceId); }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<bool> RestartInstanceAsync(Guid instanceId, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            await StopOwnedAsync(instanceId);
+            if (_owned.ContainsKey(instanceId)) return false;
+            await StartInstanceLockedAsync(instanceId, cancellationToken);
+            return true;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task RemoveInstanceAsync(string backend, Guid instanceId, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var stash = (await stashStore.GetAllAsync(cancellationToken)).Any(item => item.Id == instanceId);
+            var hydrus = (await hydrusStore.GetAllAsync(cancellationToken)).Any(item => item.Id == instanceId);
+            var swarm = swarmStore is not null && (await swarmStore.GetAllAsync(cancellationToken)).Any(item => item.Id == instanceId);
+            if ((stash ? 1 : 0) + (hydrus ? 1 : 0) + (swarm ? 1 : 0) > 1)
+                throw new InvalidDataException("The instance ID is shared by two backends.");
+            if (!(backend switch { "Stash" => stash, "Hydrus" => hydrus, "SwarmUI" => swarm, _ => false }))
+                throw new InvalidDataException("The selected backend instance no longer exists.");
+            await StopOwnedAsync(instanceId);
+            if (_owned.ContainsKey(instanceId))
+                throw new InvalidDataException(GetStatus(instanceId).Message);
+            switch (backend)
+            {
+                case "Stash": await stashStore.RemoveAsync(instanceId, cancellationToken); break;
+                case "Hydrus": await hydrusStore.RemoveAsync(instanceId, cancellationToken); break;
+                case "SwarmUI": await swarmStore!.RemoveAsync(instanceId, cancellationToken); break;
+            }
+        }
         finally { _gate.Release(); }
     }
 

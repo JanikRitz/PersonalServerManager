@@ -1,11 +1,89 @@
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Extensions.Logging.Abstractions;
+using PersonalServerManager.Hydrus;
+using PersonalServerManager.LocalLibraries;
+using PersonalServerManager.Management;
 using PersonalServerManager.Stash;
+using PersonalServerManager.SwarmUI;
 using Xunit;
 
 namespace PersonalServerManager.Tests;
 
 public sealed class JsonStashInstanceStoreTests
 {
+    [Fact]
+    public async Task UpdateOnlyNeverRecreatesRemovedInstancesAcrossBackends()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var protector = new EphemeralDataProtectionProvider().CreateProtector("test");
+            var stash = new JsonStashInstanceStore(Path.Combine(directory, "stash.json"), protector);
+            var stashInstance = CreateInstance("private-test-key");
+            await stash.SaveAsync(stashInstance);
+            await stash.UpdateAsync(stashInstance with { ApiKey = null });
+            Assert.Equal("private-test-key", Assert.Single(await stash.GetAllAsync()).ApiKey);
+            Assert.DoesNotContain("private-test-key", await File.ReadAllTextAsync(Path.Combine(directory, "stash.json")));
+            await CheckUpdateRace(() => stash.SaveAsync(stashInstance), () => stash.UpdateAsync(stashInstance with { Name = "Updated", ApiKey = null }),
+                () => stash.RemoveAsync(stashInstance.Id), async () => (await stash.GetAllAsync()).Count);
+
+            var hydrus = new JsonHydrusInstanceStore(Path.Combine(directory, "hydrus.json"), protector);
+            var hydrusInstance = new HydrusInstance(Guid.NewGuid(), "Hydrus", new Uri("http://localhost:45869/"), "private-test-key");
+            await hydrus.SaveAsync(hydrusInstance);
+            await hydrus.UpdateAsync(hydrusInstance with { ApiKey = null });
+            Assert.Equal("private-test-key", Assert.Single(await hydrus.GetAllAsync()).ApiKey);
+            Assert.DoesNotContain("private-test-key", await File.ReadAllTextAsync(Path.Combine(directory, "hydrus.json")));
+            await CheckUpdateRace(() => hydrus.SaveAsync(hydrusInstance), () => hydrus.UpdateAsync(hydrusInstance with { Name = "Updated", ApiKey = null }),
+                () => hydrus.RemoveAsync(hydrusInstance.Id), async () => (await hydrus.GetAllAsync()).Count);
+
+            var swarm = new JsonSwarmUIInstanceStore(Path.Combine(directory, "swarm.json"));
+            var swarmInstance = new SwarmUIInstance(Guid.NewGuid(), "Swarm", new Uri("http://localhost:7801/"), SwarmUIInstance.DefaultSearchPaths);
+            await CheckUpdateRace(() => swarm.SaveAsync(swarmInstance), () => swarm.UpdateAsync(swarmInstance with { Name = "Updated" }),
+                () => swarm.RemoveAsync(swarmInstance.Id), async () => (await swarm.GetAllAsync()).Count);
+
+            var libraries = new JsonLocalLibraryStore(Path.Combine(directory, "libraries.json"));
+            var library = new LocalLibraryInstance(Guid.NewGuid(), "Notes", directory, LocalLibraryKind.Notes);
+            await CheckUpdateRace(() => libraries.SaveAsync(library), () => libraries.UpdateAsync(library with { Name = "Updated" }),
+                () => libraries.RemoveAsync(library.Id), async () => (await libraries.GetAllAsync()).Count);
+
+            using var comic = new ComicCompanionService(Path.Combine(directory, "comic.json"), NullLogger<ComicCompanionService>.Instance);
+            var comicInstance = new ComicCompanionSettings(new Uri("http://localhost:5053/")) { Id = Guid.NewGuid(), Name = "Comics" };
+            await CheckUpdateRace(async () => { await comic.SaveSettingsAsync(comicInstance); },
+                async () => { await comic.UpdateSettingsAsync(comicInstance with { Name = "Updated" }); },
+                () => comic.RemoveSettingsAsync(comicInstance.Id), async () => (await comic.GetAllAsync()).Count);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private static async Task CheckUpdateRace(Func<Task> create, Func<Task> update, Func<Task> remove, Func<Task<int>> count)
+    {
+        await create();
+        await update();
+        await remove();
+        await Assert.ThrowsAsync<InvalidDataException>(update);
+        Assert.Equal(0, await count());
+
+        for (var iteration = 0; iteration < 10; iteration++)
+        {
+            await create();
+            var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var updating = Task.Run(async () =>
+            {
+                await start.Task;
+                try { await update(); }
+                catch (InvalidDataException) { }
+            });
+            var removing = Task.Run(async () => { await start.Task; await remove(); });
+            start.SetResult();
+            await Task.WhenAll(updating, removing);
+            Assert.Equal(0, await count());
+        }
+
+        await create();
+        Assert.Equal(1, await count());
+        await remove();
+    }
+
     [Fact]
     public async Task OptionalManagementFieldsRoundTripAndLegacyEndpointsRemainUnchanged()
     {
@@ -17,8 +95,13 @@ public sealed class JsonStashInstanceStoreTests
             await File.WriteAllTextAsync(Path.Combine(directory, "stash-win.exe"), string.Empty);
             var instance = CreateInstance(null) with { InstallationFolder = directory, Port = 9999, StartWithApp = true,
                 GraphQlEndpoint = new Uri("http://127.0.0.1:9999/graphql"), WebUiUrl = new Uri("http://127.0.0.1:9999/") };
+            instance.JobSettings.Scan.Paths = ["C:\\Media"];
+            instance.JobSettings.Generate.Covers = true;
             await store.SaveAsync(instance);
-            Assert.Equal(instance, Assert.Single(await store.GetAllAsync()));
+            var saved = Assert.Single(await store.GetAllAsync());
+            Assert.Equal(instance, saved with { JobSettings = instance.JobSettings });
+            Assert.Equal(instance.JobSettings.Scan.Paths, saved.JobSettings.Scan.Paths);
+            Assert.True(saved.JobSettings.Generate.Covers);
             await File.WriteAllTextAsync(path, System.Text.Json.JsonSerializer.Serialize(new[] { new
             {
                 instance.Id, instance.Name, GraphQlEndpoint = "https://example.test/custom/graphql",
@@ -29,7 +112,9 @@ public sealed class JsonStashInstanceStoreTests
             Assert.Equal(9999, legacy.Port);
             Assert.False(legacy.StartWithApp);
             await store.SaveAsync(legacy);
-            Assert.Equal(legacy, Assert.Single(await store.GetAllAsync()));
+            var roundTrippedLegacy = Assert.Single(await store.GetAllAsync());
+            Assert.Equal(legacy, roundTrippedLegacy with { JobSettings = legacy.JobSettings });
+            Assert.False(roundTrippedLegacy.JobSettings.Generate.Covers);
         }
         finally { Directory.Delete(directory, true); }
     }

@@ -14,12 +14,12 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    flex: 0 0 36px;
-    width: 36px;
-    height: 36px;
+    flex: 0 0 var(--backend-icon-size, 36px);
+    width: var(--backend-icon-size, 36px);
+    height: var(--backend-icon-size, 36px);
     padding: 7px;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: var(--backend-icon-radius, 4px);
     background: transparent;
     color: var(--teal, #176d62);
     cursor: pointer;

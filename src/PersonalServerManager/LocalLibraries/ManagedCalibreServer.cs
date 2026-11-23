@@ -79,13 +79,25 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
 
     public async Task StartServerAsync(CancellationToken token = default)
     {
-        var library = (await libraries.GetAllAsync(token)).FirstOrDefault(library => library.IsManaged);
-        if (library is null) { _message = "Add a Calibre library before starting the server."; return; }
-        var settings = await GetSettingsAsync(token);
-        await StartLibraryAsync(library with { ManagedPort = settings.Port }, token);
+        await _gate.WaitAsync(token);
+        try
+        {
+            var library = (await libraries.GetAllAsync(token)).FirstOrDefault(library => library.IsManaged);
+            if (library is null) { _message = "Add a Calibre library before starting the server."; return; }
+            var settings = await GetSettingsAsync(token);
+            await StartLibraryLockedAsync(library with { ManagedPort = settings.Port }, token);
+        }
+        finally { _gate.Release(); }
     }
 
     public async Task StartServerAsync(Guid id, CancellationToken token = default)
+    {
+        await _gate.WaitAsync(token);
+        try { await StartServerLockedAsync(id, token); }
+        finally { _gate.Release(); }
+    }
+
+    private async Task StartServerLockedAsync(Guid id, CancellationToken token)
     {
         var library = (await libraries.GetAllAsync(token)).FirstOrDefault(library => library.Id == id);
         if (library is null || !library.IsManaged)
@@ -93,13 +105,12 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
             _messages[id] = "Select a managed Calibre library.";
             return;
         }
-        await StartLibraryAsync(library, token);
+        await StartLibraryLockedAsync(library, token);
     }
 
-    private async Task StartLibraryAsync(LocalLibraryInstance library, CancellationToken token)
+    private async Task StartLibraryLockedAsync(LocalLibraryInstance library, CancellationToken token)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token, _stopping.Token);
-        await _gate.WaitAsync(token);
         Process? process = null;
         try
         {
@@ -155,8 +166,7 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
         catch (OperationCanceledException) when (token.IsCancellationRequested) { _message = "Stopped"; _messages[library.Id] = _message; }
         finally
         {
-            try { if (process is not null) await StopOwnedLibraryAsync(library.Id, clearStatus: false); }
-            finally { _gate.Release(); }
+            if (process is not null) await StopOwnedLibraryAsync(library.Id, clearStatus: false);
         }
     }
 
@@ -179,6 +189,45 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
         try
         {
             await StopOwnedLibraryAsync(id);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task RestartServerAsync(Guid id, CancellationToken token = default)
+    {
+        await _gate.WaitAsync(token);
+        try
+        {
+            await StopOwnedLibraryAsync(id);
+            if (_running.ContainsKey(id)) throw new InvalidDataException(_messages[id]);
+            await StartServerLockedAsync(id, token);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task RemoveLibraryAsync(Guid id, CancellationToken token = default)
+    {
+        await _gate.WaitAsync(token);
+        try
+        {
+            var library = (await libraries.GetAllAsync(token)).FirstOrDefault(item => item.Id == id);
+            if (library is null || !library.IsCalibre)
+                throw new InvalidDataException("The selected Calibre library no longer exists.");
+            await StopOwnedLibraryAsync(id);
+            if (_running.ContainsKey(id)) throw new InvalidDataException(_messages[id]);
+            await libraries.RemoveAsync(id, token);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task UpdateLibraryAsync(LocalLibraryInstance library, CancellationToken token = default)
+    {
+        await _gate.WaitAsync(token);
+        try
+        {
+            if (_running.TryGetValue(library.Id, out var running) && IsAlive(running.Process))
+                throw new InvalidDataException("Stop Calibre before editing its configuration.");
+            await libraries.UpdateAsync(library, token);
         }
         finally { _gate.Release(); }
     }

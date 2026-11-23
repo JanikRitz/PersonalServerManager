@@ -201,7 +201,7 @@ public sealed class NotesGitSyncTests : IDisposable
             await service.PullAsync(instance.Id);
             Assert.Equal(status, service.GetStatus(instance.Id));
             await service.PullAsync(other.Id);
-            Assert.Equal("Another Notes sync is running.", service.GetStatus(other.Id).Message);
+            Assert.Equal("Another Notes sync or removal is running.", service.GetStatus(other.Id).Message);
             Assert.Null(service.GetStatus(other.Id).LastAttempt);
             var elapsed = Stopwatch.StartNew();
             cancellation.Cancel();
@@ -233,6 +233,247 @@ public sealed class NotesGitSyncTests : IDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.PullAsync(instance.Id, cancellation.Token));
 
         Assert.Equal(new NotesGitSyncStatus("Not synced yet."), service.GetStatus(instance.Id));
+    }
+
+    [Fact]
+    public async Task RemovalIsRejectedWhileSyncOwnsGateAndKeepsFiles()
+    {
+        var instance = new LocalLibraryInstance(Guid.NewGuid(), "Notes", _root, LocalLibraryKind.Notes);
+        var other = instance with { Id = Guid.NewGuid(), Name = "Other Notes" };
+        var note = Path.Combine(_root, "note.md");
+        await File.WriteAllTextAsync(note, "keep this");
+        var store = new BlockingStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await store.SaveAsync(instance);
+        await store.SaveAsync(other);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.AfterGet = async token => { entered.TrySetResult(); await release.Task.WaitAsync(token); };
+        using var service = new NotesGitSyncService(store, NullLogger<NotesGitSyncService>.Instance);
+        var pull = service.PullAsync(instance.Id);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveAsync(instance.Id));
+            await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveAsync(other.Id));
+            Assert.True(service.GetStatus(instance.Id).IsRunning);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await pull.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        store.AfterGet = null;
+        Assert.Equal(2, (await store.GetAllAsync()).Count);
+        await service.RemoveAsync(instance.Id);
+        Assert.Equal(other.Id, Assert.Single(await store.GetAllAsync()).Id);
+        Assert.Equal("keep this", await File.ReadAllTextAsync(note));
+    }
+
+    [Fact]
+    public async Task SyncCannotCrossRemovalAndRevalidatesAfterward()
+    {
+        var instance = new LocalLibraryInstance(Guid.NewGuid(), "Notes", _root, LocalLibraryKind.Notes);
+        var note = Path.Combine(_root, "note.md");
+        await File.WriteAllTextAsync(note, "keep this");
+        var store = new BlockingStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await store.SaveAsync(instance);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.BeforeRemove = async token => { entered.TrySetResult(); await release.Task.WaitAsync(token); };
+        using var service = new NotesGitSyncService(store, NullLogger<NotesGitSyncService>.Instance);
+        var removal = service.RemoveAsync(instance.Id);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await service.PullAsync(instance.Id);
+            Assert.Null(service.GetStatus(instance.Id).LastAttempt);
+            Assert.Equal("Another Notes sync or removal is running.", service.GetStatus(instance.Id).Message);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await removal.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        await service.PullAsync(instance.Id);
+        Assert.Equal("Skipped: not a Notes library.", service.GetStatus(instance.Id).Message);
+        Assert.Empty(await store.GetAllAsync());
+        Assert.Equal("keep this", await File.ReadAllTextAsync(note));
+    }
+
+    [Fact]
+    public async Task ScheduledSyncWaitsForRemovalAndAttemptsUnrelatedLibrary()
+    {
+        var removed = new LocalLibraryInstance(Guid.NewGuid(), "Removed", _root, LocalLibraryKind.Notes) { AutoGitPull = true };
+        var scheduled = removed with { Id = Guid.NewGuid(), Name = "Scheduled", AutoGitPull = true };
+        var store = new BlockingStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await store.SaveAsync(removed);
+        await store.SaveAsync(scheduled);
+        var removalEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRemoval = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshotRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.BeforeRemove = async token => { removalEntered.TrySetResult(); await releaseRemoval.Task.WaitAsync(token); };
+        using var service = new NotesGitSyncService(store, NullLogger<NotesGitSyncService>.Instance);
+        var removal = service.RemoveAsync(removed.Id);
+        try
+        {
+            await removalEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            store.AfterGet = _ => { snapshotRead.TrySetResult(); return Task.CompletedTask; };
+            await service.StartAsync(CancellationToken.None);
+            await snapshotRead.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await Task.Delay(300);
+            Assert.Null(service.GetStatus(scheduled.Id).LastAttempt);
+            releaseRemoval.TrySetResult();
+            await removal.WaitAsync(TimeSpan.FromSeconds(10));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            while (service.GetStatus(scheduled.Id) is { LastAttempt: null } or { IsRunning: true })
+                await Task.Delay(25, timeout.Token);
+            Assert.Equal("Skipped: not a Notes library.", service.GetStatus(removed.Id).Message);
+            Assert.Equal("Skipped: the Notes folder is not a Git repository.", service.GetStatus(scheduled.Id).Message);
+        }
+        finally
+        {
+            releaseRemoval.TrySetResult();
+            await removal.WaitAsync(TimeSpan.FromSeconds(10));
+            await service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledSyncWaitsForManualSyncWithoutChangingManualDeduplication()
+    {
+        var manual = new LocalLibraryInstance(Guid.NewGuid(), "Manual", _root, LocalLibraryKind.Notes);
+        var scheduled = manual with { Id = Guid.NewGuid(), Name = "Scheduled", AutoGitPull = true };
+        var store = new BlockingStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await store.SaveAsync(manual);
+        await store.SaveAsync(scheduled);
+        var manualEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseManual = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshotRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        store.AfterGet = async token =>
+        {
+            if (Interlocked.Increment(ref reads) == 1)
+            {
+                manualEntered.TrySetResult();
+                await releaseManual.Task.WaitAsync(token);
+            }
+            else snapshotRead.TrySetResult();
+        };
+        using var service = new NotesGitSyncService(store, NullLogger<NotesGitSyncService>.Instance);
+        var pull = service.PullAsync(manual.Id);
+        try
+        {
+            await manualEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var originalStatus = service.GetStatus(manual.Id);
+            await service.PullAsync(manual.Id);
+            Assert.Equal(originalStatus, service.GetStatus(manual.Id));
+            await service.PullAsync(scheduled.Id);
+            Assert.Equal("Another Notes sync or removal is running.", service.GetStatus(scheduled.Id).Message);
+            Assert.Null(service.GetStatus(scheduled.Id).LastAttempt);
+            await service.StartAsync(CancellationToken.None);
+            await snapshotRead.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await Task.Delay(300);
+            Assert.Null(service.GetStatus(scheduled.Id).LastAttempt);
+            releaseManual.TrySetResult();
+            await pull.WaitAsync(TimeSpan.FromSeconds(10));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            while (service.GetStatus(scheduled.Id) is { LastAttempt: null } or { IsRunning: true })
+                await Task.Delay(25, timeout.Token);
+            Assert.Equal("Skipped: the Notes folder is not a Git repository.", service.GetStatus(scheduled.Id).Message);
+        }
+        finally
+        {
+            releaseManual.TrySetResult();
+            await pull.WaitAsync(TimeSpan.FromSeconds(10));
+            await service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task ShutdownCancelsScheduledSyncWaitingForRemoval()
+    {
+        var removed = new LocalLibraryInstance(Guid.NewGuid(), "Removed", _root, LocalLibraryKind.Notes);
+        var scheduled = removed with { Id = Guid.NewGuid(), Name = "Scheduled", AutoGitPull = true };
+        var store = new BlockingStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await store.SaveAsync(removed);
+        await store.SaveAsync(scheduled);
+        var removalEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRemoval = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshotRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.BeforeRemove = async token => { removalEntered.TrySetResult(); await releaseRemoval.Task.WaitAsync(token); };
+        using var service = new NotesGitSyncService(store, NullLogger<NotesGitSyncService>.Instance);
+        var removal = service.RemoveAsync(removed.Id);
+        try
+        {
+            await removalEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            store.AfterGet = _ => { snapshotRead.TrySetResult(); return Task.CompletedTask; };
+            await service.StartAsync(CancellationToken.None);
+            await snapshotRead.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await Task.Delay(300);
+            var stop = service.StopAsync(CancellationToken.None);
+            releaseRemoval.TrySetResult();
+            await removal.WaitAsync(TimeSpan.FromSeconds(10));
+            await stop.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Null(service.GetStatus(scheduled.Id).LastAttempt);
+        }
+        finally
+        {
+            releaseRemoval.TrySetResult();
+            await removal.WaitAsync(TimeSpan.FromSeconds(10));
+            await service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledSnapshotCannotSyncAfterRemoval()
+    {
+        var instance = new LocalLibraryInstance(Guid.NewGuid(), "Notes", _root, LocalLibraryKind.Notes) { AutoGitPull = true };
+        var store = new BlockingStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await store.SaveAsync(instance);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        store.AfterGet = async token =>
+        {
+            if (Interlocked.Increment(ref reads) == 1)
+            {
+                entered.TrySetResult();
+                await release.Task.WaitAsync(token);
+            }
+        };
+        using var service = new NotesGitSyncService(store, NullLogger<NotesGitSyncService>.Instance);
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await service.RemoveAsync(instance.Id);
+            release.TrySetResult();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while (service.GetStatus(instance.Id) is { LastAttempt: null } or { IsRunning: true })
+                await Task.Delay(25, timeout.Token);
+            Assert.Equal("Skipped: not a Notes library.", service.GetStatus(instance.Id).Message);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task RemovalRevalidatesTheLibraryKindAndReleasesGateOnFailure()
+    {
+        var instance = new LocalLibraryInstance(Guid.NewGuid(), "Calibre", _root, LocalLibraryKind.Calibre);
+        var store = new BlockingStore(new JsonLocalLibraryStore(Path.Combine(_root, "libraries.json")));
+        await store.SaveAsync(instance);
+        using var service = new NotesGitSyncService(store, NullLogger<NotesGitSyncService>.Instance);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveAsync(instance.Id));
+        Assert.Single(await store.GetAllAsync());
+        await service.PullAsync(instance.Id);
+        Assert.Equal("Skipped: not a Notes library.", service.GetStatus(instance.Id).Message);
     }
 
     [Fact]
@@ -311,6 +552,28 @@ public sealed class NotesGitSyncTests : IDisposable
         Assert.True(process.ExitCode == 0, "Local Git fixture command failed.");
         await error;
         return await output;
+    }
+
+    private sealed class BlockingStore(ILocalLibraryStore inner) : ILocalLibraryStore
+    {
+        public Func<CancellationToken, Task>? AfterGet { get; set; }
+        public Func<CancellationToken, Task>? BeforeRemove { get; set; }
+
+        public async Task<IReadOnlyList<LocalLibraryInstance>> GetAllAsync(CancellationToken cancellationToken = default)
+        {
+            var instances = await inner.GetAllAsync(cancellationToken);
+            if (AfterGet is not null) await AfterGet(cancellationToken);
+            return instances;
+        }
+
+        public Task SaveAsync(LocalLibraryInstance instance, CancellationToken cancellationToken = default) =>
+            inner.SaveAsync(instance, cancellationToken);
+
+        public async Task RemoveAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            if (BeforeRemove is not null) await BeforeRemove(cancellationToken);
+            await inner.RemoveAsync(id, cancellationToken);
+        }
     }
 
     private sealed class CapturingLogger : ILogger<NotesGitSyncService>

@@ -17,17 +17,38 @@ public sealed class NotesGitSyncService(ILocalLibraryStore libraries, ILogger<No
     public NotesGitSyncStatus GetStatus(Guid instanceId) =>
         _statuses.GetValueOrDefault(instanceId) ?? new("Not synced yet.");
 
-    public async Task PullAsync(Guid instanceId, CancellationToken cancellationToken = default)
+    public async Task RemoveAsync(Guid instanceId, CancellationToken cancellationToken = default)
+    {
+        if (!await _gate.WaitAsync(0, cancellationToken))
+            throw new InvalidDataException("Wait for the current Notes Git sync or removal to finish before removing this library.");
+
+        try
+        {
+            var instance = (await libraries.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
+            if (instance is null || instance.Kind != LocalLibraryKind.Notes)
+                throw new InvalidDataException("This Notes library has changed or was removed. Reload the library list and retry.");
+
+            await libraries.RemoveAsync(instanceId, cancellationToken);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public Task PullAsync(Guid instanceId, CancellationToken cancellationToken = default) =>
+        PullAsync(instanceId, waitForGate: false, cancellationToken);
+
+    private async Task PullAsync(Guid instanceId, bool waitForGate, CancellationToken cancellationToken)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token);
-        deadline.CancelAfter(TimeSpan.FromMinutes(2));
-        if (!await _gate.WaitAsync(0, deadline.Token))
+        if (waitForGate)
+            await _gate.WaitAsync(deadline.Token);
+        else if (!await _gate.WaitAsync(0, deadline.Token))
         {
-            _statuses.AddOrUpdate(instanceId, new NotesGitSyncStatus("Another Notes sync is running."),
-                (_, status) => status.IsRunning ? status : status with { Message = "Another Notes sync is running." });
+            _statuses.AddOrUpdate(instanceId, new NotesGitSyncStatus("Another Notes sync or removal is running."),
+                (_, status) => status.IsRunning ? status : status with { Message = "Another Notes sync or removal is running." });
             return;
         }
 
+        deadline.CancelAfter(TimeSpan.FromMinutes(2));
         var previous = GetStatus(instanceId);
         _statuses[instanceId] = previous with { Message = "Syncing...", IsRunning = true, LastAttempt = DateTimeOffset.UtcNow };
         try
@@ -130,7 +151,7 @@ public sealed class NotesGitSyncService(ILocalLibraryStore libraries, ILogger<No
                 {
                     var instances = await libraries.GetAllAsync(stoppingToken);
                     foreach (var instance in instances.Where(item => item.Kind == LocalLibraryKind.Notes && item.AutoGitPull))
-                        await PullAsync(instance.Id, stoppingToken);
+                        await PullAsync(instance.Id, waitForGate: true, stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
                 catch (Exception) { logger.LogWarning("Automatic Notes Git sync could not read library settings."); }

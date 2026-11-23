@@ -1,0 +1,21 @@
+<div class="backend-instance-row @(Selected ? "selected" : null)">
+    <button class="backend-instance-select" type="button" aria-pressed="@(Selected ? "true" : "false")" @onclick="OnSelect">
+        <span class="backend-status-dot @StatusClass" aria-hidden="true"></span>
+        <span class="backend-instance-identity"><strong>@Name</strong><small>@Type</small></span>
+        <span class="backend-instance-status">@Status</span>
+    </button>
+    @if (Actions is not null)
+    {
+        <div class="backend-instance-actions">@Actions</div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Name { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Type { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Status { get; set; } = string.Empty;
+    [Parameter] public string StatusClass { get; set; } = "unknown";
+    [Parameter] public bool Selected { get; set; }
+    [Parameter] public EventCallback OnSelect { get; set; }
+    [Parameter] public RenderFragment? Actions { get; set; }
+}

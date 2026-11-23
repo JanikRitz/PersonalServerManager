@@ -25,7 +25,13 @@ public sealed class JsonHydrusInstanceStore(string filePath, IDataProtector prot
         }
     }
 
-    public async Task SaveAsync(HydrusInstance instance, CancellationToken cancellationToken = default)
+    public Task SaveAsync(HydrusInstance instance, CancellationToken cancellationToken = default) =>
+        SaveCoreAsync(instance, false, cancellationToken);
+
+    public Task UpdateAsync(HydrusInstance instance, CancellationToken cancellationToken = default) =>
+        SaveCoreAsync(instance, true, cancellationToken);
+
+    private async Task SaveCoreAsync(HydrusInstance instance, bool requireExisting, CancellationToken cancellationToken)
     {
         HydrusClient.ValidateEndpoint(instance.ApiEndpoint);
         await _gate.WaitAsync(cancellationToken);
@@ -33,6 +39,8 @@ public sealed class JsonHydrusInstanceStore(string filePath, IDataProtector prot
         {
             var stored = await ReadAsync(cancellationToken);
             var existing = stored.FindIndex(item => item.Id == instance.Id);
+            if (requireExisting && existing < 0)
+                throw new InvalidDataException("The Hydrus instance no longer exists.");
             var previousApiKey = existing < 0 ? null : stored[existing].ProtectedApiKey;
             if (instance.IsManaged)
             {

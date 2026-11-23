@@ -24,6 +24,8 @@ public sealed record StashInstance(
 {
     public bool IsManaged => !string.IsNullOrWhiteSpace(InstallationFolder);
 
+    public StashJobSettings JobSettings { get; init; } = new();
+
     public Uri BrowserUrl(Uri url) => IsManaged
         ? new Uri($"/managed/stash/{Id:D}{url.PathAndQuery}{url.Fragment}", UriKind.Relative)
         : url;
@@ -60,8 +62,14 @@ public sealed record StashObservation(
     DateTimeOffset CheckedAt,
     string Message);
 
+public sealed record StashJob(string Id, string Status, string? Error);
+
 public interface IStashGraphQlClient
 {
+    Task<string> StartMetadataScanAsync(StashInstance instance, StashScanOptions options, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    Task<string> StartMetadataGenerateAsync(StashInstance instance, StashGenerateOptions options, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    Task<StashJob?> FindJobAsync(StashInstance instance, string id, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
     Task<IReadOnlyList<StashSearchResult>> SearchFeedAsync(
         StashInstance instance,
         StashSearchKind kind,

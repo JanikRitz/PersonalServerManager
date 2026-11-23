@@ -1,3 +1,16 @@
+:root {
+    --backend-icon-size: 36px;
+    --backend-icon-radius: 4px;
+    --backend-row-gap: 10px;
+    --backend-row-padding: 14px;
+    --backend-dialog-padding: 24px;
+    --backend-dialog-radius: 8px;
+    --backend-dialog-backdrop: #10231f88;
+}
+
+.backend-process-status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.backend-instance-row button:disabled { opacity: .35; cursor: not-allowed; }
+
 .theme-toggle { display: grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; padding: 6px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .theme-toggle:hover { background: #e4eee9; color: var(--teal); }
 .theme-toggle:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
@@ -19,6 +32,7 @@ html[data-theme="dark"] .workspace {
 html[data-theme="dark"] .theme-toggle:hover,
 html[data-theme="dark"] .icon-action:hover,
 html[data-theme="dark"] .icon-button:hover,
+html[data-theme="dark"] .sync-button:hover,
 html[data-theme="dark"] .outline-action:hover { background: #30445c; }
 html[data-theme="dark"] .search-form,
 html[data-theme="dark"] .editor-form input,
@@ -53,6 +67,7 @@ html[data-theme="dark"] .swarmui-dialog,
 html[data-theme="dark"] .swarmui-dialog .cancel-button { background: #1c2d42; }
 html[data-theme="dark"] .editor-backdrop,
 html[data-theme="dark"] .hydrus-backdrop,
+html[data-theme="dark"] .library-backdrop,
 html[data-theme="dark"] .swarmui-backdrop { background: #080f1caa; }
 html[data-theme="dark"] .remove-button { color: #ff9a91; }
 html[data-theme="dark"] footer { color: var(--muted); }

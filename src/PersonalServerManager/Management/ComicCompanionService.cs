@@ -34,7 +34,8 @@ public sealed record ComicCompanionSettings(
         : url;
 }
 
-public sealed class ComicCompanionService(string settingsPath, ILogger<ComicCompanionService> logger) : BackgroundService
+public sealed class ComicCompanionService(string settingsPath, ILogger<ComicCompanionService> logger,
+    Func<ProcessStartInfo, Process?>? startProcess = null, Func<Process, Task>? stopProcess = null) : BackgroundService
 {
     public static readonly Guid LegacyInstanceId = new("7926576f-37c3-462d-a59e-2a6118ca439b");
     private const string ApplicationName = "HydrusComicCompanion";
@@ -58,7 +59,13 @@ public sealed class ComicCompanionService(string settingsPath, ILogger<ComicComp
         finally { _gate.Release(); }
     }
 
-    public async Task<ComicCompanionSettings> SaveSettingsAsync(ComicCompanionSettings settings, CancellationToken cancellationToken = default)
+    public Task<ComicCompanionSettings> SaveSettingsAsync(ComicCompanionSettings settings, CancellationToken cancellationToken = default) =>
+        SaveSettingsCoreAsync(settings, false, cancellationToken);
+
+    public Task<ComicCompanionSettings> UpdateSettingsAsync(ComicCompanionSettings settings, CancellationToken cancellationToken = default) =>
+        SaveSettingsCoreAsync(settings, true, cancellationToken);
+
+    private async Task<ComicCompanionSettings> SaveSettingsCoreAsync(ComicCompanionSettings settings, bool requireExisting, CancellationToken cancellationToken)
     {
         settings = Normalize(settings with { Id = settings.Id == Guid.Empty ? LegacyInstanceId : settings.Id });
         if (settings.ApiUrl is null)
@@ -73,6 +80,8 @@ public sealed class ComicCompanionService(string settingsPath, ILogger<ComicComp
 
             var instances = await ReadSettingsAsync(cancellationToken);
             var index = instances.FindIndex(instance => instance.Id == settings.Id);
+            if (requireExisting && index < 0)
+                throw new InvalidDataException("The Comic Companion instance no longer exists.");
             if (index < 0) instances.Add(settings);
             else instances[index] = settings;
             await WriteSettingsAsync(instances, cancellationToken);
@@ -87,9 +96,9 @@ public sealed class ComicCompanionService(string settingsPath, ILogger<ComicComp
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            ReapExitedProcess(instanceId);
+            await StopOwnedAsync(instanceId);
             if (_owned.ContainsKey(instanceId))
-                throw new InvalidDataException("Stop the PSM-owned process before removing this Comic Companion instance.");
+                throw new InvalidDataException("Comic Companion could not stop. Its configuration was not removed.");
 
             var instances = await ReadSettingsAsync(cancellationToken);
             if (instances.RemoveAll(instance => instance.Id == instanceId) > 0)
@@ -296,7 +305,7 @@ public sealed class ComicCompanionService(string settingsPath, ILogger<ComicComp
                 IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(listener => listener.Port == port))
                 throw new InvalidDataException("The configured port is already in use. PSM will not take ownership of an existing service.");
             cancellationToken.ThrowIfCancellationRequested();
-            _owned.Add(instanceId, Process.Start(start) ?? throw new InvalidDataException("Comic Companion did not start."));
+            _owned.Add(instanceId, (startProcess ?? Process.Start)(start) ?? throw new InvalidDataException("Comic Companion did not start."));
             _statuses[instanceId] = new("Process started (API readiness is not checked)", true);
         }
         catch (InvalidDataException exception) { _statuses[instanceId] = new(exception.Message, false); }
@@ -314,9 +323,7 @@ public sealed class ComicCompanionService(string settingsPath, ILogger<ComicComp
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                await process.WaitForExitAsync(timeout.Token);
+                await (stopProcess ?? StopProcessAsync)(process);
             }
             _statuses.TryRemove(instanceId, out _);
             _owned.Remove(instanceId);
@@ -328,6 +335,13 @@ public sealed class ComicCompanionService(string settingsPath, ILogger<ComicComp
             if (_owned.ContainsKey(instanceId))
                 ReportFailure(instanceId, "Unable to confirm shutdown. The owned process remains tracked.", exception);
         }
+    }
+
+    private static async Task StopProcessAsync(Process process)
+    {
+        process.Kill(entireProcessTree: true);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await process.WaitForExitAsync(timeout.Token);
     }
 
     private void ReapExitedProcess(Guid instanceId)

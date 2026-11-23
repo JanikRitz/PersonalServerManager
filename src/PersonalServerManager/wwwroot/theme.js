@@ -1,4 +1,9 @@
 (() => {
+    window.psmScrollBackendDetails = () => {
+        if (matchMedia('(max-width: 820px)').matches) {
+            document.querySelector('.management-grid .backend-details:not(.empty-details)')?.scrollIntoView({ block: 'start' });
+        }
+    };
     const root = document.documentElement;
     let preference;
     try { preference = localStorage.getItem('theme'); } catch { }

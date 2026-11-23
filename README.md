@@ -21,9 +21,10 @@ is shipped or stored in the repository. Sign in uses an HTTP-only, same-site
 cookie, antiforgery protection, and a per-IP request limit.
 
 The main page is a focused library search. Use the gear icon to open **Server
-Management** (`/backends`), where Stash, Hydrus, Calibre, and Notes have equal-priority
-sections for connections, health, and applicable lifecycle or sync controls. Stash,
-Hydrus, and Calibre support **External** and **Managed** modes; Notes are local
+Management** (`/backends`), where Stash, Hydrus, SwarmUI, Calibre, Notes, and Comic
+Companion instances are grouped by backend. Select an instance to see its details
+and settings; managed lifecycle controls are available on its row. Stash,
+Hydrus, SwarmUI, Calibre, and Comic Companion support **External** and **Managed** modes; Notes are local
 folders with optional Git sync, not managed servers. Use the search link to return
 to the main page.
 
@@ -52,6 +53,13 @@ Scene markers use their own screenshot through the authenticated preview proxy.
 Search and expansion show explicit loading indicators while data is being fetched.
 Status refreshes every 15 seconds on the Server Management page.
 Search and observation do not mutate Stash library contents.
+
+For a selected Stash instance, **Job options** saves scan and generate settings
+per instance. **Start scan** and **Start generate** use those saved settings for
+both external and managed instances. Job IDs and last observed status are shared
+across browser tabs and refreshes in manager memory until the manager restarts;
+Stash remains the source of job state. Stash must allow GraphQL
+schema introspection so unsupported options can be detected before starting a job.
 
 ## Managed Lifecycle
 

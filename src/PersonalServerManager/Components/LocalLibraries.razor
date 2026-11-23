@@ -3,11 +3,12 @@
 @implements IDisposable
 @inject ILocalLibraryStore Store
 @inject ManagedCalibreServer Calibre
+@inject NotesGitSyncService GitSync
 @inject IJSRuntime JavaScript
 @inject PersonalServerManager.Hydrus.IHydrusInstanceStore HydrusStore
 @inject PersonalServerManager.Stash.IStashInstanceStore StashStore
 
-<section class="local-libraries" aria-labelledby="@FieldId("heading")">
+<section class="backend-group local-libraries" aria-labelledby="@FieldId("heading")">
     <header class="library-heading">
         <h2 id="@FieldId("heading")" tabindex="-1" @ref="_heading">@SectionTitle</h2>
         <button class="icon-button" type="button" title="@($"Add {SectionTitle} library")" aria-label="@($"Add {SectionTitle} library")" disabled="@(_busy || _loading || _editing)" @onclick="AddLibrary">
@@ -30,44 +31,22 @@
     <ul class="library-list" aria-label="@($"{SectionTitle} libraries")">
         @foreach (var instance in VisibleInstances)
         {
-            var available = _availability.GetValueOrDefault(instance.Id) == "Available";
             var status = Calibre.GetStatus(instance.Id);
-            var readerInstance = Calibre.WithReaderConnection(instance);
-            <li @key="instance.Id" class="library-row">
-                <span class="status-dot @(available ? "online" : "offline")" aria-hidden="true"></span>
-                <div class="instance-copy">
-                    <strong>@instance.Name</strong>
-                    <span class="instance-kind">@KindLabel(instance.Kind)</span>
-                    <span class="instance-status" role="status">@_availability.GetValueOrDefault(instance.Id, "Unavailable")</span>
-                    <small class="root-path">@(instance.IsExternal ? instance.ContentServerUrl?.AbsoluteUri : string.Join(" · ", instance.RootPaths))</small>
+            var availability = _availability.GetValueOrDefault(instance.Id);
+            <li @key="instance.Id">
+                <BackendInstanceRow Name="@instance.Name" Type="@KindLabel(instance.Kind)" Status="@(instance.IsExternal || availability is null ? "Unknown" : availability == "Available" ? "Available" : "Unavailable")"
+                    StatusClass="@(instance.IsExternal || availability is null ? "unknown" : availability == "Available" ? "online" : "offline")"
+                    Selected="@Selection.IsSelected(SelectionKey(instance), instance.Id)" OnSelect="() => Selection.Select(SelectionKey(instance), instance.Id)">
+                    <Actions>
                     @if (instance.IsManaged)
                     {
-                        <span class="managed-badge" role="status">Managed · @status.Message · Port @instance.ManagedPort</span>
-                        <label class="calibre-checkbox"><input type="checkbox" checked="@instance.StartWithApp" disabled="@(_busy || _calibreBusy)" @onchange="args => SaveAutostartAsync(instance, args.Value is true)" /> Start with Personal Server Manager</label>
+                        <span class="backend-process-status" role="status">@(status.IsRunning ? "Running" : "Stopped")</span>
+                        <button class="icon-button" type="button" title="Start Calibre" aria-label="@($"Start Calibre {instance.Name}")" disabled="@(_busy || _calibreBusy || _editing || status.IsRunning)" @onclick='() => RunCalibreAsync(instance, "start")'><MudIcon Icon="@Icons.Material.Filled.PlayArrow" /></button>
+                        <button class="icon-button" type="button" title="Stop Calibre" aria-label="@($"Stop Calibre {instance.Name}")" disabled="@(_busy || _calibreBusy || _editing || !status.IsRunning)" @onclick='() => RunCalibreAsync(instance, "stop")'><MudIcon Icon="@Icons.Material.Filled.Stop" /></button>
+                        <button class="icon-button" type="button" title="Restart Calibre" aria-label="@($"Restart Calibre {instance.Name}")" disabled="@(_busy || _calibreBusy || _editing || !status.IsRunning)" @onclick='() => RunCalibreAsync(instance, "restart")'><MudIcon Icon="@Icons.Material.Filled.Refresh" /></button>
                     }
-                    @if (instance.Kind == LocalLibraryKind.Notes)
-                    {
-                        <NotesGitControls InstanceId="@instance.Id" Enabled="@instance.AutoGitPull" />
-                    }
-                </div>
-                <div class="row-actions">
-                    @if (instance.IsManaged)
-                    {
-                        <button class="icon-button" type="button" title="Start Calibre" aria-label="@($"Start Calibre {instance.Name}")" disabled="@(_busy || _calibreBusy || status.IsRunning)" @onclick="() => ToggleCalibreAsync(instance)"><MudIcon Icon="@Icons.Material.Filled.PlayArrow" /></button>
-                        <button class="icon-button" type="button" title="Stop Calibre" aria-label="@($"Stop Calibre {instance.Name}")" disabled="@(_busy || _calibreBusy || !status.IsRunning)" @onclick="() => ToggleCalibreAsync(instance)"><MudIcon Icon="@Icons.Material.Filled.Stop" /></button>
-                        <button class="icon-button" type="button" title="Refresh Calibre status" aria-label="@($"Refresh Calibre {instance.Name}")" @onclick="RefreshAvailability"><MudIcon Icon="@Icons.Material.Filled.Refresh" /></button>
-                    }
-                    @if (readerInstance.ContentServerUrl is not null)
-                    {
-                        <a class="icon-button" href="@(instance.IsManaged ? readerInstance.ContentServerUrl.PathAndQuery : readerInstance.ContentServerUrl.ToString())" target="_blank" rel="noopener noreferrer" title="Open Calibre Content Server" aria-label="@($"Open Calibre Content Server for {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" /></a>
-                    }
-                    <button class="icon-button" type="button" title="Edit local library" aria-label="@($"Edit local library {instance.Name}")" disabled="@(_busy || _loading || _editing)" @onclick="() => EditLibrary(instance)">
-                        <MudIcon Icon="@Icons.Material.Filled.Edit" aria-hidden="true" />
-                    </button>
-                    <button class="icon-button remove-button" type="button" title="Remove local library" aria-label="@($"Remove local library {instance.Name}")" disabled="@(_busy || _loading || _editing)" @onclick="() => RemoveAsync(instance)">
-                        <MudIcon Icon="@Icons.Material.Filled.DeleteOutline" aria-hidden="true" />
-                    </button>
-                </div>
+                    </Actions>
+                </BackendInstanceRow>
             </li>
         }
     </ul>
@@ -161,7 +140,44 @@
     }
 </section>
 
+@if (VisibleInstances.FirstOrDefault(instance => Selection.IsSelected(SelectionKey(instance), instance.Id)) is { } selected)
+{
+    var status = Calibre.GetStatus(selected.Id);
+    var reader = Calibre.WithReaderConnection(selected);
+    <section class="backend-details local-library-details" aria-label="@($"{selected.Name} details")">
+        <h2>@selected.Name</h2>
+        <dl>
+            <dt>Type</dt><dd>@KindLabel(selected.Kind) @(selected.IsManaged ? "(Managed)" : selected.IsExternal ? "(External)" : "")</dd>
+            <dt>Availability</dt><dd role="status">@(selected.IsExternal ? "Unknown" : _availability.GetValueOrDefault(selected.Id) ?? "Unknown")</dd>
+            @if (selected.IsManaged) { <dt>Process</dt><dd role="status">@status.Message</dd><dt>Port</dt><dd>@selected.ManagedPort</dd> }
+            <dt>@(selected.IsExternal ? "Server URL" : "Folders")</dt><dd>@(selected.IsExternal ? selected.ContentServerUrl?.AbsoluteUri : string.Join(" · ", selected.RootPaths))</dd>
+            @if (selected.ContentServerUrl is not null && !selected.IsExternal) { <dt>Server URL</dt><dd>@selected.ContentServerUrl.AbsoluteUri</dd> }
+            @if (selected.ContentServerLibraryId is not null) { <dt>Library ID</dt><dd>@selected.ContentServerLibraryId</dd> }
+            @if (selected.IsManaged && selected.CalibreInstallationFolder is not null) { <dt>Installation</dt><dd>@selected.CalibreInstallationFolder</dd> }
+            @if (selected.Kind == LocalLibraryKind.Notes && selected.HydrusInstanceId is not null) { <dt>Hydrus reference</dt><dd>@selected.HydrusInstanceId</dd> }
+            @if (selected.Kind == LocalLibraryKind.Notes && selected.StashInstanceId is not null) { <dt>Stash reference</dt><dd>@selected.StashInstanceId</dd> }
+        </dl>
+        @if (selected.IsManaged)
+        {
+            <label class="calibre-checkbox"><input type="checkbox" checked="@selected.StartWithApp" disabled="@(_busy || _calibreBusy || _editing)" @onchange="args => SaveAutostartAsync(selected, args.Value is true)" /> Start with Personal Server Manager</label>
+        }
+        @if (selected.Kind == LocalLibraryKind.Notes)
+        {
+            <NotesGitControls @key="selected.Id" InstanceId="@selected.Id" Enabled="@selected.AutoGitPull" />
+        }
+        <div class="detail-actions">
+            @if (reader.ContentServerUrl is not null)
+            {
+                <a class="icon-button" href="@(selected.IsManaged ? reader.ContentServerUrl.PathAndQuery : reader.ContentServerUrl.ToString())" target="_blank" rel="noopener noreferrer" title="Open Calibre Content Server" aria-label="@($"Open Calibre Content Server for {selected.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" /></a>
+            }
+            <button class="icon-button" type="button" title="Edit local library" aria-label="@($"Edit local library {selected.Name}")" disabled="@(_busy || _calibreBusy || _loading || _editing)" @onclick="() => EditLibrary(selected)"><MudIcon Icon="@Icons.Material.Filled.Edit" aria-hidden="true" /></button>
+            <button class="icon-button remove-button" type="button" title="Remove local library" aria-label="@($"Remove local library {selected.Name}")" disabled="@(_busy || _calibreBusy || _loading || _editing)" @onclick="() => RemoveAsync(selected)"><MudIcon Icon="@Icons.Material.Filled.DeleteOutline" aria-hidden="true" /></button>
+        </div>
+    </section>
+}
+
 @code {
+    [CascadingParameter] public BackendSelection Selection { get; set; } = null!;
     [Parameter] public EventCallback Changed { get; set; }
     [Parameter] public LocalLibraryKind? FilterKind { get; set; }
     private string SectionTitle => FilterKind == LocalLibraryKind.Notes ? "Notes" : FilterKind is null ? "Local libraries" : "Calibre";
@@ -204,6 +220,8 @@
     private bool _calibreBusy;
 
     private string FieldId(string suffix) => $"{_id}-{suffix}";
+    private static string SelectionKey(LocalLibraryInstance instance) => instance.Kind == LocalLibraryKind.Notes ? "Notes" : "Calibre";
+    private void SelectionChanged() => _ = InvokeAsync(StateHasChanged);
 
     private string PathPlaceholder => _draftKind switch
     {
@@ -221,18 +239,20 @@
     protected override async Task OnInitializedAsync()
     {
         _token = _lifetime.Token;
+        Selection.Changed += SelectionChanged;
         await ReloadAsync();
     }
 
-    private async Task ToggleCalibreAsync(LocalLibraryInstance instance)
+    private async Task RunCalibreAsync(LocalLibraryInstance instance, string operation)
     {
-        if (_calibreBusy) return;
+        if (_calibreBusy || _busy || _editing) return;
         _calibreBusy = true;
         _error = null;
         try
         {
-            if (!Calibre.GetStatus(instance.Id).IsRunning) await Calibre.StartServerAsync(instance.Id, _token);
-            else await Calibre.StopServerAsync(instance.Id);
+            if (operation == "stop") await Calibre.StopServerAsync(instance.Id);
+            if (operation == "restart") await Calibre.RestartServerAsync(instance.Id, _token);
+            if (operation == "start") await Calibre.StartServerAsync(instance.Id, _token);
             await NotifyChangedAsync();
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
@@ -249,20 +269,25 @@
 
     private async Task SaveAutostartAsync(LocalLibraryInstance instance, bool enabled)
     {
+        if (_busy || _calibreBusy || _editing) return;
+        _busy = true;
         try
         {
-            await Store.SaveAsync(instance with { StartWithApp = enabled }, _token);
+            await Store.UpdateAsync(instance with { StartWithApp = enabled }, _token);
             await ReloadAsync();
             await NotifyChangedAsync();
         }
         catch (Exception exception) when (IsExpectedFailure(exception))
         {
-            _error = "Could not save the autostart setting.";
+            _error = exception is InvalidDataException && exception.Message == "The local library no longer exists."
+                ? exception.Message : "Could not save the autostart setting.";
         }
+        finally { _busy = false; }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (firstRender) _ = RefreshPeriodicallyAsync();
         if (_disposed || (!_focusEditor && !_restoreFocus))
         {
             return;
@@ -277,6 +302,23 @@
         }
         catch (JSException) { }
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+    }
+
+    private async Task RefreshPeriodicallyAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_token))
+                await InvokeAsync(() =>
+                {
+                    if (_disposed) return;
+                    RefreshAvailability();
+                    StateHasChanged();
+                });
+        }
+        catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (_disposed) { }
     }
 
     private async Task ReloadAsync()
@@ -455,7 +497,7 @@
 
     private async Task SaveAsync()
     {
-        if (_busy || _disposed)
+        if (_busy || _calibreBusy || _disposed)
         {
             return;
         }
@@ -529,9 +571,9 @@
         _busy = true;
         try
         {
-            if (existing is not null && Calibre.GetStatus(existing.Id).IsRunning)
-                throw new InvalidDataException("Stop Calibre before editing its configuration.");
-            await Store.SaveAsync(instance, _token);
+            if (_editingId is null) await Store.SaveAsync(instance, _token);
+            else if (existing?.IsCalibre == true || instance.IsCalibre) await Calibre.UpdateLibraryAsync(instance, _token);
+            else await Store.UpdateAsync(instance, _token);
             if (_disposed)
             {
                 return;
@@ -545,7 +587,9 @@
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
         catch (Exception exception) when (IsExpectedFailure(exception))
         {
-            _editorError = "Could not save this library. Check configuration file access and the server folder, then retry. Your entries are unchanged.";
+            _editorError = exception is InvalidDataException && (exception.Message == "The local library no longer exists."
+                || exception.Message == "Stop Calibre before editing its configuration.")
+                ? exception.Message : "Could not save this library. Check configuration file access and the server folder, then retry. Your entries are unchanged.";
         }
         finally
         {
@@ -555,7 +599,7 @@
 
     private async Task RemoveAsync(LocalLibraryInstance instance)
     {
-        if (_busy || _disposed)
+        if (_busy || _calibreBusy || _editing || _disposed)
         {
             return;
         }
@@ -564,15 +608,15 @@
         _error = null;
         try
         {
-            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, $"Remove local library '{instance.Name}'? Only its configuration will be removed. The folder and its files will not be changed."))
+            var consequence = instance.IsManaged ? "Its managed Calibre process will be stopped." : instance.IsExternal ? "The external service will remain running." : "The Notes folder and its files will be kept. An active Git sync must finish first.";
+            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, $"Remove local library '{instance.Name}'? {consequence} Only its configuration will be removed; local files will be kept."))
             {
                 return;
             }
 
-            await Calibre.StopServerAsync(instance.Id);
-            if (Calibre.GetStatus(instance.Id).IsRunning)
-                throw new InvalidDataException("Calibre could not stop. Retry Stop before removing the library.");
-            await Store.RemoveAsync(instance.Id, _token);
+            if (instance.Kind == LocalLibraryKind.Notes) await GitSync.RemoveAsync(instance.Id, _token);
+            else await Calibre.RemoveLibraryAsync(instance.Id, _token);
+            Selection.Clear(SelectionKey(instance), instance.Id);
             if (_disposed)
             {
                 return;
@@ -584,6 +628,7 @@
             await NotifyChangedAsync();
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
+        catch (InvalidDataException exception) { _error = exception.Message; }
         catch (Exception exception) when (IsExpectedFailure(exception) || exception is JSException)
         {
             _error = "Could not remove this library. Check the browser connection and configuration file access, then retry. The list is unchanged.";
@@ -624,6 +669,7 @@
         }
 
         _disposed = true;
+        Selection.Changed -= SelectionChanged;
         _lifetime.Cancel();
         _lifetime.Dispose();
     }

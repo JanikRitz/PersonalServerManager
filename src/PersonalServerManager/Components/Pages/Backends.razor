@@ -48,12 +48,17 @@
         }
 
         <div class="management-grid">
-            <section class="stash-section" aria-labelledby="stash-heading">
+            <CascadingValue Value="_selection" IsFixed="true">
+            <section class="backend-group stash-section" aria-labelledby="stash-heading">
                 <div class="section-heading">
                     <h2 id="stash-heading">Stash</h2>
                     <button class="icon-action" type="button" title="Add Stash instance" aria-label="Add Stash instance" disabled="@_isSaving" @onclick="StartNewInstance"><MudIcon Icon="@Icons.Material.Filled.Add" /></button>
                 </div>
-                @if (_instances.Count == 0)
+                @if (_lastRefresh is null && _pageError is null && _instances.Count == 0)
+                {
+                    <p class="empty-inventory" role="status">Loading Stash instances...</p>
+                }
+                else if (_instances.Count == 0 && _pageError is null)
                 {
                     <div class="empty-inventory"><p>No Stash instances configured.</p><button class="text-action" type="button" @onclick="StartNewInstance"><MudIcon Icon="@Icons.Material.Filled.Add" Size="Size.Small" />Add instance</button></div>
                 }
@@ -64,23 +69,28 @@
                         {
                             var observation = _observations.GetValueOrDefault(instance.Id);
                             <li @key="instance.Id">
-                                <button class="instance-row @(instance.Id == _selectedInstanceId ? "selected" : string.Empty)" type="button" aria-pressed="@(instance.Id == _selectedInstanceId)" @onclick="() => SelectInstance(instance.Id)">
-                                    <span class="status-indicator @(observation is null ? "unknown" : observation.IsReachable ? "online" : "offline")" aria-hidden="true"></span>
-                                    <span class="instance-copy"><strong>@instance.Name</strong><small>@instance.GraphQlEndpoint.Host</small></span>
-                                    @if (instance.IsManaged) { <span class="managed-badge">Managed</span> }
-                                    <span class="row-status">@(observation is null ? "Checking..." : observation.IsReachable ? "Available" : "Unavailable")</span>
-                                    <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" />
-                                </button>
+                                <BackendInstanceRow Name="@instance.Name" Type="@(instance.IsManaged ? "Managed" : "External")" Status="@(observation is null ? "Unknown" : observation.IsReachable ? "Available" : "Unavailable")"
+                                                    StatusClass="@(observation is null ? "unknown" : observation.IsReachable ? "online" : "offline")"
+                                                    Selected="@_selection.IsSelected("Stash", instance.Id)" OnSelect="() => SelectInstance(instance.Id)">
+                                    <Actions>
+                                        @if (instance.IsManaged)
+                                        {
+                                            <ManagedBackendControls InstanceId="@instance.Id" InstanceName="@instance.Name" Compact="true" />
+                                        }
+                                    </Actions>
+                                </BackendInstanceRow>
                             </li>
                         }
                     </ul>
                 }
 
-                @if (_selectedInstance is not null)
+            </section>
+
+            @if (_selectedInstance is not null)
                 {
                     var observation = _observations.GetValueOrDefault(_selectedInstance.Id);
-                    <section class="instance-details" aria-labelledby="details-heading">
-                        <div class="details-heading"><h3 id="details-heading">@_selectedInstance.Name</h3><span class="state @(observation is null ? "state-unknown" : observation.IsReachable ? "state-online" : "state-offline")">@(observation is null ? "Checking" : observation.IsReachable ? "Available" : "Unavailable")</span></div>
+                    <section class="backend-details instance-details" aria-labelledby="details-heading">
+                        <div class="details-heading"><h3 id="details-heading">@_selectedInstance.Name</h3><span class="state @(observation is null ? "state-unknown" : observation.IsReachable ? "state-online" : "state-offline")">@(observation is null ? "Unknown" : observation.IsReachable ? "Available" : "Unavailable")</span></div>
                         <dl>
                             <dt>GraphQL endpoint</dt><dd>@_selectedInstance.GraphQlEndpoint.AbsoluteUri</dd>
                             <dt>Stash interface</dt><dd>@_selectedInstance.WebUiUrl.AbsoluteUri</dd>
@@ -88,8 +98,9 @@
                         </dl>
                         @if (_selectedInstance.IsManaged)
                         {
-                            <ManagedBackendControls @key="_selectedInstance.Id" InstanceId="@_selectedInstance.Id" StartWithApp="@_selectedInstance.StartWithApp" StartWithAppChanged="SaveStashAutostartAsync" />
+                            <ManagedBackendControls @key="_selectedInstance.Id" InstanceId="@_selectedInstance.Id" StartWithApp="@_selectedInstance.StartWithApp" StartWithAppChanged="SaveStashAutostartAsync" SettingsOnly="true" />
                         }
+                        <StashJobs @key="(typeof(StashJobs), _selectedInstance.Id)" Instance="_selectedInstance" SettingsSaved="LoadInstancesAsync" />
                         <div class="detail-actions">
                             <a class="outline-action" href="@_selectedInstance.BrowserUrl(_selectedInstance.WebUiUrl)" target="_blank" rel="noopener noreferrer">Open Stash<MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" /></a>
                             <button class="text-action" type="button" disabled="@_isSaving" @onclick="() => EditInstance(_selectedInstance)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" />Edit</button>
@@ -97,13 +108,17 @@
                         </div>
                     </section>
                 }
-            </section>
 
-            <div class="hydrus-section"><HydrusInstances Changed="ReloadHydrusAsync" /></div>
-            <div class="backend-section"><SwarmUIInstances Changed="ReloadSwarmAsync" /></div>
-            <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Calibre" Changed="ReloadLocalAsync" /></div>
-            <div class="backend-section"><LocalLibraries FilterKind="LocalLibraryKind.Notes" Changed="ReloadLocalAsync" /></div>
-            <div class="backend-section"><ComicCompanionControls CountChanged="count => _comicInstanceCount = count" /></div>
+            <HydrusInstances Changed="ReloadHydrusAsync" />
+            <SwarmUIInstances Changed="ReloadSwarmAsync" />
+            <LocalLibraries FilterKind="LocalLibraryKind.Calibre" Changed="ReloadLocalAsync" />
+            <LocalLibraries FilterKind="LocalLibraryKind.Notes" Changed="ReloadLocalAsync" />
+            <ComicCompanionControls CountChanged="count => _comicInstanceCount = count" />
+            @if (_selection.Type is null)
+            {
+                <section class="backend-details empty-details" aria-label="Instance details"><p>Select an instance to view its details.</p></section>
+            }
+            </CascadingValue>
         </div>
     </main>
 
@@ -113,6 +128,7 @@
     {
         <div class="editor-backdrop" role="presentation" @onclick="CancelEdit" @onkeydown="HandleEditorKey">
             <section class="editor-panel" role="dialog" aria-modal="true" aria-labelledby="editor-title" @onclick:stopPropagation="true">
+                <MudFocusTrap>
                 <div class="editor-heading"><h2 id="editor-title">@(_editingId is null ? "Connect Stash" : "Edit instance")</h2><button class="icon-action" aria-label="Close Stash editor" title="Close Stash editor" type="button" disabled="@_isSaving" @onclick="CancelEdit"><MudIcon Icon="@Icons.Material.Filled.Close" /></button></div>
                 @if (_editorError is not null)
                 {
@@ -120,7 +136,7 @@
                 }
                 <form class="editor-form" @onsubmit="SaveInstanceAsync" @onsubmit:preventDefault="true">
                     <fieldset disabled="@_isSaving">
-                        <label>Instance name<input @bind="_draftName" maxlength="60" required placeholder="e.g. Main library" /></label>
+                        <label>Instance name<input @bind="_draftName" maxlength="60" required autofocus placeholder="e.g. Main library" /></label>
                         <div class="mode-selector" role="radiogroup" aria-label="Stash mode">
                             <label><input type="radio" name="stash-mode" checked="@(!_draftManaged)" @onchange="() => _draftManaged = false" />External</label>
                             <label><input type="radio" name="stash-mode" checked="@_draftManaged" @onchange="() => _draftManaged = true" />Managed</label>
@@ -140,6 +156,7 @@
                         <div class="editor-actions"><button class="cancel-button" type="button" @onclick="CancelEdit">Cancel</button><button class="save-button" type="submit">@(_isSaving ? "Saving..." : "Save instance")</button></div>
                     </fieldset>
                 </form>
+                </MudFocusTrap>
             </section>
         </div>
     }
@@ -147,6 +164,7 @@
 
 @code {
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly BackendSelection _selection = new();
     private readonly Dictionary<Guid, StashObservation> _observations = [];
     private CancellationToken _token;
     private IReadOnlyList<StashInstance> _instances = [];
@@ -154,7 +172,6 @@
     private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
     private int _comicInstanceCount;
     private int _swarmInstanceCount;
-    private Guid? _selectedInstanceId;
     private DateTimeOffset? _lastRefresh;
     private string _draftName = string.Empty;
     private string _draftGraphQlUrl = string.Empty;
@@ -172,11 +189,14 @@
     private bool _isEditing;
     private bool _isSaving;
     private bool _disposed;
+    private bool _scrollToDetails;
 
-    private StashInstance? _selectedInstance => _instances.FirstOrDefault(instance => instance.Id == _selectedInstanceId);
+    private StashInstance? _selectedInstance => _selection.Type == "Stash"
+        ? _instances.FirstOrDefault(instance => instance.Id == _selection.InstanceId) : null;
 
     protected override async Task OnInitializedAsync()
     {
+        _selection.Changed += SelectionChanged;
         _token = _lifetime.Token;
         try
         {
@@ -188,14 +208,18 @@
         catch (OperationCanceledException) when (_token.IsCancellationRequested) { }
     }
 
-    protected override Task OnAfterRenderAsync(bool firstRender)
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender && !_disposed)
         {
             _ = ObservePeriodicallyAsync();
         }
-
-        return Task.CompletedTask;
+        if (_scrollToDetails && !_disposed)
+        {
+            _scrollToDetails = false;
+            try { await JavaScript.InvokeVoidAsync("psmScrollBackendDetails"); }
+            catch (JSDisconnectedException) { }
+        }
     }
 
     private async Task LoadInstancesAsync()
@@ -203,9 +227,10 @@
         try
         {
             _instances = await InstanceStore.GetAllAsync(_token);
-            if (_selectedInstanceId is null || _instances.All(instance => instance.Id != _selectedInstanceId))
+            if (_selection.Type == "Stash" && _selection.InstanceId is { } selectedId &&
+                _instances.All(instance => instance.Id != selectedId))
             {
-                _selectedInstanceId = _instances.FirstOrDefault()?.Id;
+                _selection.Clear("Stash", selectedId);
             }
             _pageError = null;
         }
@@ -323,15 +348,19 @@
         _editorError = null;
         try
         {
-            if (_editingId is { } existingId && ManagedBackends.GetStatus(existingId).IsRunning)
-                throw new InvalidDataException("Stop Stash before editing its configuration.");
             var normalizedBase = new Uri(webUrl!.AbsoluteUri.TrimEnd('/') + "/");
+            var existing = _editingId is null ? null : (await InstanceStore.GetAllAsync(_token)).FirstOrDefault(item => item.Id == _editingId);
             var instance = new StashInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), new Uri(normalizedBase, "graphql"), normalizedBase, _draftApiKey,
-                _draftManaged ? _draftInstallation.Trim() : null, _draftPort, _draftManaged && _draftAutostart);
-            await InstanceStore.SaveAsync(instance, _token);
+                _draftManaged ? _draftInstallation.Trim() : null, _draftPort, _draftManaged && _draftAutostart)
+            {
+                JobSettings = existing?.JobSettings ?? new()
+            };
+            if (_editingId is null) await InstanceStore.SaveAsync(instance, _token);
+            else await ManagedBackends.UpdateInstanceAsync(instance, _token);
             _draftApiKey = string.Empty;
             await LoadInstancesAsync();
-            _selectedInstanceId = instance.Id;
+            if (_instances.Any(item => item.Id == instance.Id))
+                _selection.Select("Stash", instance.Id);
             _isEditing = false;
             await RefreshObservationsAsync();
         }
@@ -355,14 +384,15 @@
         _isSaving = true;
         try
         {
-            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, $"Remove {instance.Name} from this manager? The Stash instance will not be changed."))
+            var message = instance.IsManaged
+                ? $"Remove {instance.Name} from this manager? The managed service will stop; local files will be kept."
+                : $"Remove {instance.Name} from this manager? The external service will remain running; local files will be kept.";
+            if (!await JavaScript.InvokeAsync<bool>("confirm", _token, message))
             {
                 return;
             }
-            await ManagedBackends.StopInstanceAsync(instance.Id);
-            if (ManagedBackends.GetStatus(instance.Id).IsRunning)
-                throw new InvalidDataException("Stash could not stop. Retry Stop before removing the instance.");
-            await InstanceStore.RemoveAsync(instance.Id, _token);
+            await ManagedBackends.RemoveInstanceAsync("Stash", instance.Id, _token);
+            _selection.Clear("Stash", instance.Id);
             _observations.Remove(instance.Id);
             await LoadInstancesAsync();
         }
@@ -377,19 +407,29 @@
         }
     }
 
-    private void SelectInstance(Guid id) => _selectedInstanceId = id;
+    private void SelectInstance(Guid id) => _selection.Select("Stash", id);
+
+    private void SelectionChanged()
+    {
+        if (!_disposed)
+        {
+            _scrollToDetails = _selection.Type is not null;
+            _ = InvokeAsync(StateHasChanged);
+        }
+    }
 
     private async Task SaveStashAutostartAsync(bool enabled)
     {
         if (_selectedInstance is not { } instance) return;
         try
         {
-            await InstanceStore.SaveAsync(instance with { StartWithApp = enabled }, _token);
+            await InstanceStore.UpdateAsync(instance with { StartWithApp = enabled }, _token);
             await LoadInstancesAsync();
         }
         catch (Exception exception) when (IsConfigurationFailure(exception))
         {
-            _pageError = "Could not save the autostart setting.";
+            _pageError = exception is InvalidDataException && exception.Message == "The Stash instance no longer exists."
+                ? exception.Message : "Could not save the autostart setting.";
         }
     }
 
@@ -475,6 +515,7 @@
             return;
         }
         _disposed = true;
+        _selection.Changed -= SelectionChanged;
         _draftApiKey = string.Empty;
         _lifetime.Cancel();
         _lifetime.Dispose();

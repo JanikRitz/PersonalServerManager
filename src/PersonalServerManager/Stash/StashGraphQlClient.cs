@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using PersonalServerManager.Feeds;
 using PersonalServerManager.Search;
 
@@ -11,6 +12,123 @@ namespace PersonalServerManager.Stash;
 public sealed class StashGraphQlClient(HttpClient httpClient) : IStashGraphQlClient
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
+    private static readonly JsonSerializerOptions JobInputJsonOptions = new()
+    {
+        PropertyNamingPolicy = new JobInputNamingPolicy(),
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    public Task<string> StartMetadataScanAsync(StashInstance instance, StashScanOptions options, CancellationToken cancellationToken = default) =>
+        StartJobAsync(instance, options, "metadataScan", "ScanMetadataInput", cancellationToken);
+
+    public Task<string> StartMetadataGenerateAsync(StashInstance instance, StashGenerateOptions options, CancellationToken cancellationToken = default) =>
+        StartJobAsync(instance, options, "metadataGenerate", "GenerateMetadataInput", cancellationToken);
+
+    private async Task<string> StartJobAsync(StashInstance instance, object options, string field, string inputType, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(instance);
+        ArgumentNullException.ThrowIfNull(options);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(RequestTimeout);
+        var serializedInput = JsonSerializer.SerializeToElement(options, options.GetType(), JobInputJsonOptions);
+        var nestedField = inputType == "ScanMetadataInput" ? "filter" : "previewOptions";
+        var nestedType = inputType == "ScanMetadataInput" ? "ScanMetaDataFilterInput" : "GeneratePreviewOptionsInput";
+        var hasNestedInput = serializedInput.TryGetProperty(nestedField, out _);
+        var query = "query JobInputFields($inputType: String!" + (hasNestedInput ? ", $nestedType: String!" : "") +
+            ") { input: __type(name: $inputType) { kind inputFields { name } }" +
+            (hasNestedInput ? " nested: __type(name: $nestedType) { kind inputFields { name } }" : "") + " }";
+        using var schemaResponse = await SendAsync(instance, query, new { inputType, nestedType }, timeout.Token);
+        await schemaResponse.Content.LoadIntoBufferAsync(64 * 1024, timeout.Token);
+        using var schemaPayload = await ReadPayloadAsync(schemaResponse, timeout.Token);
+        var supportedFields = GetInputFields(GetJobData(schemaPayload.RootElement, "input"), inputType);
+        var input = FilterJobInput(serializedInput, supportedFields, inputType);
+        if (hasNestedInput && input.ContainsKey(nestedField))
+        {
+            var nestedFields = GetInputFields(GetJobData(schemaPayload.RootElement, "nested"), nestedType);
+            input[nestedField] = FilterJobInput(serializedInput.GetProperty(nestedField), nestedFields, $"{inputType}.{nestedField}");
+        }
+        using var response = await SendAsync(instance, $"mutation Job($input: {inputType}!) {{ {field}(input: $input) }}", new { input }, timeout.Token);
+        await response.Content.LoadIntoBufferAsync(64 * 1024, timeout.Token);
+        using var payload = await ReadPayloadAsync(response, timeout.Token);
+        var data = GetJobData(payload.RootElement, field);
+        if (data.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(data.GetString()))
+            throw new InvalidDataException("Stash returned an invalid job ID.");
+        return data.GetString()!;
+    }
+
+    private static HashSet<string> GetInputFields(JsonElement type, string typeName)
+    {
+        if (type.ValueKind != JsonValueKind.Object ||
+            !type.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String || kind.GetString() != "INPUT_OBJECT" ||
+            !type.TryGetProperty("inputFields", out var fields) || fields.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException($"Stash schema does not expose input fields for {typeName}.");
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var field in fields.EnumerateArray())
+        {
+            if (field.ValueKind != JsonValueKind.Object || !field.TryGetProperty("name", out var name) ||
+                name.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(name.GetString()) || !names.Add(name.GetString()!))
+                throw new InvalidDataException($"Stash schema returned invalid input fields for {typeName}.");
+        }
+        return names;
+    }
+
+    private static Dictionary<string, object> FilterJobInput(JsonElement input, HashSet<string> supportedFields, string typeName)
+    {
+        var result = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var property in input.EnumerateObject())
+        {
+            if (supportedFields.Contains(property.Name)) result.Add(property.Name, property.Value);
+            else if (property.Value.ValueKind != JsonValueKind.False)
+                throw new StashJobOptionNotSupportedException($"Stash does not support requested job option {typeName}.{property.Name}.");
+        }
+        return result;
+    }
+
+    public async Task<StashJob?> FindJobAsync(StashInstance instance, string id, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(instance);
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(RequestTimeout);
+        using var response = await SendAsync(instance, "query Job($id: ID!) { findJob(input: {id: $id}) { id status error } }", new { id }, timeout.Token);
+        await response.Content.LoadIntoBufferAsync(64 * 1024, timeout.Token);
+        using var payload = await ReadPayloadAsync(response, timeout.Token);
+        var job = GetJobData(payload.RootElement, "findJob");
+        if (job.ValueKind == JsonValueKind.Null) return null;
+        if (job.ValueKind != JsonValueKind.Object ||
+            !job.TryGetProperty("id", out var jobId) || jobId.ValueKind != JsonValueKind.String || jobId.GetString() != id ||
+            !job.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(status.GetString()) ||
+            !job.TryGetProperty("error", out var error) || error.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+            throw new InvalidDataException("Stash returned invalid job data.");
+        return new StashJob(id, status.GetString()!, error.GetString());
+    }
+
+    private static JsonElement GetJobData(JsonElement root, string field)
+    {
+        if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Stash returned invalid job data.");
+        if (root.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0 &&
+            (errors[0].ValueKind != JsonValueKind.Object ||
+             (errors[0].TryGetProperty("message", out var message) && message.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))))
+            throw new InvalidDataException("Stash reported an invalid GraphQL error.");
+        ThrowForGraphQlErrors(root);
+        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object || !data.TryGetProperty(field, out var result))
+            throw new InvalidDataException("Stash returned invalid job data.");
+        return result;
+    }
+
+    private sealed class JobInputNamingPolicy : JsonNamingPolicy
+    {
+        public override string ConvertName(string name) => name switch
+        {
+            "SceneIDs" => "sceneIDs",
+            "MarkerIDs" => "markerIDs",
+            "ImageIDs" => "imageIDs",
+            "GalleryIDs" => "galleryIDs",
+            _ => JsonNamingPolicy.CamelCase.ConvertName(name)
+        };
+    }
 
     public async Task<IReadOnlyList<StashSearchResult>> SearchFeedAsync(
         StashInstance instance, StashSearchKind kind, FeedSource source, FeedOrder order,

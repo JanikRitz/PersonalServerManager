@@ -23,7 +23,13 @@ public sealed class JsonSwarmUIInstanceStore(string filePath) : ISwarmUIInstance
         }
     }
 
-    public async Task SaveAsync(SwarmUIInstance instance, CancellationToken cancellationToken = default)
+    public Task SaveAsync(SwarmUIInstance instance, CancellationToken cancellationToken = default) =>
+        SaveCoreAsync(instance, false, cancellationToken);
+
+    public Task UpdateAsync(SwarmUIInstance instance, CancellationToken cancellationToken = default) =>
+        SaveCoreAsync(instance, true, cancellationToken);
+
+    private async Task SaveCoreAsync(SwarmUIInstance instance, bool requireExisting, CancellationToken cancellationToken)
     {
         var normalized = Normalize(instance);
         ManagedBackendService.ValidateSwarmUIInstance(normalized);
@@ -35,6 +41,8 @@ public sealed class JsonSwarmUIInstanceStore(string filePath) : ISwarmUIInstance
                 normalized.SearchPaths.Select(path => new StoredSearchPath(path.Path, path.Depth)).ToList(),
                 normalized.InstallationFolder, normalized.Port, normalized.StartWithApp);
             var existing = stored.FindIndex(item => item.Id == normalized.Id);
+            if (requireExisting && existing < 0)
+                throw new InvalidDataException("The SwarmUI instance no longer exists.");
             if (existing < 0)
             {
                 stored.Add(replacement);

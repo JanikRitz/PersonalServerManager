@@ -7,6 +7,11 @@
 }
 
 .local-libraries * { box-sizing: border-box; letter-spacing: 0; }
+.local-library-details { min-width: 0; color: var(--ink, #172a2a); }
+.local-library-details dl { display: grid; grid-template-columns: minmax(90px, 120px) minmax(0, 1fr); gap: 12px 16px; margin: 20px 0; font-size: 12px; }
+.local-library-details dt { color: var(--muted, #526763); }
+.local-library-details dd { margin: 0; overflow-wrap: anywhere; }
+.detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line, #d7dfd9); }
 .library-heading, .editor-heading, .library-row, .row-actions, .editor-actions { display: flex; align-items: center; }
 .library-heading, .editor-heading { justify-content: space-between; gap: 12px; }
 .library-heading { padding: 12px 0; border-bottom: 1px solid var(--line, #d7dfd9); }
@@ -26,12 +31,12 @@
 h2, h3 { margin: 0; color: var(--ink, #172a2a); font: 21px/1.2 Georgia, serif; overflow-wrap: anywhere; }
 h2:focus { outline: none; }
 h3 { font-size: 20px; }
-.icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 36px; width: 36px; height: 36px; padding: 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--teal, #176d62); cursor: pointer; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--backend-icon-size, 36px); width: var(--backend-icon-size, 36px); height: var(--backend-icon-size, 36px); padding: 7px; border: 1px solid transparent; border-radius: var(--backend-icon-radius, 4px); background: transparent; color: var(--teal, #176d62); cursor: pointer; }
 .icon-button ::deep .mud-icon-root { width: 20px; height: 20px; }
 .icon-button:hover { border-color: var(--line, #d7dfd9); background: var(--paper, #edf5f2); }
 .remove-button { color: var(--coral, #a63e32); }
 .library-list { margin: 0; padding: 0; list-style: none; }
-.library-row { gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--line, #d7dfd9); }
+.library-row { gap: var(--backend-row-gap, 10px); padding: var(--backend-row-padding, 14px) 0; border-bottom: 1px solid var(--line, #d7dfd9); }
 .status-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; }
 .status-dot.online { background: var(--teal, #176d62); }
 .status-dot.offline { background: var(--coral, #a63e32); }
@@ -43,8 +48,8 @@ h3 { font-size: 20px; }
 .empty-message { color: var(--muted, #526763); margin: 14px 0; }
 .error-message { margin: 12px 0; padding: 10px 12px; border-left: 3px solid var(--coral, #a63e32); background: var(--paper, #f8f6f1); color: var(--ink, #172a2a); font-size: 13px; overflow-wrap: anywhere; }
 .retry-button { padding: 6px 0; border: 0; background: transparent; color: var(--teal, #176d62); font: inherit; text-decoration: underline; cursor: pointer; }
-.library-backdrop { position: fixed; z-index: 1200; inset: 0; display: grid; align-items: safe center; justify-items: center; padding: 20px; overflow-y: auto; background: #080f1c99; }
-.library-dialog { position: relative; inset: auto; display: block; width: min(480px, 100%); max-width: 100%; max-height: calc(100dvh - 40px); overflow-y: auto; margin: 0; padding: 24px; border: 1px solid var(--line, #d7dfd9); border-radius: 8px; background: var(--panel, #fff); color: var(--ink, #172a2a); box-shadow: 0 16px 48px #10231f33; }
+.library-backdrop { position: fixed; z-index: 1200; inset: 0; display: grid; align-items: safe center; justify-items: center; padding: 20px; overflow-y: auto; background: var(--backend-dialog-backdrop, #10231f88); }
+.library-dialog { position: relative; inset: auto; display: block; width: min(480px, 100%); max-width: 100%; max-height: calc(100dvh - 40px); overflow-y: auto; margin: 0; padding: var(--backend-dialog-padding, 24px); border: 1px solid var(--line, #d7dfd9); border-radius: var(--backend-dialog-radius, 8px); background: var(--panel, #fff); color: var(--ink, #172a2a); box-shadow: 0 16px 48px #10231f33; }
 .editor-heading { margin-bottom: 18px; }
 fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 label { display: block; margin: 16px 0 6px; font-size: 13px; font-weight: 600; }

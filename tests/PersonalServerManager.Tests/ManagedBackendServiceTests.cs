@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.Management;
 using PersonalServerManager.Stash;
@@ -193,6 +196,202 @@ public sealed class ManagedBackendServiceTests : IDisposable
             Assert.False(service.GetStatus(instance.Id).IsRunning);
         }
         finally { listener.Stop(); }
+    }
+
+    [Fact]
+    public async Task RemovalSerializesQueuedStartAndRestart()
+    {
+        var store = new ControlledStashStore(CreateStashStore());
+        var instance = new StashInstance(Guid.NewGuid(), "Remote", new Uri("https://example.test/graphql"), new Uri("https://example.test/"), null);
+        await store.SaveAsync(instance);
+        using var service = new ManagedBackendService(store, CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance);
+        var remove = service.RemoveInstanceAsync("Stash", instance.Id);
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var start = service.StartInstanceAsync(instance.Id);
+        var restart = service.RestartInstanceAsync(instance.Id);
+        try
+        {
+            Assert.False(start.IsCompleted);
+            Assert.False(restart.IsCompleted);
+        }
+        finally { store.Continue.TrySetResult(); }
+        await Task.WhenAll(remove, start, restart).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(await store.GetAllAsync());
+        Assert.Contains("No managed backend", service.GetStatus(instance.Id).Message);
+    }
+
+    [Fact]
+    public async Task RemovalWriteFailureRetainsConfiguration()
+    {
+        var store = new ControlledStashStore(CreateStashStore()) { FailRemoval = true };
+        store.Continue.TrySetResult();
+        var instance = new StashInstance(Guid.NewGuid(), "Remote", new Uri("https://example.test/graphql"), new Uri("https://example.test/"), null);
+        await store.SaveAsync(instance);
+        using var service = new ManagedBackendService(store, CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance);
+        await Assert.ThrowsAsync<IOException>(() => service.RemoveInstanceAsync("Stash", instance.Id));
+        Assert.Equal(instance.Id, Assert.Single(await store.GetAllAsync()).Id);
+    }
+
+    [Fact]
+    public async Task RemovalRoutesToTheRequestedBackendAndRejectsSharedIds()
+    {
+        var stash = CreateStashStore();
+        var hydrus = CreateHydrusStore();
+        var swarm = new JsonSwarmUIInstanceStore(Path.Combine(_folder, "swarmui.json"));
+        var stashId = Guid.NewGuid();
+        var hydrusId = Guid.NewGuid();
+        var swarmId = Guid.NewGuid();
+        await stash.SaveAsync(new(stashId, "Stash", new Uri("https://example.test/graphql"), new Uri("https://example.test/"), null));
+        await hydrus.SaveAsync(new(hydrusId, "Hydrus", new Uri("https://example.test/"), null));
+        await swarm.SaveAsync(new(swarmId, "Swarm", new Uri("https://example.test/"), SwarmUIInstance.DefaultSearchPaths));
+        using var service = new ManagedBackendService(stash, hydrus, NullLogger<ManagedBackendService>.Instance, swarm);
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveInstanceAsync("Hydrus", stashId));
+        await hydrus.SaveAsync(new(stashId, "Shared", new Uri("https://example.test/"), null));
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveInstanceAsync("Stash", stashId));
+        await hydrus.RemoveAsync(stashId);
+        await service.RemoveInstanceAsync("Hydrus", hydrusId);
+        await service.RemoveInstanceAsync("SwarmUI", swarmId);
+        await service.RemoveInstanceAsync("Stash", stashId);
+        Assert.Empty(await stash.GetAllAsync());
+        Assert.Empty(await hydrus.GetAllAsync());
+        Assert.Empty(await swarm.GetAllAsync());
+    }
+
+    [Theory]
+    [InlineData("Stash")]
+    [InlineData("Hydrus")]
+    [InlineData("SwarmUI")]
+    public async Task EditQueuedDuringStartRechecksOwnedProcessEvenForExternalDraft(string backend)
+    {
+        var stash = CreateStashStore();
+        var hydrus = CreateHydrusStore();
+        var swarm = new JsonSwarmUIInstanceStore(Path.Combine(_folder, "swarmui.json"));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var id = Guid.NewGuid();
+        var stashInstance = new StashInstance(id, "Original", new Uri($"http://127.0.0.1:{port}/graphql"),
+            new Uri($"http://127.0.0.1:{port}/"), null, _folder, port);
+        var hydrusInstance = new HydrusInstance(id, "Original", new Uri($"http://127.0.0.1:{port}/"), "key", _folder);
+        var swarmInstance = new SwarmUIInstance(id, "Original", new Uri($"http://127.0.0.1:{port}/"),
+            SwarmUIInstance.DefaultSearchPaths, _folder, port);
+        await File.WriteAllTextAsync(Path.Combine(_folder, "stash-win.exe"), "fixture");
+        await File.WriteAllTextAsync(Path.Combine(_folder, "hydrus_client.exe"), "fixture");
+        var binaries = Directory.CreateDirectory(Path.Combine(_folder, "src", "bin", "live_release"));
+        await File.WriteAllTextAsync(Path.Combine(binaries.FullName, "SwarmUI.exe"), "fixture");
+        if (backend == "Stash") await stash.SaveAsync(stashInstance);
+        else if (backend == "Hydrus") await hydrus.SaveAsync(hydrusInstance);
+        else await swarm.SaveAsync(swarmInstance);
+
+        using var proceed = new ManualResetEventSlim();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Process? process = null;
+        using var service = new ManagedBackendService(stash, hydrus, NullLogger<ManagedBackendService>.Instance, swarm, _ =>
+        {
+            entered.TrySetResult();
+            if (!proceed.Wait(TimeSpan.FromSeconds(10))) throw new InvalidOperationException("Launch timed out.");
+            return process = Process.Start(new ProcessStartInfo("cmd.exe", "/d /c set /p fixture=")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true });
+        });
+        var start = Task.Run(() => service.StartInstanceAsync(id));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Task EditAsync() => backend switch
+            {
+                "Stash" => service.UpdateInstanceAsync(stashInstance with { Name = "Edited", InstallationFolder = null }),
+                "Hydrus" => service.UpdateInstanceAsync(hydrusInstance with { Name = "Edited", InstallationFolder = null }),
+                _ => service.UpdateInstanceAsync(swarmInstance with { Name = "Edited", InstallationFolder = null })
+            };
+            var edit = EditAsync();
+            Assert.False(edit.IsCompleted);
+            proceed.Set();
+            await start.WaitAsync(TimeSpan.FromSeconds(5));
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() => edit);
+            Assert.Equal($"Stop {backend} before editing its configuration.", error.Message);
+            Assert.True(service.GetStatus(id).IsRunning);
+            var name = backend switch
+            {
+                "Stash" => Assert.Single(await stash.GetAllAsync()).Name,
+                "Hydrus" => Assert.Single(await hydrus.GetAllAsync()).Name,
+                _ => Assert.Single(await swarm.GetAllAsync()).Name
+            };
+            Assert.Equal("Original", name);
+            Assert.NotNull(process);
+            process.Kill(true);
+            await process.WaitForExitAsync();
+            process = null;
+            await EditAsync();
+            await service.RemoveInstanceAsync(backend, id);
+            Assert.Contains("no longer exists", (await Assert.ThrowsAsync<InvalidDataException>(EditAsync)).Message);
+        }
+        finally
+        {
+            proceed.Set();
+            await start;
+            if (process is not null && !process.HasExited) { process.Kill(true); await process.WaitForExitAsync(); }
+            await service.StopInstanceAsync(id);
+        }
+    }
+
+    [Fact]
+    public async Task EditQueuedBehindRemovalDoesNotRecreateInstance()
+    {
+        var store = new ControlledStashStore(CreateStashStore());
+        var instance = new StashInstance(Guid.NewGuid(), "Remote", new Uri("https://example.test/graphql"), new Uri("https://example.test/"), null);
+        await store.SaveAsync(instance);
+        using var service = new ManagedBackendService(store, CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance);
+        var remove = service.RemoveInstanceAsync("Stash", instance.Id);
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var edit = service.UpdateInstanceAsync(instance with { Name = "Edited" });
+        try { Assert.False(edit.IsCompleted); }
+        finally { store.Continue.TrySetResult(); }
+        await remove.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("no longer exists", (await Assert.ThrowsAsync<InvalidDataException>(() => edit)).Message);
+        Assert.Empty(await store.GetAllAsync());
+    }
+
+    [Fact]
+    public async Task RemovalWaitsForUpdateAndRemovesUpdatedInstance()
+    {
+        var store = new ControlledStashStore(CreateStashStore()) { PauseUpdate = true };
+        var instance = new StashInstance(Guid.NewGuid(), "Remote", new Uri("https://example.test/graphql"), new Uri("https://example.test/"), null);
+        await store.SaveAsync(instance);
+        using var service = new ManagedBackendService(store, CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance);
+        var edit = service.UpdateInstanceAsync(instance with { Name = "Edited" });
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var remove = service.RemoveInstanceAsync("Stash", instance.Id);
+        try { Assert.False(remove.IsCompleted); }
+        finally { store.Continue.TrySetResult(); }
+        await Task.WhenAll(edit, remove).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(await store.GetAllAsync());
+    }
+
+    private sealed class ControlledStashStore(IStashInstanceStore inner) : IStashInstanceStore
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool FailRemoval { get; init; }
+        public bool PauseUpdate { get; init; }
+        public Task<IReadOnlyList<StashInstance>> GetAllAsync(CancellationToken cancellationToken = default) => inner.GetAllAsync(cancellationToken);
+        public Task SaveAsync(StashInstance instance, CancellationToken cancellationToken = default) => inner.SaveAsync(instance, cancellationToken);
+        public async Task UpdateAsync(StashInstance instance, CancellationToken cancellationToken = default)
+        {
+            if (PauseUpdate)
+            {
+                Entered.TrySetResult();
+                await Continue.Task.WaitAsync(cancellationToken);
+            }
+            await inner.UpdateAsync(instance, cancellationToken);
+        }
+        public async Task RemoveAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            Entered.TrySetResult();
+            await Continue.Task.WaitAsync(cancellationToken);
+            if (FailRemoval) throw new IOException("Simulated configuration write failure.");
+            await inner.RemoveAsync(id, cancellationToken);
+        }
     }
 
     private JsonStashInstanceStore CreateStashStore() => new(Path.Combine(_folder, "stash.json"),

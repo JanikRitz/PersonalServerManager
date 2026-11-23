@@ -16,12 +16,12 @@
 .hydrus-heading { padding: 12px 0; border-bottom: 1px solid var(--hydrus-line); }
 h2, h3 { margin: 0; color: var(--hydrus-ink); font: 21px/1.2 Georgia, serif; overflow-wrap: anywhere; }
 h3 { font-size: 20px; }
-.icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 36px; width: 36px; height: 36px; padding: 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--hydrus-teal); cursor: pointer; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--backend-icon-size, 36px); width: var(--backend-icon-size, 36px); height: var(--backend-icon-size, 36px); padding: 7px; border: 1px solid transparent; border-radius: var(--backend-icon-radius, 4px); background: transparent; color: var(--hydrus-teal); cursor: pointer; }
 .icon-button ::deep .mud-icon-root { width: 20px; height: 20px; }
 .icon-button:hover { border-color: var(--hydrus-line); background: #edf5f2; }
 .remove-button { color: #a63e32; }
 .hydrus-list { margin: 0; padding: 0; list-style: none; }
-.hydrus-row { gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--hydrus-line); }
+.hydrus-row { gap: var(--backend-row-gap, 10px); padding: var(--backend-row-padding, 14px) 0; border-bottom: 1px solid var(--hydrus-line); }
 .status-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: #879691; }
 .status-dot.online { background: var(--hydrus-teal); }
 .status-dot.offline { background: #a63e32; }
@@ -31,10 +31,18 @@ h3 { font-size: 20px; }
 .row-actions { flex: 0 0 auto; gap: 2px; }
 .empty-message, .permission-note { color: var(--hydrus-muted); margin: 14px 0; }
 .permission-note { font-size: 10px; overflow-wrap: anywhere; }
+.details-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.details-heading span { color: var(--hydrus-muted); font-size: 12px; text-align: right; overflow-wrap: anywhere; }
+.instance-details { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 8px 16px; margin: 20px 0; font-size: 12px; }
+.instance-details dt { color: var(--hydrus-muted); }
+.instance-details dd { margin: 0; overflow-wrap: anywhere; }
+.detail-actions { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--hydrus-line); }
+.detail-action { display: inline-flex; align-items: center; gap: 6px; padding: 6px 0; border: 0; background: transparent; color: var(--hydrus-teal); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.detail-action.remove-button { color: #a63e32; }
 .error-message { margin: 12px 0; padding: 10px 12px; border-left: 3px solid #a63e32; background: #fff1ee; color: #81392e; font-size: 13px; overflow-wrap: anywhere; }
 .retry-button { padding: 6px 0; border: 0; background: transparent; color: var(--hydrus-teal); font: inherit; text-decoration: underline; cursor: pointer; }
-.hydrus-backdrop { position: fixed; z-index: 1200; inset: 0; display: grid; align-items: safe center; justify-items: center; padding: 20px; overflow-y: auto; background: #10231f88; }
-.hydrus-dialog { position: relative; inset: auto; display: block; width: min(480px, 100%); max-width: 100%; max-height: calc(100dvh - 40px); overflow-y: auto; margin: 0; padding: 24px; border: 1px solid var(--hydrus-line); border-radius: 8px; background: #fff; color: var(--hydrus-ink); box-shadow: 0 16px 48px #10231f33; }
+.hydrus-backdrop { position: fixed; z-index: 1200; inset: 0; display: grid; align-items: safe center; justify-items: center; padding: 20px; overflow-y: auto; background: var(--backend-dialog-backdrop, #10231f88); }
+.hydrus-dialog { position: relative; inset: auto; display: block; width: min(480px, 100%); max-width: 100%; max-height: calc(100dvh - 40px); overflow-y: auto; margin: 0; padding: var(--backend-dialog-padding, 24px); border: 1px solid var(--hydrus-line); border-radius: var(--backend-dialog-radius, 8px); background: #fff; color: var(--hydrus-ink); box-shadow: 0 16px 48px #10231f33; }
 .editor-heading { margin-bottom: 18px; }
 fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 label { display: block; margin: 16px 0 6px; font-size: 13px; font-weight: 600; }

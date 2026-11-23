@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 using PersonalServerManager.Management;
 using Xunit;
 
@@ -222,6 +224,95 @@ public sealed class ComicCompanionServiceTests : IDisposable
         await host.StopAsync();
         using var client = new TcpClient();
         await client.ConnectAsync(IPAddress.Loopback, port);
+    }
+
+    [Fact]
+    public async Task RemovalStopsOwnedProcessBeforeQueuedStartCanRun()
+    {
+        File.WriteAllText(Path.Combine(_folder, "HydrusComicCompanion.csproj"), "");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var launches = 0;
+        using var service = new ComicCompanionService(Path.Combine(_folder, "comic-companion.json"),
+            NullLogger<ComicCompanionService>.Instance, _ => { launches++; return StandInProcess(); }, async process =>
+            {
+                entered.TrySetResult();
+                await resume.Task;
+                await StopStandInAsync(process);
+            });
+        var settings = await service.SaveSettingsAsync(new(new($"http://127.0.0.1:{FreePort()}"), InstallationFolder: _folder));
+        await service.StartInstanceAsync(settings.Id);
+        var removal = service.RemoveSettingsAsync(settings.Id);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var start = service.StartInstanceAsync(settings.Id);
+            Assert.False(start.IsCompleted);
+            resume.TrySetResult();
+            await Task.WhenAll(removal, start).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Empty(await service.GetAllAsync());
+            Assert.Equal(1, launches);
+            Assert.False(service.GetStatus(settings.Id).IsRunning);
+        }
+        finally
+        {
+            resume.TrySetResult();
+            await service.StopInstanceAsync(settings.Id);
+        }
+    }
+
+    [Fact]
+    public async Task FailedStopPreservesConfigurationAndOwnedProcess()
+    {
+        File.WriteAllText(Path.Combine(_folder, "HydrusComicCompanion.csproj"), "");
+        var fail = true;
+        using var service = new ComicCompanionService(Path.Combine(_folder, "comic-companion.json"),
+            NullLogger<ComicCompanionService>.Instance, _ => StandInProcess(),
+            process => fail ? Task.FromException(new InvalidOperationException()) : StopStandInAsync(process));
+        var settings = await service.SaveSettingsAsync(new(new($"http://127.0.0.1:{FreePort()}"), InstallationFolder: _folder));
+        try
+        {
+            await service.StartInstanceAsync(settings.Id);
+            await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveSettingsAsync(settings.Id));
+            Assert.Equal(settings, Assert.Single(await service.GetAllAsync()));
+            Assert.True(service.GetStatus(settings.Id).IsRunning);
+        }
+        finally
+        {
+            fail = false;
+            await service.StopInstanceAsync(settings.Id);
+        }
+    }
+
+    [Fact]
+    public async Task RemovingExternalInstanceLeavesExternalServiceRunning()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var host = BuildHost();
+        var service = host.Services.GetRequiredService<ComicCompanionService>();
+        var settings = await service.SaveSettingsAsync(new(new($"http://127.0.0.1:{port}")));
+        await service.RemoveSettingsAsync(settings.Id);
+        Assert.Empty(await service.GetAllAsync());
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+    }
+
+    private static Process StandInProcess() => Process.Start(new ProcessStartInfo("cmd.exe", "/d /c set /p fixture=")
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true })!;
+
+    private static async Task StopStandInAsync(Process process)
+    {
+        process.Kill(entireProcessTree: true);
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private static int FreePort()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
     private IHost BuildHost()
