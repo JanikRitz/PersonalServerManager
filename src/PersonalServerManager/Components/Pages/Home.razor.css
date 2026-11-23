@@ -97,8 +97,8 @@ footer { justify-content: space-between; gap: 16px; padding: 18px 32px; color: v
 @media (prefers-reduced-motion: reduce) { .search-section, .loading-spinner, .loading-tile { animation: none; } .search-form { transition: none; } }
 @media (max-width: 600px) {
     .topbar { min-height: 60px; padding: 8px 16px; gap: 12px; }
-    .wordmark { max-width: 200px; font-size: 12px; }
-    .topbar-right { gap: 10px; }
+    .wordmark { min-width: 0; max-width: 200px; font-size: 12px; }
+    .topbar-right { gap: 4px; }
     main { padding: 40px 18px 88px; }
     h1 { font-size: 32px; }
     .search-form { gap: 8px; min-height: 60px; padding: 6px 7px 6px 14px; }

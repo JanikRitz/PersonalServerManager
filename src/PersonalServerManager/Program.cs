@@ -14,6 +14,7 @@ using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Management;
 using PersonalServerManager.SwarmUI;
 using PersonalServerManager.Feeds;
+using PersonalServerManager.Covers;
 using Yarp.ReverseProxy.Forwarder;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -80,6 +81,12 @@ builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusIn
     Path.Combine(dataDirectory, "hydrus-instances.json"),
     services.GetRequiredService<IDataProtectionProvider>().CreateProtector("HydrusApiKey.v1")));
 builder.Services.AddSingleton<ISwarmUIClient>(_ => new SwarmUIClient());
+builder.Services.AddSingleton<SwarmUICoverGenerator>(_ => new SwarmUICoverGenerator());
+builder.Services.AddSingleton(_ => new CoverPromptService(Path.Combine(dataDirectory, "cover-prompt-settings.json")));
+builder.Services.AddSingleton(services => new ManagedPromptServer(Path.Combine(dataDirectory, "managed-prompt-server.json"),
+    services.GetRequiredService<ILogger<ManagedPromptServer>>()));
+builder.Services.AddHostedService(services => services.GetRequiredService<ManagedPromptServer>());
+builder.Services.AddSingleton<CalibreCoverWriter>();
 builder.Services.AddSingleton<ISwarmUIInstanceStore>(_ => new JsonSwarmUIInstanceStore(
     Path.Combine(dataDirectory, "swarmui-instances.json")));
 builder.Services.AddSingleton<IFeedStore>(_ => new JsonFeedStore(Path.Combine(dataDirectory, "feeds.json")));

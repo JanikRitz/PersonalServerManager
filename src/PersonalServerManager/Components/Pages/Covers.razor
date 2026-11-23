@@ -1,0 +1,265 @@
+@page "/covers"
+@using PersonalServerManager.Covers
+@using PersonalServerManager.LocalLibraries
+@using PersonalServerManager.Search
+@using PersonalServerManager.SwarmUI
+@implements IDisposable
+@inject ILocalLibraryStore LibraryStore
+@inject LocalLibraryClient LibraryClient
+@inject ISwarmUIInstanceStore SwarmStore
+@inject SwarmUICoverGenerator Generator
+@inject CoverPromptService PromptService
+@inject CalibreCoverWriter CoverWriter
+@inject ManagedPromptServer PromptServer
+
+<PageTitle>Cover Studio | Personal Server Manager</PageTitle>
+
+<div class="workspace">
+    <header class="topbar">
+        <a class="wordmark" href="/" aria-label="Personal Server Manager home"><span class="mark">P</span><span>Personal Server Manager</span></a>
+        <nav class="topbar-right" aria-label="Workspace">
+            <button class="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Toggle dark mode"><span class="theme-moon"><MudIcon Icon="@Icons.Material.Outlined.DarkMode" /></span><span class="theme-sun"><MudIcon Icon="@Icons.Material.Outlined.LightMode" /></span></button>
+            <a href="/" title="Library search" aria-label="Library search"><MudIcon Icon="@Icons.Material.Outlined.Search" /></a>
+            <a href="/backends" title="Manage backends" aria-label="Manage backends"><MudIcon Icon="@Icons.Material.Outlined.Settings" /></a>
+            <form method="post" action="/account/logout"><AntiforgeryToken /><button class="logout" type="submit">Sign out</button></form>
+        </nav>
+    </header>
+    <main>
+        <h1>Cover Studio</h1>
+        @if (_error is not null) { <p class="notice error-notice" role="alert">@_error</p> }
+        <div class="operation" role="status" aria-live="polite">
+            <span>@_status</span>
+            @if (_busy) { <button type="button" class="text-action" @onclick="Cancel">Cancel</button> }
+        </div>
+        <div class="studio-grid">
+            <section aria-labelledby="book-heading">
+                <h2 id="book-heading">Book</h2>
+                <fieldset disabled="@_busy">
+                    <label>Calibre library
+                        <select @bind="_libraryId" @bind:after="LibraryChanged">
+                            <option value="">Select a library</option>
+                            @foreach (var library in _libraries) { <option value="@library.Id">@library.Name</option> }
+                        </select>
+                    </label>
+                    @if (_libraries.Count == 0) { <p class="muted">No Calibre libraries configured. <a href="/backends">Manage backends</a></p> }
+                    <form class="search-form" role="search" @onsubmit="SearchAsync" @onsubmit:preventDefault="true">
+                        <label for="cover-search">Search books</label>
+                        <div class="search-row"><input id="cover-search" type="search" @bind="_query" maxlength="1024" /><button type="submit" title="Search books" aria-label="Search books" disabled="@(SelectedLibrary is null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@Icons.Material.Outlined.Search" /></button></div>
+                    </form>
+                    @if (_searched && _books.Count == 0) { <p class="muted">No books found.</p> }
+                    @if (_books.Count > 0)
+                    {
+                        <label>Search results
+                            <select size="5" @bind="_bookId" @bind:after="BookChanged">
+                                <option value="">Select a book</option>
+                                @foreach (var result in _books) { <option value="@result.Id">@result.Title (@result.Detail) @(result.FileFormat)</option> }
+                            </select>
+                        </label>
+                    }
+                </fieldset>
+                @if (SelectedBook is { } book)
+                {
+                    <div class="book-details">
+                        <div class="cover-frame">
+                            @if (book.PreviewUrl is not null) { <img src="@CurrentCoverUrl(book)" alt="Current cover of @book.Title" @key="_coverVersion" /> }
+                            else { <span>No current cover</span> }
+                        </div>
+                        <div><h3>@book.Title</h3><p class="muted">@book.Detail</p>@if (!string.IsNullOrWhiteSpace(book.Description)) { <BookDescription Description="@book.Description" /> }</div>
+                    </div>
+                    @if (SelectedLibrary?.IsManaged != true) { <p class="muted">Applying covers is unavailable for remote Calibre libraries.</p> }
+                    else { <p class="muted">Stop Calibre applications and servers before applying a cover.</p> }
+                }
+            </section>
+            <section aria-labelledby="generation-heading">
+                <h2 id="generation-heading">Generate cover</h2>
+                <fieldset disabled="@_busy">
+                    <label>SwarmUI instance
+                        <select @bind="_swarmId"><option value="">Select an instance</option>@foreach (var instance in _swarms) { <option value="@instance.Id">@instance.Name</option> }</select>
+                    </label>
+                    @if (_swarms.Count == 0) { <p class="muted">No SwarmUI instances configured. <a href="/backends">Manage backends</a></p> }
+                    <details class="settings"><summary>Prompt service settings</summary>
+                        <label>LLM endpoint<input type="url" @bind="_baseUrl" autocomplete="off" /></label>
+                        <label>LLM model<input type="text" @bind="_llmModel" placeholder="First available model" /></label>
+                        <label>Prompt-writing instruction<textarea rows="5" maxlength="8000" @bind="_instruction" @bind:event="oninput"></textarea></label>
+                        <button class="text-action" type="button" @onclick="ResetInstruction">Reset instruction</button>
+                        <button class="outline-action" type="button" @onclick="SaveSettingsAsync">Save settings</button>
+                    </details>
+                    <details class="settings"><summary>Managed prompt server</summary>
+                        <p class="muted">@PromptServer.Status.Message</p>
+                        <label>Executable path<input type="text" @bind="_executable" disabled="@PromptServer.Status.IsRunning" /></label>
+                        <label>Arguments<input type="text" @bind="_arguments" disabled="@PromptServer.Status.IsRunning" /></label>
+                        <label>Working directory<input type="text" @bind="_workingDirectory" disabled="@PromptServer.Status.IsRunning" /></label>
+                        <label class="checkbox-label"><input type="checkbox" @bind="_startWithApp" disabled="@PromptServer.Status.IsRunning" /> Start with Personal Server Manager</label>
+                        <div class="server-actions">
+                            <button class="outline-action" type="button" @onclick="SaveServerAsync" disabled="@PromptServer.Status.IsRunning">Save server</button>
+                            @if (PromptServer.Status.IsRunning) { <button class="outline-action" type="button" @onclick="StopServerAsync">Stop server</button> }
+                            else { <button class="outline-action" type="button" @onclick="StartServerAsync">Start server</button> }
+                        </div>
+                    </details>
+                    <div class="prompt-heading"><label for="cover-prompt">Prompt</label><button class="text-action" type="button" @onclick="GeneratePromptAsync" disabled="@(SelectedBook is null)">Generate prompt</button></div>
+                    <textarea id="cover-prompt" rows="7" @bind="_prompt" @bind:event="oninput"></textarea>
+                    <label>Swarm model<input type="text" @bind="_model" /></label>
+                    <div class="parameter-grid">
+                        <label>Steps<input type="number" min="1" max="1000" @bind="_steps" /></label>
+                        <label>CFG<input type="number" min="0" max="100" step="0.1" @bind="_cfg" /></label>
+                        <label>Size (longest side)<select @bind="_size">@foreach (var size in CoverImageSize.Sizes) { <option value="@size">@size px</option> }</select></label>
+                        <label>Format<select @bind="_ratio">@foreach (var ratio in CoverImageSize.Ratios) { <option value="@ratio.Label">@ratio.Label@(ratio.Name is null ? "" : $" ({ratio.Name})")</option> }</select></label>
+                    </div>
+                    <p class="muted">@Dimensions.Width x @Dimensions.Height px</p>
+                    <button class="primary-action" type="button" @onclick="GenerateImageAsync" disabled="@(SelectedBook is null || SelectedSwarm is null || string.IsNullOrWhiteSpace(_prompt) || string.IsNullOrWhiteSpace(_model))">Generate image</button>
+                </fieldset>
+                @if (_imageUrl is not null)
+                {
+                    <div class="generated"><h3>Generated cover</h3><img src="@_imageUrl" alt="Generated cover for @SelectedBook?.Title" />@if (_imageType is not ("image/jpeg" or "image/png")) { <p class="muted">Only JPEG and PNG images can be applied to Calibre.</p> }<button class="primary-action" type="button" @onclick="ApplyAsync" disabled="@(_busy || SelectedLibrary?.IsManaged != true || SelectedBook is null || _imageType is not ("image/jpeg" or "image/png"))">Apply to Calibre</button></div>
+                }
+            </section>
+        </div>
+    </main>
+</div>
+
+@code {
+    private IReadOnlyList<LocalLibraryInstance> _libraries = [];
+    private IReadOnlyList<SwarmUIInstance> _swarms = [];
+    private IReadOnlyList<LibraryItem> _books = [];
+    private string _libraryId = "", _swarmId = "", _bookId = "", _query = "", _baseUrl = "", _llmModel = "", _prompt = "";
+    private string _instruction = CoverPromptSettings.DefaultInstruction;
+    private string _executable = "", _arguments = "", _workingDirectory = "";
+    private bool _startWithApp;
+    private string _model = "ZImage/z_image_turbo_bf16";
+    private int _steps = 12, _size = 1024, _coverVersion;
+    private string _ratio = "3:4";
+    private double _cfg = 1;
+    private byte[]? _image;
+    private string? _imageType, _imageUrl, _error, _status;
+    private bool _busy, _searched, _disposed;
+    private CancellationTokenSource? _operation;
+
+    private LocalLibraryInstance? SelectedLibrary => _libraries.FirstOrDefault(library => library.Id.ToString() == _libraryId);
+    private SwarmUIInstance? SelectedSwarm => _swarms.FirstOrDefault(instance => instance.Id.ToString() == _swarmId);
+    private LibraryItem? SelectedBook => _books.FirstOrDefault(book => book.Id == _bookId);
+    private (int Width, int Height) Dimensions => CoverImageSize.Calculate(_size, _ratio);
+
+    protected override Task OnInitializedAsync() => RunAsync("Loading settings and instances...", "Could not load cover settings or instances.", async token =>
+    {
+        _libraries = (await LibraryStore.GetAllAsync(token)).Where(library => library.IsCalibre).ToArray();
+        _swarms = await SwarmStore.GetAllAsync(token);
+        var settings = await PromptService.GetSettingsAsync(token);
+        token.ThrowIfCancellationRequested();
+        _baseUrl = settings.BaseUrl.ToString();
+        _llmModel = settings.Model;
+        _instruction = settings.Instruction;
+        var server = await PromptServer.GetConfigurationAsync(token);
+        _executable = server.ExecutablePath;
+        _arguments = server.Arguments;
+        _workingDirectory = server.WorkingDirectory;
+        _startWithApp = server.StartWithApp;
+    });
+
+    private void LibraryChanged() { _books = []; _bookId = ""; _searched = false; BookChanged(); }
+    private void BookChanged() { _prompt = ""; ClearImage(); _error = null; _status = null; _coverVersion = 0; }
+    private void ClearImage() { _image = null; _imageType = null; _imageUrl = null; }
+
+    private Task SearchAsync() => RunAsync("Searching books...", "Could not search this library. Check its connection and access permissions.", async token =>
+    {
+        var library = SelectedLibrary;
+        if (library is null || string.IsNullOrWhiteSpace(_query)) return;
+        _books = []; _bookId = ""; _searched = false; BookChanged(); _status = "Searching books...";
+        var books = await LibraryClient.SearchAsync(library, _query, 25, token);
+        token.ThrowIfCancellationRequested();
+        _books = books;
+        _searched = true;
+    });
+
+    private CoverPromptSettings Settings() => new(_baseUrl.Trim(), _llmModel.Trim(), _instruction);
+    private void ResetInstruction() => _instruction = CoverPromptSettings.DefaultInstruction;
+
+    private Task SaveServerAsync() => RunAsync("Saving prompt server...", "Could not save prompt server settings.", async token =>
+    {
+        await PromptServer.SaveConfigurationAsync(new(_executable.Trim(), _arguments, _workingDirectory.Trim(), _startWithApp), token);
+        _status = "Prompt server settings saved.";
+    });
+
+    private Task StartServerAsync() => RunAsync("Starting prompt server...", "Could not start the prompt server. Save its settings and check its executable and working directory.", async token =>
+    {
+        await PromptServer.StartServerAsync(token);
+        _status = PromptServer.Status.Message;
+    });
+
+    private Task StopServerAsync() => RunAsync("Stopping prompt server...", "Could not stop the prompt server.", async token =>
+    {
+        await PromptServer.StopServerAsync(token);
+        _status = PromptServer.Status.Message;
+    });
+
+    private Task SaveSettingsAsync() => RunAsync("Saving prompt settings...", "Could not save prompt settings. Check the endpoint, model, and prompt-writing instruction.", async token =>
+    {
+        await PromptService.SaveSettingsAsync(Settings(), token);
+        token.ThrowIfCancellationRequested();
+        _status = "Prompt settings saved.";
+    });
+
+    private Task GeneratePromptAsync() => RunAsync("Generating prompt...", "Could not generate a prompt. Check the prompt service settings and connection.", async token =>
+    {
+        var book = SelectedBook;
+        if (book is null) return;
+        var prompt = await PromptService.GenerateAsync(Settings(), book.Title, book.Detail, book.Description, token);
+        token.ThrowIfCancellationRequested();
+        _prompt = prompt;
+        ClearImage();
+        _status = "Prompt generated.";
+    });
+
+    private Task GenerateImageAsync() => RunAsync("Generating image...", "Could not generate an image. Check the SwarmUI connection, generation settings, and SwarmUI backend logs.", async token =>
+    {
+        var swarm = SelectedSwarm;
+        if (swarm is null || SelectedBook is null || string.IsNullOrWhiteSpace(_prompt) || string.IsNullOrWhiteSpace(_model)) return;
+        if (_steps is < 1 or > 1000 || _cfg is < 0 or > 100 || !double.IsFinite(_cfg))
+            throw new ArgumentException("Invalid generation settings.");
+        var (width, height) = Dimensions;
+        ClearImage();
+        var result = await Generator.GenerateAsync(swarm, _prompt, _model, _steps, _cfg, width, height, token);
+        token.ThrowIfCancellationRequested();
+        var contentType = result.ContentType.ToLowerInvariant();
+        if (result.Bytes.Length == 0 || contentType is not ("image/jpeg" or "image/png" or "image/webp" or "image/gif" or "image/avif" or "image/bmp"))
+            throw new InvalidDataException("Unsupported image.");
+        _image = result.Bytes;
+        _imageType = contentType;
+        _imageUrl = $"data:{contentType};base64,{Convert.ToBase64String(result.Bytes)}";
+        _status = "Image generated.";
+    });
+
+    private Task ApplyAsync() => RunAsync("Applying cover...", "Could not apply this cover. Check library access, the Calibre installation, and that all Calibre applications and servers are stopped.", async token =>
+    {
+        var library = SelectedLibrary;
+        var book = SelectedBook;
+        if (library?.IsManaged != true || book is null || _image is null || _imageType is not ("image/jpeg" or "image/png")) return;
+        await CoverWriter.ApplyAsync(library, book.Id, _image, _imageType, token);
+        token.ThrowIfCancellationRequested();
+        if (book.PreviewUrl is null)
+        {
+            var coverId = book.Id.Split(':')[0];
+            var updated = book with { PreviewUrl = new Uri($"/libraries/{library.Id:D}/covers/{Uri.EscapeDataString(coverId)}", UriKind.Relative) };
+            _books = _books.Select(item => item == book ? updated : item).ToArray();
+        }
+        _coverVersion++;
+        _status = "Cover applied to Calibre.";
+    });
+
+    private string? CurrentCoverUrl(LibraryItem book) => book.PreviewUrl is null ? null : $"{book.PreviewUrl}{(book.PreviewUrl.ToString().Contains('?') ? '&' : '?')}v={_coverVersion}";
+    private void Cancel() => _operation?.Cancel();
+
+    private async Task RunAsync(string status, string error, Func<CancellationToken, Task> action)
+    {
+        if (_busy || _disposed) return;
+        using var operation = new CancellationTokenSource();
+        _operation = operation;
+        _busy = true; _error = null; _status = status;
+        try { await action(operation.Token); }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested) { _status = status == "Applying cover..." ? "Cancellation requested. Check Calibre before retrying." : "Cancelled."; }
+        catch (SwarmUIGenerationException exception) { _error = $"SwarmUI: {exception.Message}"; _status = null; }
+        catch (Exception) { _error = error; _status = null; }
+        finally { _busy = false; _operation = null; }
+    }
+
+    public void Dispose() { _disposed = true; _operation?.Cancel(); }
+}

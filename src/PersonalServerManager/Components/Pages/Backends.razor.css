@@ -103,7 +103,7 @@ footer { justify-content: space-between; gap: 12px; width: 100%; max-width: 1440
 
 @media (max-width: 520px) {
     .topbar { padding: 6px 16px; gap: 12px; }
-    .topbar-right { gap: 12px; }
+    .topbar-right { gap: 4px; }
     .wordmark { font-size: 11px; }
     .nav-link { justify-content: center; width: 32px; height: 32px; }
     .nav-link span { display: none; }

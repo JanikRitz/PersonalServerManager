@@ -174,7 +174,7 @@ opened read-only. Book descriptions from Calibre comments are shown as bounded,
 plain-text excerpts with an expandable full description when available. SQLite uses
 immutable reads; uncheckpointed WAL changes are not visible.
 Keep the library stable while searching; use a read-only snapshot if another
-process is actively editing it. The adapter never changes metadata or book files.
+process is actively editing it. Search and reading never change metadata or book files.
 
 Expanded local groups link to an authenticated, paginated source view. File and
 cover routes also require sign-in, reject path traversal/reparse points, and
@@ -199,6 +199,32 @@ Its browser interface, reader links, and file downloads are proxied through
 Personal Server Manager and require sign-in, including when accessed from a LAN
 device. See [Calibre hosting](docs/calibre-hosting.md) for external hosting and
 TLS guidance.
+
+## Cover Studio
+
+Open **Cover studio** from the top navigation to search a Calibre library, generate
+an editable image prompt with an OpenAI-compatible chat-completions server, and
+generate a cover with a configured SwarmUI instance. The prompt service defaults
+to `http://127.0.0.1:8080/v1`; its endpoint, optional model, and prompt-writing
+instruction are configurable and saved in Cover studio's prompt service settings.
+Leave the model empty to use the first model returned by `/v1/models`.
+Image size is the longest side; the other dimension is rounded to a multiple of
+64 pixels, so the resulting dimensions may slightly differ from the selected ratio.
+The prompt service does not currently send API keys. If a managed Calibre server
+uses port 8080, choose a different port for the language-model server.
+
+An optional managed prompt server can be configured in Cover studio with an
+executable, its arguments, and working directory. Configure the server itself to
+listen on the prompt endpoint; starting the process does not guarantee its API
+is ready. Only processes started by the manager are stopped by it. Arguments are
+stored locally as plain text, so do not put credentials in them.
+
+Review the generated image before selecting **Apply to Calibre**. Applying is
+available for local managed libraries only, requires `calibredb.exe` and
+`calibre-debug.exe` in the configured Calibre installation, and uses Calibre's
+metadata tools. Stop all Calibre applications and servers, including on other
+machines sharing the library, before applying a cover. External libraries remain
+read-only. Search and generation do not change a book's cover.
 
 ## Network Access
 
