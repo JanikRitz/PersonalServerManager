@@ -11,13 +11,17 @@ public sealed record SwarmUISearchPath(string Path, int Depth = SwarmUISearchPat
 }
 
 public sealed record SwarmUIInstance(Guid Id, string Name, Uri BaseUrl, IReadOnlyList<SwarmUISearchPath> SearchPaths,
-    string? InstallationFolder = null, int Port = SwarmUIInstance.DefaultPort, bool StartWithApp = false)
+    string? InstallationFolder = null, int Port = SwarmUIInstance.DefaultPort, bool StartWithApp = false, bool ListenOnLocalNetwork = false)
 {
     public const int DefaultPort = 7801;
     public const int MaximumSearchPaths = 16;
     public static IReadOnlyList<SwarmUISearchPath> DefaultSearchPaths { get; } = [new(SwarmUISearchPath.DefaultPath)];
 
     public bool IsManaged => !string.IsNullOrWhiteSpace(InstallationFolder);
+
+    public Uri BrowserUrl(Uri managerUrl) => IsManaged && ListenOnLocalNetwork
+        ? new UriBuilder(BaseUrl) { Host = managerUrl.Host }.Uri
+        : BaseUrl;
 }
 
 public enum SwarmUIMediaKind { Image, Video }

@@ -39,7 +39,7 @@ public sealed class JsonSwarmUIInstanceStore(string filePath) : ISwarmUIInstance
             var stored = await ReadAsync(cancellationToken);
             var replacement = new StoredInstance(normalized.Id, normalized.Name, normalized.BaseUrl.AbsoluteUri,
                 normalized.SearchPaths.Select(path => new StoredSearchPath(path.Path, path.Depth)).ToList(),
-                normalized.InstallationFolder, normalized.Port, normalized.StartWithApp);
+                normalized.InstallationFolder, normalized.Port, normalized.StartWithApp, normalized.ListenOnLocalNetwork);
             var existing = stored.FindIndex(item => item.Id == normalized.Id);
             if (requireExisting && existing < 0)
                 throw new InvalidDataException("The SwarmUI instance no longer exists.");
@@ -102,13 +102,14 @@ public sealed class JsonSwarmUIInstanceStore(string filePath) : ISwarmUIInstance
             BaseUrl = new Uri(instance.BaseUrl.AbsoluteUri.TrimEnd('/') + "/"),
             SearchPaths = paths,
             InstallationFolder = string.IsNullOrWhiteSpace(instance.InstallationFolder) ? null : instance.InstallationFolder.Trim(),
-            StartWithApp = instance.StartWithApp && instance.IsManaged
+            StartWithApp = instance.StartWithApp && instance.IsManaged,
+            ListenOnLocalNetwork = instance.ListenOnLocalNetwork && instance.IsManaged
         };
     }
 
     private static SwarmUIInstance ToInstance(StoredInstance item) => new(item.Id, item.Name, new Uri(item.BaseUrl),
         item.SearchPaths is null ? SwarmUIInstance.DefaultSearchPaths : item.SearchPaths.Select(path => new SwarmUISearchPath(path.Path, path.Depth)).ToArray(),
-        item.InstallationFolder, item.Port, item.StartWithApp);
+        item.InstallationFolder, item.Port, item.StartWithApp, item.ListenOnLocalNetwork);
 
     private async Task<List<StoredInstance>> ReadAsync(CancellationToken cancellationToken)
     {
@@ -176,5 +177,5 @@ public sealed class JsonSwarmUIInstanceStore(string filePath) : ISwarmUIInstance
     private sealed record StoredSearchPath(string Path, int Depth = SwarmUISearchPath.DefaultDepth);
 
     private sealed record StoredInstance(Guid Id, string Name, string BaseUrl, List<StoredSearchPath>? SearchPaths = null,
-        string? InstallationFolder = null, int Port = SwarmUIInstance.DefaultPort, bool StartWithApp = false);
+        string? InstallationFolder = null, int Port = SwarmUIInstance.DefaultPort, bool StartWithApp = false, bool ListenOnLocalNetwork = false);
 }

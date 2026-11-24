@@ -72,6 +72,12 @@ kill and a further bounded 5-second wait. Calibre's headless server is killed
 directly with a bounded 5-second exit wait. API health is separate from process
 state. External servers remain under their owner's lifecycle control.
 
+Managed SwarmUI listens on loopback by default. Enable **Listen on the local
+network** while the instance is stopped to bind all IPv4 interfaces; connect
+directly using the server's network address and configured port. This does not
+route SwarmUI through the manager or its authentication. Configure SwarmUI
+security and firewall rules for the networks allowed to connect.
+
 ## Comic Companion
 
 Use a HydrusComicCompanion build that supports `PSM_COMIC_PATH_BASE`, then open

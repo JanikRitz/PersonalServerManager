@@ -155,7 +155,7 @@ public sealed class ManagedBackendService(
                 folder = Path.GetFullPath(swarm.InstallationFolder!);
                 executable = Path.Combine(folder, SwarmUIExecutable);
                 endpoint = swarm.BaseUrl;
-                arguments = ["--launch_mode", "none", "--host", "127.0.0.1", "--port", swarm.Port.ToString(CultureInfo.InvariantCulture)];
+                arguments = ["--launch_mode", "none", "--host", swarm.ListenOnLocalNetwork ? "0.0.0.0" : "127.0.0.1", "--port", swarm.Port.ToString(CultureInfo.InvariantCulture)];
             }
             else
             {

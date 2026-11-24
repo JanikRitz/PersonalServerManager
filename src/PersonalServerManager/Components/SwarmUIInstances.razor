@@ -6,6 +6,7 @@
 @inject ISwarmUIClient Client
 @inject ManagedBackendService ManagedBackends
 @inject IJSRuntime JavaScript
+@inject NavigationManager Navigation
 
 <section class="backend-group swarmui-instances" aria-labelledby="@FieldId("heading")">
     <header class="swarmui-heading">
@@ -77,6 +78,8 @@
                             <small id="@FieldId("installation-help")">Build SwarmUI once with launch-windows.bat. PSM runs src\bin\live_release\SwarmUI.exe and never builds or updates it.</small>
                             <label for="@FieldId("port")">Port</label>
                             <input id="@FieldId("port")" @bind="_draftPort" type="number" min="1" max="65535" required />
+                            <label class="checkbox-label"><input type="checkbox" @bind="_draftListenOnLocalNetwork" aria-describedby="@FieldId("network-help")" /> Listen on the local network</label>
+                            <small id="@FieldId("network-help")">Allows connections on all network interfaces. Use your server's network address and this port; configure your firewall and SwarmUI security accordingly.</small>
                             <label class="checkbox-label"><input type="checkbox" @bind="_draftAutostart" /> Start with Personal Server Manager</label>
                         }
                         else
@@ -124,7 +127,7 @@
         <dl class="instance-details">
             <dt>Mode</dt><dd>@(instance.IsManaged ? "Managed" : "External")</dd>
             <dt>Base URL</dt><dd>@instance.BaseUrl.AbsoluteUri</dd>
-            @if (instance.IsManaged) { <dt>Installation</dt><dd>@instance.InstallationFolder</dd> }
+            @if (instance.IsManaged) { <dt>Installation</dt><dd>@instance.InstallationFolder</dd><dt>Network access</dt><dd>@(instance.ListenOnLocalNetwork ? "All interfaces" : "Local only")</dd> }
             <dt>Search paths</dt><dd>@string.Join(", ", instance.SearchPaths.Select(path => $"{path.Path} (depth {path.Depth})"))</dd>
             <dt>Observation</dt><dd>@(observation?.Message is { Length: > 0 } message ? message : "First check pending")</dd>
             @if (observation is not null) { <dt>Last checked</dt><dd>@observation.CheckedAt.ToLocalTime().ToString("g")</dd> }
@@ -134,7 +137,7 @@
             <ManagedBackendControls @key="instance.Id" InstanceId="@instance.Id" SettingsOnly="true" Disabled="@(_busy || _editing)" StartWithApp="@instance.StartWithApp" StartWithAppChanged="enabled => SaveAutostartAsync(instance, enabled)" />
         }
         <div class="detail-actions">
-            <a class="detail-action" href="@instance.BaseUrl.AbsoluteUri" target="_blank" rel="noopener noreferrer" aria-label="@($"Open SwarmUI {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" />Open SwarmUI</a>
+            <a class="detail-action" href="@instance.BrowserUrl(new Uri(Navigation.Uri)).AbsoluteUri" target="_blank" rel="noopener noreferrer" aria-label="@($"Open SwarmUI {instance.Name}")"><MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" />Open SwarmUI</a>
             <button class="detail-action" type="button" disabled="@_busy" @onclick="() => EditInstance(instance)"><MudIcon Icon="@Icons.Material.Filled.Edit" Size="Size.Small" />Edit</button>
             <button class="detail-action remove-button" type="button" disabled="@_busy" @onclick="() => RemoveAsync(instance)"><MudIcon Icon="@Icons.Material.Filled.DeleteOutline" Size="Size.Small" />Remove</button>
         </div>
@@ -164,6 +167,7 @@
     private string _draftInstallation = string.Empty;
     private int _draftPort = SwarmUIInstance.DefaultPort;
     private bool _draftAutostart;
+    private bool _draftListenOnLocalNetwork;
     private List<PathRow> _draftPaths = [];
     private string? _error;
     private string? _editorError;
@@ -282,6 +286,7 @@
         _draftInstallation = string.Empty;
         _draftPort = SwarmUIInstance.DefaultPort;
         _draftAutostart = false;
+        _draftListenOnLocalNetwork = false;
         _draftPaths = [new()];
         _editorError = null;
         _editing = true;
@@ -301,6 +306,7 @@
         _draftInstallation = instance.InstallationFolder ?? string.Empty;
         _draftPort = instance.Port;
         _draftAutostart = instance.StartWithApp;
+        _draftListenOnLocalNetwork = instance.ListenOnLocalNetwork;
         _draftPaths = instance.SearchPaths.Select(path => new PathRow { Path = path.Path, Depth = path.Depth }).ToList();
         _editorError = null;
         _editing = true;
@@ -364,7 +370,8 @@
         {
             var instance = new SwarmUIInstance(_editingId ?? Guid.NewGuid(), _draftName.Trim(), baseUrl,
                 _draftPaths.Select(row => new SwarmUISearchPath(row.Path, row.Depth)).ToArray(),
-                _draftManaged ? _draftInstallation.Trim() : null, _draftPort, _draftManaged && _draftAutostart);
+                _draftManaged ? _draftInstallation.Trim() : null, _draftPort, _draftManaged && _draftAutostart,
+                _draftManaged && _draftListenOnLocalNetwork);
             if (_editingId is null) await Store.SaveAsync(instance, _token);
             else await ManagedBackends.UpdateInstanceAsync(instance, _token);
             _editing = false;

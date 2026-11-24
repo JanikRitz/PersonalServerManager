@@ -175,6 +175,29 @@ public sealed class ManagedBackendServiceTests : IDisposable
         Assert.Throws<InvalidDataException>(() => ManagedBackendService.ValidateSwarmUIInstance(instance with { Port = 0, BaseUrl = new Uri("http://127.0.0.1/") }));
     }
 
+    [Theory]
+    [InlineData(false, "127.0.0.1")]
+    [InlineData(true, "0.0.0.0")]
+    public async Task ManagedSwarmUILaunchUsesConfiguredHost(bool listenOnLocalNetwork, string expectedHost)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var binaries = Directory.CreateDirectory(Path.Combine(_folder, "src", "bin", "live_release"));
+        await File.WriteAllTextAsync(Path.Combine(binaries.FullName, "SwarmUI.exe"), string.Empty);
+        var swarm = new JsonSwarmUIInstanceStore(Path.Combine(_folder, "swarmui.json"));
+        var instance = new SwarmUIInstance(Guid.NewGuid(), "Swarm", new Uri($"http://127.0.0.1:{port}/"),
+            SwarmUIInstance.DefaultSearchPaths, _folder, port, ListenOnLocalNetwork: listenOnLocalNetwork);
+        await swarm.SaveAsync(instance);
+        ProcessStartInfo? launched = null;
+        using var service = new ManagedBackendService(CreateStashStore(), CreateHydrusStore(),
+            NullLogger<ManagedBackendService>.Instance, swarm, info => { launched = info; return null; });
+        await service.StartInstanceAsync(instance.Id);
+        Assert.NotNull(launched);
+        Assert.Equal(["--launch_mode", "none", "--host", expectedHost, "--port", port.ToString()], launched.ArgumentList);
+    }
+
     [Fact]
     public async Task ManagedSwarmUIOnOccupiedPortIsNotLaunched()
     {
