@@ -177,6 +177,28 @@ public sealed class CoverPromptServiceTests
         await Assert.ThrowsAsync<TimeoutException>(() => service.GenerateAsync(new(Model: "model"), "title", null, null));
     }
 
+    [Fact]
+    public async Task Generate_IncludesExcerptAndSendsImageAsVisionContent()
+    {
+        using var client = new HttpClient(new StubHandler(async request =>
+        {
+            using var payload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            var content = payload.RootElement.GetProperty("messages")[1].GetProperty("content");
+            Assert.Equal(JsonValueKind.Array, content.ValueKind);
+            var text = content[0].GetProperty("text").GetString();
+            Assert.Contains("Opening text:\nIt was a dark night.", text);
+            Assert.Contains("first page of the comic", text);
+            Assert.Equal("image_url", content[1].GetProperty("type").GetString());
+            Assert.Equal("data:image/png;base64,iVBORw==", content[1].GetProperty("image_url").GetProperty("url").GetString());
+            return Json("{\"choices\":[{\"message\":{\"content\":\"cover\"}}]}");
+        }));
+        var service = new CoverPromptService("unused.json", client);
+        var image = new PromptImage([0x89, (byte)'P', (byte)'N', (byte)'G'], "image/png");
+        Assert.Equal("cover", await service.GenerateAsync(new(Model: "model"), "Book", null, null, excerpt: "It was a dark night.", image: image));
+        await Assert.ThrowsAsync<ArgumentException>(() => service.GenerateAsync(new(Model: "model"), "Book", null, null, image: image with { ContentType = "image/jpeg" }));
+        await Assert.ThrowsAsync<ArgumentException>(() => service.GenerateAsync(new(Model: "model"), "Book", null, null, excerpt: new string('e', 32001)));
+    }
+
     private static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
 
     private sealed class StubHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler

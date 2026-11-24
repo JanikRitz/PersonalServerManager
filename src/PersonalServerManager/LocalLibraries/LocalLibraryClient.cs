@@ -33,7 +33,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
     private static readonly string[] ComicFormats = ["CBZ", "CBR", "CB7", "CBT", "CBC"];
 
     public async Task<IReadOnlyList<LibraryItem>> SearchAsync(LocalLibraryInstance instance, string query, int limit,
-        CancellationToken cancellationToken = default, int offset = 0, LibrarySort sort = LibrarySort.Default)
+        CancellationToken cancellationToken = default, int offset = 0, LibrarySort sort = LibrarySort.Default, bool withoutCover = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (limit is < 1 or > 25) throw new ArgumentOutOfRangeException(nameof(limit));
@@ -42,9 +42,10 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
         ArgumentNullException.ThrowIfNull(query);
         if (query.Length > 1024 || query.Any(char.IsControl)) throw new ArgumentException("Invalid search query.", nameof(query));
         if (!Enum.IsDefined(instance.Kind)) throw new InvalidDataException("Invalid library kind.");
+        if (withoutCover && !instance.IsCalibre) return [];
         if (instance.IsExternal)
-            return await SearchRemoteAsync(instance, query.Trim(), limit, cancellationToken, offset, sort);
-        if (string.IsNullOrWhiteSpace(query)) return [];
+            return await SearchRemoteAsync(instance, query.Trim(), limit, cancellationToken, offset, sort, withoutCover);
+        if (string.IsNullOrWhiteSpace(query) && !withoutCover) return [];
         var root = LocalLibraryPaths.Root(instance.RootPath);
         if (instance.Kind == LocalLibraryKind.Notes)
             return await SearchNotesAsync(instance, root, query.Trim(), limit, cancellationToken, offset, sort);
@@ -53,7 +54,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             var roots = instance.RootPaths;
             if (roots.Count == 1)
                 return ToRelativeReaders(instance, await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance) ?? instance,
-                    root, query.Trim(), limit, cancellationToken, offset, sort));
+                    root, query.Trim(), limit, cancellationToken, offset, sort, withoutCover: withoutCover));
             var folders = new List<IReadOnlyList<LibraryItem>>();
             for (var folder = 0; folder < roots.Count; folder++)
             {
@@ -62,7 +63,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                 {
                     folders.Add(await SearchCalibreAsync(managedCalibre?.WithReaderConnection(instance, folder) ?? instance,
                         folder == 0 ? root : LocalLibraryPaths.Root(roots[folder]), query.Trim(), offset + limit, cancellationToken, 0, sort,
-                        FolderPrefix(folder)));
+                        FolderPrefix(folder), withoutCover));
                 }
                 catch (Exception exception) when (folder > 0 && (IsFileFailure(exception) || exception is SqliteException) &&
                     !cancellationToken.IsCancellationRequested)
@@ -187,8 +188,9 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
     }
 
     private async Task<IReadOnlyList<LibraryItem>> SearchRemoteAsync(LocalLibraryInstance instance, string query,
-        int limit, CancellationToken token, int offset, LibrarySort sort)
+        int limit, CancellationToken token, int offset, LibrarySort sort, bool withoutCover)
     {
+        if (withoutCover) query = query.Length == 0 ? "cover:false" : $"({query}) and cover:false";
         var library = Uri.EscapeDataString(instance.ContentServerLibraryId!);
         var field = sort is LibrarySort.DateNewest or LibrarySort.DateOldest ? "timestamp" :
             sort == LibrarySort.Default ? "id" : "title";
@@ -218,7 +220,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
                     var authors = metadata.TryGetProperty("authors", out var authorList) && authorList.ValueKind == JsonValueKind.Array
                         ? string.Join(", ", authorList.EnumerateArray().Select(author => author.GetString())) : "";
                     items.Add(new LibraryItem(itemId, JsonText(metadata, "title") ?? $"Book {id}", authors,
-                        ItemUrl(instance.Id, itemId), new Uri($"/libraries/{instance.Id:D}/covers/{id}", UriKind.Relative),
+                        ItemUrl(instance.Id, itemId), withoutCover ? null : new Uri($"/libraries/{instance.Id:D}/covers/{id}", UriKind.Relative),
                         ComicFormats.Contains(format) ? LibraryMediaType.Comic : LibraryMediaType.TextEbook,
                         Description: NormalizeDescription(JsonText(metadata, "comments") ?? ""),
                         CreatedAt: JsonDate(metadata, "timestamp"), UpdatedAt: JsonDate(metadata, "last_modified"),
@@ -486,7 +488,8 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
     }
 
     private static async Task<IReadOnlyList<LibraryItem>> SearchCalibreAsync(LocalLibraryInstance instance, string root,
-        string query, int limit, CancellationToken cancellationToken, int offset, LibrarySort sort, string idPrefix = "")
+        string query, int limit, CancellationToken cancellationToken, int offset, LibrarySort sort, string idPrefix = "",
+        bool withoutCover = false)
     {
         await using var database = await OpenDatabaseAsync(root, cancellationToken);
         var connection = database.Connection;
@@ -557,6 +560,7 @@ public sealed class LocalLibraryClient(ManagedCalibreServer? managedCalibre = nu
             catch (Exception exception) when (IsFileFailure(exception))
             {
             }
+            if (withoutCover && coverUrl is not null) continue;
 
             var title = reader.IsDBNull(1) ? null : reader.GetString(1);
             var rating = reader.IsDBNull(7) ? (decimal?)null : reader.GetDecimal(7) / 2m;

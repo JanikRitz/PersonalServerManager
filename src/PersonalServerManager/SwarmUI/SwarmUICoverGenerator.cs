@@ -8,8 +8,8 @@ public sealed class SwarmUIGenerationException(string message) : Exception(messa
 
 public sealed class SwarmUICoverGenerator : IDisposable
 {
-    private const int MaximumImageBytes = 16 * 1024 * 1024;
-    private const int MaximumJsonBytes = 24 * 1024 * 1024;
+    private const int MaximumImageBytes = 32 * 1024 * 1024;
+    private const int MaximumJsonBytes = 48 * 1024 * 1024;
     private readonly HttpClient _client;
     private readonly TimeSpan _timeout;
 
@@ -36,8 +36,27 @@ public sealed class SwarmUICoverGenerator : IDisposable
         _client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
     }
 
-    public async Task<GeneratedCover> GenerateAsync(SwarmUIInstance instance, string prompt, string model, int steps, double cfg,
-        int width, int height, CancellationToken cancellationToken = default)
+    public Task<GeneratedCover> GenerateAsync(SwarmUIInstance instance, string prompt, string model, int steps, double cfg,
+        int width, int height, CancellationToken cancellationToken = default) =>
+        GenerateCoreAsync(instance, prompt, model, steps, cfg, width, height, null, cancellationToken);
+
+    /// <summary>Re-renders <paramref name="image"/> at the target size as a low-creativity init image (hires-fix style upscale).</summary>
+    public Task<GeneratedCover> UpscaleAsync(SwarmUIInstance instance, GeneratedCover image, string prompt, string model, int steps,
+        double cfg, int width, int height, double creativity = 0.3, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (image.Bytes is not { Length: > 0 and <= MaximumImageBytes } || ImageType(image.ContentType) is null)
+            throw new ArgumentException("A valid source image is required.", nameof(image));
+        if (!double.IsFinite(creativity) || creativity is < 0 or > 1) throw new ArgumentOutOfRangeException(nameof(creativity));
+        return GenerateCoreAsync(instance, prompt, model, steps, cfg, width, height, new Dictionary<string, object>
+        {
+            ["initimage"] = $"data:{ImageType(image.ContentType)};base64,{Convert.ToBase64String(image.Bytes)}",
+            ["initimagecreativity"] = creativity
+        }, cancellationToken);
+    }
+
+    private async Task<GeneratedCover> GenerateCoreAsync(SwarmUIInstance instance, string prompt, string model, int steps, double cfg,
+        int width, int height, Dictionary<string, object>? extra, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(instance);
         if (string.IsNullOrWhiteSpace(prompt)) throw new ArgumentException("A prompt is required.", nameof(prompt));
@@ -64,10 +83,13 @@ public sealed class SwarmUICoverGenerator : IDisposable
 
                 try
                 {
-                    using var response = await PostAsync(baseUri, "GenerateText2Image", new
+                    var parameters = new Dictionary<string, object>
                     {
-                        session_id = session, images = 1, prompt, model, steps, cfgscale = cfg, width, height
-                    }, MaximumJsonBytes, timeout.Token);
+                        ["session_id"] = session, ["images"] = 1, ["prompt"] = prompt, ["model"] = model, ["steps"] = steps,
+                        ["cfgscale"] = cfg, ["width"] = width, ["height"] = height
+                    };
+                    foreach (var (key, value) in extra ?? []) parameters[key] = value;
+                    using var response = await PostAsync(baseUri, "GenerateText2Image", parameters, MaximumJsonBytes, timeout.Token);
                     if (!response.RootElement.TryGetProperty("images", out var images) || images.ValueKind != JsonValueKind.Array ||
                         images.GetArrayLength() == 0 || images[0].ValueKind != JsonValueKind.String ||
                         images[0].GetString() is not { Length: > 0 } location)

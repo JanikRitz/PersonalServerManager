@@ -694,6 +694,27 @@ public sealed class LocalLibraryClientTests : IDisposable
             calibre with { Kind = LocalLibraryKind.Notes, AdditionalRootPaths = [other] }));
     }
 
+    [Fact]
+    public async Task CalibreWithoutCoverFilterReturnsOnlyCoverlessBooksAndAllowsEmptyQuery()
+    {
+        await CreateDatabaseAsync();
+        var coverless = Directory.CreateDirectory(Path.Combine(_root, "Writer", "Coverless (3)")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(coverless, "coverless.epub"), "epub");
+        await ExecuteAsync("""
+            INSERT INTO books VALUES (3, 'Coverless book', 'Writer/Coverless (3)');
+            INSERT INTO data VALUES (6, 3, 'coverless', 'EPUB');
+            """);
+        var instance = Instance(LocalLibraryKind.CalibreText);
+
+        Assert.Equal(3, (await _client.SearchAsync(instance, "book", 25)).Count);
+        var filtered = Assert.Single(await _client.SearchAsync(instance, "book", 25, withoutCover: true));
+        Assert.Equal("3", filtered.Id);
+        Assert.Null(filtered.PreviewUrl);
+        Assert.Equal("3", Assert.Single(await _client.SearchAsync(instance, "", 25, withoutCover: true)).Id);
+        Assert.Empty(await _client.SearchAsync(instance, "", 25));
+        Assert.Empty(await _client.SearchAsync(Instance(), "", 25, withoutCover: true));
+    }
+
     private static void CreateJunction(string link, string destination)
     {
         var start = new ProcessStartInfo("cmd.exe", $"/d /c mklink /J \"{link}\" \"{destination}\"")

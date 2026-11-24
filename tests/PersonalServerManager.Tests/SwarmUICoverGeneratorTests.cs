@@ -184,11 +184,11 @@ public sealed class SwarmUICoverGeneratorTests
     {
         using var oversizedJson = new SwarmUICoverGenerator(new Handler(request => Task.FromResult(
             request.RequestUri!.AbsolutePath.EndsWith("/GetNewSession") ? Json("{\"session_id\":\"s\"}")
-                : Json(new string('x', 24 * 1024 * 1024 + 1)))));
+                : Json(new string('x', 48 * 1024 * 1024 + 1)))));
         await Assert.ThrowsAsync<InvalidDataException>(() => Generate(oversizedJson));
 
         using var oversizedImage = new SwarmUICoverGenerator(new Handler(request => Task.FromResult(
-            request.Method == HttpMethod.Get ? Image(new byte[16 * 1024 * 1024 + 1], "image/png")
+            request.Method == HttpMethod.Get ? Image(new byte[32 * 1024 * 1024 + 1], "image/png")
                 : request.RequestUri!.AbsolutePath.EndsWith("/GetNewSession") ? Json("{\"session_id\":\"s\"}")
                 : Json("{\"images\":[\"View/local/raw/a.png\"]}"))));
         await Assert.ThrowsAsync<InvalidDataException>(() => Generate(oversizedImage));
@@ -202,7 +202,7 @@ public sealed class SwarmUICoverGeneratorTests
             if (request.Method != HttpMethod.Get)
                 return Task.FromResult(request.RequestUri!.AbsolutePath.EndsWith("/GetNewSession")
                     ? Json("{\"session_id\":\"s\"}") : Json("{\"images\":[\"View/local/raw/a.png\"]}"));
-            var content = new StreamContent(new NonSeekableStream(new byte[16 * 1024 * 1024 + 1]));
+            var content = new StreamContent(new NonSeekableStream(new byte[32 * 1024 * 1024 + 1]));
             content.Headers.ContentType = new("image/png");
             Assert.Null(content.Headers.ContentLength);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
@@ -233,6 +233,30 @@ public sealed class SwarmUICoverGeneratorTests
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => generator.GenerateAsync(Instance, "cover", "model", 20, 3.5, 0, 768));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => generator.GenerateAsync(Instance, "cover", "model", 20, 3.5, 512, 0));
         await Assert.ThrowsAsync<ArgumentException>(() => Generate(generator, Instance with { BaseUrl = new Uri("http://user:pass@swarm.example/") }));
+    }
+
+    [Fact]
+    public async Task UpscaleAsync_SendsSourceAsInitImageAtTargetSize()
+    {
+        using var generator = new SwarmUICoverGenerator(new Handler(async request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/GetNewSession")) return Json("{\"session_id\":\"session\"}");
+            using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            var root = document.RootElement;
+            Assert.Equal("data:image/png;base64,AQID", root.GetProperty("initimage").GetString());
+            Assert.Equal(0.3, root.GetProperty("initimagecreativity").GetDouble());
+            Assert.Equal(1024, root.GetProperty("width").GetInt32());
+            Assert.Equal(1536, root.GetProperty("height").GetInt32());
+            Assert.Equal("cover", root.GetProperty("prompt").GetString());
+            return Json("{\"images\":[\"data:image/png;base64,BAUG\"]}");
+        }));
+
+        var result = await generator.UpscaleAsync(Instance, new GeneratedCover([1, 2, 3], "image/png"), "cover", "model", 20, 3.5, 1024, 1536);
+
+        Assert.Equal(new byte[] { 4, 5, 6 }, result.Bytes);
+        await Assert.ThrowsAsync<ArgumentException>(() => generator.UpscaleAsync(Instance, new GeneratedCover([], "image/png"), "cover", "model", 20, 3.5, 1024, 1536));
+        await Assert.ThrowsAsync<ArgumentException>(() => generator.UpscaleAsync(Instance, new GeneratedCover([1], "text/html"), "cover", "model", 20, 3.5, 1024, 1536));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => generator.UpscaleAsync(Instance, new GeneratedCover([1], "image/png"), "cover", "model", 20, 3.5, 1024, 1536, 1.5));
     }
 
     private static Task<GeneratedCover> Generate(SwarmUICoverGenerator generator, SwarmUIInstance? instance = null) =>

@@ -13,7 +13,7 @@ public sealed record CoverPromptSettings(string BaseUrl = "http://127.0.0.1:8080
 public sealed class CoverPromptService
 {
     private const int MaximumResponseBytes = 256 * 1024;
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(3);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private static readonly HttpClient DefaultClient = new(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false });
     private readonly string _settingsPath;
@@ -73,24 +73,36 @@ public sealed class CoverPromptService
     }
 
     public async Task<string> GenerateAsync(CoverPromptSettings settings, string title, string? author, string? description,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? excerpt = null, PromptImage? image = null)
     {
         settings = ValidateSettings(settings);
         if (string.IsNullOrWhiteSpace(title) || title.Length > 1024) throw new ArgumentException("A title of at most 1024 characters is required.", nameof(title));
         if (author?.Length > 1024) throw new ArgumentException("The author is too long.", nameof(author));
         if (description?.Length > 32000) throw new ArgumentException("The description is too long.", nameof(description));
+        if (excerpt?.Length > 32000) throw new ArgumentException("The excerpt is too long.", nameof(excerpt));
+        if (image is not null && (image.Bytes is not { Length: > 0 and <= BookContextReader.MaximumImageBytes } ||
+            BookContextReader.ImageType(image.Bytes) != image.ContentType))
+            throw new ArgumentException("The prompt image is invalid.", nameof(image));
 
         if (string.IsNullOrWhiteSpace(settings.Model)) settings = settings with { Model = await GetDefaultModelAsync(settings, cancellationToken) };
         var endpoint = new Uri(settings.BaseUrl.TrimEnd('/') + "/chat/completions");
+        var text = $"Title: {title.Trim()}\nAuthor: {author?.Trim() ?? ""}\nDescription: {description?.Trim() ?? ""}";
+        if (!string.IsNullOrWhiteSpace(excerpt)) text += $"\nOpening text:\n{excerpt.Trim()}";
+        if (image is not null) text += "\nThe attached image is the first page of the comic.";
+        object userContent = image is null ? text : new object[]
+        {
+            new { type = "text", text },
+            new { type = "image_url", image_url = new { url = $"data:{image.ContentType};base64,{Convert.ToBase64String(image.Bytes)}" } }
+        };
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
             Content = JsonContent.Create(new
             {
                 model = settings.Model,
-                messages = new[]
+                messages = new object[]
                 {
                     new { role = "system", content = settings.Instruction },
-                    new { role = "user", content = $"Title: {title.Trim()}\nAuthor: {author?.Trim() ?? ""}\nDescription: {description?.Trim() ?? ""}" }
+                    new { role = "user", content = userContent }
                 },
                 stream = false
             })

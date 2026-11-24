@@ -83,6 +83,7 @@ builder.Services.AddSingleton<IHydrusInstanceStore>(services => new JsonHydrusIn
 builder.Services.AddSingleton<ISwarmUIClient>(_ => new SwarmUIClient());
 builder.Services.AddSingleton<SwarmUICoverGenerator>(_ => new SwarmUICoverGenerator());
 builder.Services.AddSingleton(_ => new CoverPromptService(Path.Combine(dataDirectory, "cover-prompt-settings.json")));
+builder.Services.AddSingleton(_ => new CoverPresetStore(Path.Combine(dataDirectory, "cover-presets.json")));
 builder.Services.AddSingleton(services => new ManagedPromptServer(Path.Combine(dataDirectory, "managed-prompt-server.json"),
     services.GetRequiredService<ILogger<ManagedPromptServer>>()));
 builder.Services.AddHostedService(services => services.GetRequiredService<ManagedPromptServer>());
