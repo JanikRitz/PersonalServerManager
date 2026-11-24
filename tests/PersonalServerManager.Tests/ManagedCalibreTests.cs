@@ -46,8 +46,27 @@ public sealed class ManagedCalibreTests : IDisposable
         {
             Assert.Equal("1", start.Environment["CALIBRE_NO_SI_DANGER_DANGER"]);
             Assert.Contains("--disable-local-write", start.ArgumentList);
-            Assert.Contains("--disable-auth", start.ArgumentList);
+            Assert.Contains("--enable-auth", start.ArgumentList);
+            Assert.Contains("--auth-mode=basic", start.ArgumentList);
+            Assert.DoesNotContain("--disable-auth", start.ArgumentList);
         });
+        await using (var users = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            { DataSource = Path.Combine(firstConfiguration, "server-users.sqlite"), Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+        {
+            await users.OpenAsync();
+            using var command = users.CreateCommand();
+            command.CommandText = "SELECT name || ':' || readonly FROM users ORDER BY name";
+            var accounts = new List<string>();
+            await using (var reader = await command.ExecuteReaderAsync())
+                while (await reader.ReadAsync()) accounts.Add(reader.GetString(0));
+            Assert.Equal(["psm-reader:y", "psm-writer:n"], accounts);
+        }
+        Assert.StartsWith("Basic ", server.GetReaderAuthorization(first));
+        var writer = server.GetWriterConnection(first, 0)!;
+        Assert.Equal($"http://127.0.0.1:{first.ManagedPort}/managed/calibre/{first.Id:D}/#first-id", writer.LibraryUrl);
+        Assert.Equal("psm-writer", writer.Username);
+        Assert.NotEqual(writer.Password, server.GetWriterConnection(second, 0)!.Password);
+        Assert.Null(server.GetWriterConnection(first, 1));
         Assert.True(Directory.Exists(firstConfiguration));
         Assert.True(Directory.Exists(secondConfiguration));
         Assert.Equal(first.ManagedPort, server.GetStatus(first.Id).Url!.Port);
@@ -66,6 +85,8 @@ public sealed class ManagedCalibreTests : IDisposable
         Assert.Equal(first with { RootPath = second.RootPath }, server.WithReaderConnection(first with { RootPath = second.RootPath }));
         await server.StopServerAsync(first.Id);
         Assert.Null(server.GetStatus(first.Id).Url);
+        Assert.Null(server.GetWriterConnection(first, 0));
+        Assert.Null(server.GetReaderAuthorization(first));
         Assert.NotNull(server.GetStatus(second.Id).Url);
         await server.StartServerAsync(first.Id);
         Assert.Equal(firstConfiguration, starts[2].Environment["CALIBRE_CONFIG_DIRECTORY"]);
@@ -569,6 +590,17 @@ public sealed class ManagedCalibreTests : IDisposable
             }
             finally { KillStandIn(creator); }
         }
+        var add = new ProcessStartInfo(Path.Combine(installation, "calibredb.exe"))
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
+        add.Environment["CALIBRE_CONFIG_DIRECTORY"] = Path.Combine(_root, "fixture-config");
+        foreach (var argument in new[] { "add", "--with-library", first.RootPath, "--empty", "--title", "First" }) add.ArgumentList.Add(argument);
+        using (var adder = Process.Start(add)!)
+        {
+            var error = adder.StandardError.ReadToEndAsync();
+            _ = adder.StandardOutput.ReadToEndAsync();
+            await adder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.True(adder.ExitCode == 0, await error);
+        }
         var launched = new List<(int Id, Task<string> Error)>();
         using var server = new ManagedCalibreServer(Path.Combine(_root, "settings.json"), store,
             NullLogger<ManagedCalibreServer>.Instance, launchProcess: start =>
@@ -591,18 +623,28 @@ public sealed class ManagedCalibreTests : IDisposable
                 var errors = string.Join("\n", launched.Where(entry => entry.Error.IsCompletedSuccessfully).Select(entry => entry.Error.Result));
                 Assert.True(status.Url is not null, status.Message + "\n" + errors.Replace(_root, "<TEMP>")
                     .Replace(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "<PROFILE>"));
-                using var response = System.Text.Json.JsonDocument.Parse(await http.GetStringAsync(new Uri(status.Url!, "ajax/library-info")));
+                Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync(new Uri(status.Url!, "ajax/library-info"))).StatusCode);
+                using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(status.Url!, "ajax/library-info"));
+                request.Headers.TryAddWithoutValidation("Authorization", server.GetReaderAuthorization(library));
+                using var reply = await http.SendAsync(request);
+                using var response = System.Text.Json.JsonDocument.Parse(await reply.EnsureSuccessStatusCode().Content.ReadAsStringAsync());
                 var map = response.RootElement.GetProperty("library_map").EnumerateObject().ToArray();
                 Assert.Equal(library.Name, Assert.Single(map).Value.GetString());
             }
+            Assert.False(Directory.EnumerateFiles(first.RootPath, "cover.jpg", SearchOption.AllDirectories).Any());
+            await new CalibreCoverWriter(server).ApplyAsync(first, "1", Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), "image/png");
+            Assert.True(Directory.EnumerateFiles(first.RootPath, "cover.jpg", SearchOption.AllDirectories).Any());
             Assert.Equal(2, launched.Count);
             Assert.All(launched, entry => Assert.False(HasExited(entry.Id)));
             await server.StopServerAsync(first.Id);
             Assert.True(HasExited(launched[0].Id));
             Assert.False(HasExited(launched[1].Id));
             Assert.Null(server.GetStatus(first.Id).Url);
-            using var remaining = System.Text.Json.JsonDocument.Parse(await http.GetStringAsync(
-                new Uri(server.GetStatus(second.Id).Url!, "ajax/library-info")));
+            using var remainingRequest = new HttpRequestMessage(HttpMethod.Get, new Uri(server.GetStatus(second.Id).Url!, "ajax/library-info"));
+            remainingRequest.Headers.TryAddWithoutValidation("Authorization", server.GetReaderAuthorization(second));
+            using var remainingReply = await http.SendAsync(remainingRequest);
+            using var remaining = System.Text.Json.JsonDocument.Parse(await remainingReply.EnsureSuccessStatusCode().Content.ReadAsStringAsync());
             Assert.Equal("second", Assert.Single(remaining.RootElement.GetProperty("library_map").EnumerateObject()).Value.GetString());
         }
         finally

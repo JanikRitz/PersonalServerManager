@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace PersonalServerManager.LocalLibraries;
 
-public sealed class CalibreCoverWriter
+public sealed class CalibreCoverWriter(ManagedCalibreServer? managedCalibre = null)
 {
     private const int MaximumImageBytes = 32 * 1024 * 1024;
     private const string ImageCheck = """
@@ -46,7 +46,8 @@ public sealed class CalibreCoverWriter
 
         var root = LocalLibraryPaths.Root(instance.RootPaths[folder]);
         var databasePath = LocalLibraryPaths.Resolve(root, "metadata.db");
-        if (File.Exists(databasePath + "-wal") || File.Exists(databasePath + "-journal"))
+        var server = managedCalibre?.GetWriterConnection(instance, folder);
+        if (server is null && (File.Exists(databasePath + "-wal") || File.Exists(databasePath + "-journal")))
             throw new InvalidOperationException("The Calibre database has a pending journal. Close Calibre and resolve it before applying a cover.");
         await using (var guard = LocalLibraryPaths.OpenRead(root, databasePath, FileShare.ReadWrite))
         await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -75,7 +76,7 @@ public sealed class CalibreCoverWriter
             throw new InvalidDataException("The Calibre installation must contain calibredb.exe and calibre-debug.exe.");
         var databaseTool = LocalLibraryPaths.Resolve(installation, "calibredb.exe");
         var debugTool = LocalLibraryPaths.Resolve(installation, "calibre-debug.exe");
-        EnsureCalibreStopped();
+        if (server is null) EnsureCalibreStopped();
 
         var temporaryDirectory = Directory.CreateTempSubdirectory("psm-cover-").FullName;
         try
@@ -89,13 +90,28 @@ public sealed class CalibreCoverWriter
             check.Environment["PSM_COVER_FORMAT"] = format;
             if (await RunAsync(check, cancellationToken) != 0)
                 throw new InvalidDataException("The cover is not a valid JPEG or PNG of the declared type, or exceeds the image dimensions limit.");
-            EnsureCalibreStopped();
             var start = CreateStartInfo(databaseTool);
-            foreach (var argument in new[] { "set_metadata", "--with-library", root, "--field", "cover:" + temporaryCover,
-                bookId.ToString(CultureInfo.InvariantCulture) }) start.ArgumentList.Add(argument);
+            start.ArgumentList.Add("set_metadata");
+            if (server is null)
+            {
+                EnsureCalibreStopped();
+                start.ArgumentList.Add("--with-library");
+                start.ArgumentList.Add(root);
+            }
+            else
+            {
+                var passwordFile = Path.Combine(temporaryDirectory, "password");
+                await File.WriteAllTextAsync(passwordFile, server.Password, cancellationToken);
+                foreach (var argument in new[] { "--with-library", server.LibraryUrl, "--username", server.Username, "--password", $"<f:{passwordFile}>" })
+                    start.ArgumentList.Add(argument);
+            }
+            foreach (var argument in new[] { "--field", "cover:" + temporaryCover, bookId.ToString(CultureInfo.InvariantCulture) })
+                start.ArgumentList.Add(argument);
             cancellationToken.ThrowIfCancellationRequested();
             if (await RunAsync(start, CancellationToken.None) != 0)
-                throw new InvalidOperationException("Calibre could not update the cover. Check library permissions, book availability, and that Calibre is stopped.");
+                throw new InvalidOperationException(server is null
+                    ? "Calibre could not update the cover. Check library permissions, book availability, and that Calibre is stopped."
+                    : "The managed Calibre server could not update the cover. Check the server status and book availability.");
         }
         finally
         {

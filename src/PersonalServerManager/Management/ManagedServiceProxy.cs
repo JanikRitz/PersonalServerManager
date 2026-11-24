@@ -22,6 +22,7 @@ public static class ManagedServiceProxy
             ManagedCalibreServer calibre, ComicCompanionService comicCompanion, IHttpForwarder forwarder) =>
         {
             Uri? upstream = null;
+            string? authorization = null;
             var prefix = $"/managed/{provider}/{instanceId:D}";
             if (provider == "stash")
             {
@@ -35,7 +36,11 @@ public static class ManagedServiceProxy
                 var instance = (await libraries.GetAllAsync(context.RequestAborted))
                     .FirstOrDefault(item => item.Id == instanceId && item.IsManaged);
                 if (instance is not null)
+                {
                     upstream = calibre.WithReaderConnection(instance).ContentServerUrl;
+                    authorization = calibre.GetReaderAuthorization(instance);
+                    if (authorization is null) upstream = null;
+                }
             }
             else if (provider == "comiccompanion")
             {
@@ -52,11 +57,11 @@ public static class ManagedServiceProxy
 
             await forwarder.SendAsync(context, upstream.GetLeftPart(UriPartial.Authority), Client,
                 new ForwarderRequestConfig { ActivityTimeout = TimeSpan.FromMinutes(10) },
-                new ManagedTransformer(prefix, provider == "stash"));
+                new ManagedTransformer(prefix, provider == "stash", authorization));
         }).RequireAuthorization();
     }
 
-    private sealed class ManagedTransformer(string prefix, bool stripPrefix) : HttpTransformer
+    private sealed class ManagedTransformer(string prefix, bool stripPrefix, string? authorization) : HttpTransformer
     {
         public override async ValueTask TransformRequestAsync(HttpContext context, HttpRequestMessage proxyRequest,
             string destinationPrefix, CancellationToken cancellationToken)
@@ -81,6 +86,11 @@ public static class ManagedServiceProxy
                 proxyRequest.Headers.TryAddWithoutValidation("X-Forwarded-For", address.ToString());
             proxyRequest.Headers.Remove("X-Forwarded-Prefix");
             if (stripPrefix) proxyRequest.Headers.TryAddWithoutValidation("X-Forwarded-Prefix", prefix);
+            if (authorization is not null)
+            {
+                proxyRequest.Headers.Remove("Authorization");
+                proxyRequest.Headers.TryAddWithoutValidation("Authorization", authorization);
+            }
         }
     }
 }

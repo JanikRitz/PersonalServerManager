@@ -1,10 +1,14 @@
 using System.ComponentModel;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Data.Sqlite;
 
 namespace PersonalServerManager.LocalLibraries;
 
@@ -12,13 +16,20 @@ public sealed record ManagedCalibreSettings(int Port = 8080, bool StartWithApp =
 
 public sealed record ManagedCalibreStatus(string Message, Uri? Url = null, bool IsRunning = false);
 
+/// <summary>calibredb <c>--with-library</c> URL and read-write account of a running managed server.</summary>
+public sealed record CalibreWriterConnection(string LibraryUrl, string Username, string Password);
+
 public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore libraries, ILogger<ManagedCalibreServer> logger,
     HttpClient? readinessClient = null, Func<ProcessStartInfo, Process?>? launchProcess = null,
     Func<Process, Task>? terminateProcess = null)
     : BackgroundService
 {
     private sealed record LibraryInfo([property: JsonPropertyName("library_map")] Dictionary<string, string>? LibraryMap);
-    private sealed record RunningServer(Process Process, Uri Url, IReadOnlyList<string> Roots, IReadOnlyList<string> LibraryIds);
+    private sealed record RunningServer(Process Process, Uri Url, IReadOnlyList<string> Roots, IReadOnlyList<string> LibraryIds,
+        string ReaderAuthorization, string WriterPassword);
+
+    private const string ReaderUser = "psm-reader";
+    private const string WriterUser = "psm-writer";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -41,12 +52,24 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
 
     /// <summary>Returns the instance connected to its running server, using the Calibre library ID of folder <paramref name="folder"/>.</summary>
     public LocalLibraryInstance WithReaderConnection(LocalLibraryInstance instance, int folder = 0) =>
-        instance.IsManaged && _messages.GetValueOrDefault(instance.Id) == "Running" &&
-        _running.TryGetValue(instance.Id, out var running) && IsAlive(running.Process) &&
-        folder >= 0 && folder < running.LibraryIds.Count &&
-        running.Roots.SequenceEqual(instance.RootPaths.Select(LocalLibraryPaths.NormalizeRoot), StringComparer.OrdinalIgnoreCase)
+        TryGetReady(instance, folder, out var running)
             ? instance with { ContentServerUrl = running.Url, ContentServerLibraryId = running.LibraryIds[folder] }
             : instance;
+
+    /// <summary>Returns the Authorization header value of the read-only account of the instance's running server.</summary>
+    public string? GetReaderAuthorization(LocalLibraryInstance instance) =>
+        TryGetReady(instance, 0, out var running) ? running.ReaderAuthorization : null;
+
+    public CalibreWriterConnection? GetWriterConnection(LocalLibraryInstance instance, int folder) =>
+        TryGetReady(instance, folder, out var running)
+            ? new(running.Url.AbsoluteUri + "#" + running.LibraryIds[folder], WriterUser, running.WriterPassword)
+            : null;
+
+    private bool TryGetReady(LocalLibraryInstance instance, int folder, [NotNullWhen(true)] out RunningServer? running) =>
+        _running.TryGetValue(instance.Id, out running) && instance.IsManaged &&
+        _messages.GetValueOrDefault(instance.Id) == "Running" && IsAlive(running.Process) &&
+        folder >= 0 && folder < running.LibraryIds.Count &&
+        running.Roots.SequenceEqual(instance.RootPaths.Select(LocalLibraryPaths.NormalizeRoot), StringComparer.OrdinalIgnoreCase);
 
     public async Task<ManagedCalibreSettings> GetSettingsAsync(CancellationToken token = default)
     {
@@ -139,21 +162,27 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
             var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
             var configuration = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(settingsPath))!, "managed-calibre", library.Id.ToString());
             Directory.CreateDirectory(configuration);
+            var readerPassword = NewPassword();
+            var writerPassword = NewPassword();
+            var userDatabase = Path.Combine(configuration, "server-users.sqlite");
+            await WriteUserDatabaseAsync(userDatabase, readerPassword, writerPassword, token);
+            var readerAuthorization = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{ReaderUser}:{readerPassword}"));
             start.Environment["CALIBRE_CONFIG_DIRECTORY"] = configuration;
             start.Environment["CALIBRE_NO_SI_DANGER_DANGER"] = "1";
             foreach (var argument in new[] { "--listen-on", "127.0.0.1", "--port", library.ManagedPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 $"--url-prefix=/managed/calibre/{library.Id:D}",
-                "--disable-fallback-to-detected-interface", "--disable-local-write", "--disable-use-bonjour", "--disable-auth" }.Concat(roots))
+                "--disable-fallback-to-detected-interface", "--disable-local-write", "--disable-use-bonjour",
+                "--enable-auth", "--auth-mode=basic", "--userdb", userDatabase }.Concat(roots))
                 start.ArgumentList.Add(argument);
             token.ThrowIfCancellationRequested();
             process = (launchProcess is null ? Process.Start(start) : launchProcess(start))
                 ?? throw new InvalidDataException("Calibre could not be launched.");
 
             var url = new Uri($"http://127.0.0.1:{library.ManagedPort}/managed/calibre/{library.Id:D}/");
-            _running[library.Id] = new(process, url, roots, []);
-            var ready = await WaitForLibrariesAsync(process, url, roots, token);
+            _running[library.Id] = new(process, url, roots, [], readerAuthorization, writerPassword);
+            var ready = await WaitForLibrariesAsync(process, url, readerAuthorization, roots, token);
             token.ThrowIfCancellationRequested();
-            _running[library.Id] = new(process, url, roots, roots.Select(root => ready[root]).ToArray());
+            _running[library.Id] = new(process, url, roots, roots.Select(root => ready[root]).ToArray(), readerAuthorization, writerPassword);
             _messages[library.Id] = "Running";
             process = null;
         }
@@ -282,7 +311,44 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
         if (readinessClient is null) _http.Dispose();
     }
 
-    private async Task<Dictionary<string, string>> WaitForLibrariesAsync(Process process, Uri url, string[] roots, CancellationToken token)
+    private static string NewPassword() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+
+    /// <summary>Recreates the server's user database with fresh per-start reader and writer accounts.</summary>
+    private static async Task WriteUserDatabaseAsync(string path, string readerPassword, string writerPassword, CancellationToken token)
+    {
+        File.Delete(path);
+        File.Delete(path + "-journal");
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+            { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString());
+        await connection.OpenAsync(token);
+        using var command = connection.CreateCommand();
+        // Calibre's version 1 user schema (calibre.srv.users); calibre migrates it to newer versions on open.
+        command.CommandText = """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                pw TEXT NOT NULL,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                session_data TEXT NOT NULL DEFAULT "{}",
+                restriction TEXT NOT NULL DEFAULT "{}",
+                readonly TEXT NOT NULL DEFAULT "n",
+                misc_data TEXT NOT NULL DEFAULT "{}",
+                UNIQUE(name)
+            );
+            INSERT INTO users (name, pw, readonly, misc_data) VALUES
+                ($reader, $readerPassword, 'y', $misc), ($writer, $writerPassword, 'n', $misc);
+            PRAGMA user_version=1;
+            """;
+        command.Parameters.AddWithValue("$reader", ReaderUser);
+        command.Parameters.AddWithValue("$readerPassword", readerPassword);
+        command.Parameters.AddWithValue("$writer", WriterUser);
+        command.Parameters.AddWithValue("$writerPassword", writerPassword);
+        command.Parameters.AddWithValue("$misc", "{\"allow_change_password_via_http\": false}");
+        await command.ExecuteNonQueryAsync(token);
+    }
+
+    private async Task<Dictionary<string, string>> WaitForLibrariesAsync(Process process, Uri url, string authorization, string[] roots,
+        CancellationToken token)
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
         limit.CancelAfter(TimeSpan.FromSeconds(20));
@@ -292,7 +358,14 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
             {
                 if (!IsAlive(process)) throw new InvalidDataException("Calibre exited before its libraries were ready.");
                 LibraryInfo? response = null;
-                try { response = await _http.GetFromJsonAsync<LibraryInfo>(new Uri(url, "ajax/library-info"), limit.Token); }
+                try
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(url, "ajax/library-info"));
+                    request.Headers.TryAddWithoutValidation("Authorization", authorization);
+                    using var reply = await _http.SendAsync(request, limit.Token);
+                    reply.EnsureSuccessStatusCode();
+                    response = await reply.Content.ReadFromJsonAsync<LibraryInfo>(limit.Token);
+                }
                 catch (HttpRequestException) { }
                 catch (OperationCanceledException) when (!limit.IsCancellationRequested) { }
                 if (response?.LibraryMap is { } map && IsAlive(process))
@@ -339,5 +412,5 @@ public sealed class ManagedCalibreServer(string settingsPath, ILocalLibraryStore
     }
 
     private static bool IsExpected(Exception exception) => exception is IOException or InvalidDataException or
-        UnauthorizedAccessException or ArgumentException or JsonException or Win32Exception;
+        UnauthorizedAccessException or ArgumentException or JsonException or Win32Exception or SqliteException;
 }

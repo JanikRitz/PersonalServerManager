@@ -552,7 +552,7 @@
         _applied = false;
     }
 
-    private Task ApplyAsync() => RunAsync(Work.Apply, "Could not apply this cover. Check library access, the Calibre installation, and that all Calibre applications and servers are stopped.", async token =>
+    private Task ApplyAsync() => RunAsync(Work.Apply, "Could not apply this cover. Check library access, the Calibre installation, and that no unmanaged Calibre applications are running.", async token =>
     {
         var (library, book) = (SelectedLibrary, _book);
         if (library?.IsManaged != true || book is null || _image is null || _imageType is not ("image/jpeg" or "image/png")) return;
