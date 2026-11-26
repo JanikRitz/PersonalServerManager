@@ -102,7 +102,22 @@
                     <span class="llm-text"><strong>LLM</strong> @(_llmModel.Length > 0 ? _llmModel : "first available model") <span class="muted">@@ @_baseUrl</span></span>
                     <button class="icon-btn small" type="button" title="Configure prompt LLM" aria-label="Configure prompt LLM" @onclick="OpenLlmSettings" disabled="@_busy"><MudIcon Icon="@Icons.Material.Outlined.Settings" Size="Size.Small" /></button>
                 </div>
-                <div class="prompt-heading"><label for="cover-prompt">Image prompt</label><button class="text-action" type="button" @onclick="GeneratePromptAsync" disabled="@(_book is null || Preset is null || _busy)">@(_working == Work.Prompt ? "Writing..." : "Write with LLM")</button></div>
+                <div class="prompt-heading"><label for="cover-prompt">Image prompt</label><span class="prompt-actions"><button class="text-action" type="button" @onclick="GeneratePromptAsync" disabled="@(_book is null || Preset is null || _busy)">@(_working == Work.Prompt ? "Writing..." : "Write with LLM")</button><button class="info-btn" type="button" title="Show prompt sent to the LLM" aria-label="Show prompt sent to the LLM" aria-expanded="@_promptPreviewOpen" @onclick="TogglePromptPreview" disabled="@(_book is null || Preset is null)"><MudIcon Icon="@Icons.Material.Outlined.Info" Size="Size.Small" /></button></span></div>
+                @if (_promptPreviewOpen)
+                {
+                    <div class="prompt-preview" role="region" aria-label="Prompt sent to the LLM">
+                        <div class="prompt-preview-heading"><strong>Prompt sent to the LLM</strong><button class="icon-btn small" type="button" title="Close prompt preview" aria-label="Close prompt preview" @onclick="TogglePromptPreview"><MudIcon Icon="@Icons.Material.Filled.Close" Size="Size.Small" /></button></div>
+                        <p class="prompt-role">System</p>
+                        <pre>@PromptPreviewSystem</pre>
+                        <p class="prompt-role">User</p>
+                        <pre>@PromptPreviewUser</pre>
+                        @if (_promptImageUrl is not null)
+                        {
+                            <p class="prompt-role">Attached image</p>
+                            <img class="prompt-preview-image" src="@_promptImageUrl" alt="First comic page attached to the LLM prompt" />
+                        }
+                    </div>
+                }
                 <textarea id="cover-prompt" rows="7" maxlength="8000" @bind="_prompt" @bind:event="oninput" disabled="@_busy" placeholder="Write a prompt or let the LLM write one from the preset's meta prompt."></textarea>
                 @if (_promptNote is not null) { <p class="muted">@_promptNote</p> }
                 <button class="primary-action wide" type="button" @onclick="GenerateImageAsync" disabled="@(_busy || _book is null || Preset is null || string.IsNullOrWhiteSpace(_prompt))">@(_working == Work.Image ? "Generating..." : _imageUrl is null ? "Generate image" : "Regenerate image")</button>
@@ -260,7 +275,9 @@
     private string _instruction = CoverPromptSettings.DefaultInstruction;
     private string _draftBaseUrl = "", _draftLlmModel = "", _draftExecutable = "", _draftArguments = "", _draftWorkingDirectory = "";
     private string? _suggestionsKey, _error, _dialogError, _promptNote, _imageType, _imageUrl;
-    private bool _withoutCover = true, _comboOpen, _searching, _searchFailed, _loaded, _upscaled, _applied, _disposed;
+    private bool _withoutCover = true, _comboOpen, _searching, _searchFailed, _loaded, _upscaled, _applied, _disposed, _promptPreviewOpen;
+    private string? _promptExcerpt, _promptImageUrl;
+    private bool _promptImageAttached;
     private bool _confirmDelete, _llmOpen, _draftStartWithApp;
     private int _active = -1, _coverVersion;
     private Guid _presetId;
@@ -281,6 +298,23 @@
     private string ApplyNote => SelectedLibrary?.IsManaged != true ? "Applying covers needs a managed local Calibre library."
         : _imageType is not ("image/jpeg" or "image/png") ? "Only JPEG and PNG images can be applied to Calibre."
         : "Replaces the current cover in Calibre. Stop Calibre applications and servers first.";
+
+    private string PromptPreviewSystem => Preset?.MetaPrompt ?? "";
+
+    private string PromptPreviewUser
+    {
+        get
+        {
+            if (_book is null) return "";
+            var author = _book.Detail.Length > 1024 ? _book.Detail[..1024] : _book.Detail;
+            var text = $"Title: {_book.Title.Trim()}\nAuthor: {author?.Trim() ?? ""}\nDescription: {_book.Description?.Trim() ?? ""}";
+            if (Preset?.IncludeTextLines == true && !string.IsNullOrWhiteSpace(_promptExcerpt)) text += $"\nOpening text:\n{_promptExcerpt.Trim()}";
+            if (Preset?.IncludeFirstComicImage == true && _promptImageAttached) text += "\nThe attached image is the first page of the comic.";
+            else if (Preset?.IncludeFirstComicImage == true && _book.MediaType == LibraryMediaType.Comic)
+                text += "\n[The first comic page will be attached when it is available.]";
+            return text;
+        }
+    }
 
     private string NewFrameStyle
     {
@@ -331,10 +365,12 @@
         return null;
     }
 
+    private void TogglePromptPreview() => _promptPreviewOpen = !_promptPreviewOpen;
+
     private void LibraryChanged()
     {
         _book = null; _query = ""; _prompt = ""; _suggestions = []; _suggestionsKey = null;
-        ResetImage(); _promptNote = null;
+        ResetImage(); _promptNote = null; _promptExcerpt = null; _promptImageUrl = null; _promptImageAttached = false; _promptPreviewOpen = false;
     }
 
     private void FilterChanged() => _suggestionsKey = null;
@@ -397,7 +433,7 @@
     private void SelectBook(LibraryItem item)
     {
         _book = item; _query = item.Title; _comboOpen = false; _suggestionsKey = null;
-        _prompt = ""; _promptNote = null; _coverVersion = 0; _error = null;
+        _prompt = ""; _promptNote = null; _promptExcerpt = null; _promptImageUrl = null; _promptImageAttached = false; _promptPreviewOpen = false; _coverVersion = 0; _error = null;
         ResetImage();
     }
 
@@ -491,6 +527,9 @@
             image = await ReadContextAsync(library, book, (stream, format) => BookContextReader.ReadFirstComicImageAsync(stream, format, token), token);
             missing |= image is null;
         }
+        _promptExcerpt = excerpt;
+        _promptImageAttached = image is not null;
+        _promptImageUrl = image is null ? null : $"data:{image.ContentType};base64,{Convert.ToBase64String(image.Bytes)}";
         var author = book.Detail.Length > 1024 ? book.Detail[..1024] : book.Detail;
         var prompt = await PromptService.GenerateAsync(new CoverPromptSettings(_baseUrl, _llmModel, preset.MetaPrompt),
             book.Title, author, book.Description, token, excerpt, image);
