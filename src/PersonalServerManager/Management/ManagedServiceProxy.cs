@@ -1,5 +1,6 @@
 using System.Net;
 using PersonalServerManager.LocalLibraries;
+using PersonalServerManager.RandomPlot;
 using PersonalServerManager.Stash;
 using Yarp.ReverseProxy.Forwarder;
 
@@ -19,7 +20,7 @@ public static class ManagedServiceProxy
     {
         app.Map("/managed/{provider}/{instanceId:guid}/{**path}", async (HttpContext context,
             string provider, Guid instanceId, IStashInstanceStore stashStore, ILocalLibraryStore libraries,
-            ManagedCalibreServer calibre, ComicCompanionService comicCompanion, IHttpForwarder forwarder) =>
+            ManagedCalibreServer calibre, ComicCompanionService comicCompanion, IHttpForwarder forwarder, IServiceProvider services) =>
         {
             Uri? upstream = null;
             string? authorization = null;
@@ -48,6 +49,14 @@ public static class ManagedServiceProxy
                     .FirstOrDefault(item => item.Id == instanceId && item.IsManaged);
                 upstream = instance?.ApiUrl;
             }
+            else if (provider == "randomplot")
+            {
+                var store = services.GetService<IRandomPlotInstanceStore>();
+                var instance = store is null ? null : (await store.GetAllAsync(context.RequestAborted))
+                    .FirstOrDefault(item => item.Id == instanceId && item.IsManaged);
+                if (instance is not null && instance.Port is >= 1 and <= 65535)
+                    upstream = new Uri($"http://127.0.0.1:{instance.Port}/");
+            }
 
             if (upstream is null)
             {
@@ -57,11 +66,11 @@ public static class ManagedServiceProxy
 
             await forwarder.SendAsync(context, upstream.GetLeftPart(UriPartial.Authority), Client,
                 new ForwarderRequestConfig { ActivityTimeout = TimeSpan.FromMinutes(10) },
-                new ManagedTransformer(prefix, provider == "stash", authorization));
+                new ManagedTransformer(prefix, provider == "stash", provider == "randomplot", authorization));
         }).RequireAuthorization();
     }
 
-    private sealed class ManagedTransformer(string prefix, bool stripPrefix, string? authorization) : HttpTransformer
+    private sealed class ManagedTransformer(string prefix, bool stripPrefix, bool useUpstreamHost, string? authorization) : HttpTransformer
     {
         public override async ValueTask TransformRequestAsync(HttpContext context, HttpRequestMessage proxyRequest,
             string destinationPrefix, CancellationToken cancellationToken)
@@ -76,7 +85,7 @@ public static class ManagedServiceProxy
                 .Select(cookie => $"{cookie.Key}={cookie.Value}");
             var cookieHeader = string.Join("; ", cookies);
             if (cookieHeader.Length > 0) proxyRequest.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
-            proxyRequest.Headers.Host = context.Request.Host.Value;
+            proxyRequest.Headers.Host = useUpstreamHost ? new Uri(destinationPrefix).Authority : context.Request.Host.Value;
             proxyRequest.Headers.Remove("X-Forwarded-Proto");
             proxyRequest.Headers.TryAddWithoutValidation("X-Forwarded-Proto", context.Request.Scheme);
             proxyRequest.Headers.Remove("X-Forwarded-Host");

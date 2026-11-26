@@ -5,6 +5,7 @@
 @using PersonalServerManager.Search
 @using PersonalServerManager.LocalLibraries
 @using PersonalServerManager.Management
+@using PersonalServerManager.RandomPlot
 @using PersonalServerManager.SwarmUI
 @implements IDisposable
 @inject IStashInstanceStore InstanceStore
@@ -14,6 +15,7 @@
 @inject ComicCompanionService ComicCompanion
 @inject ILocalLibraryStore LocalStore
 @inject ISwarmUIInstanceStore SwarmStore
+@inject IRandomPlotInstanceStore RandomPlotStore
 
 <PageTitle>Library search | Personal Server Manager</PageTitle>
 
@@ -41,7 +43,7 @@
                 <input id="search-query" type="search" @bind="_query" @bind:event="oninput" maxlength="1024" placeholder="Search all libraries" autocomplete="off" />
                 <button class="search-button" type="submit" title="Search" aria-label="@(_isSearching ? "Searching" : "Search")" disabled="@(_isSearching || _isSorting || _expandingType is not null || _openingHydrus is not null || string.IsNullOrWhiteSpace(_query))"><MudIcon Icon="@(_isSearching ? Icons.Material.Outlined.HourglassEmpty : Icons.Material.Outlined.ArrowForward)" /></button>
             </form>
-            @if (_configurationLoaded && _comicCompanionCount + _instances.Count + _hydrusInstances.Count + _localLibraries.Count + _swarmInstances.Count == 0 && _pageError is null)
+            @if (_configurationLoaded && _comicCompanionCount + _instances.Count + _hydrusInstances.Count + _localLibraries.Count + _swarmInstances.Count + _randomPlotInstances.Count == 0 && _pageError is null)
             {
                 <p class="empty-state">No backends connected. <a href="/backends">Add a backend</a></p>
             }
@@ -258,6 +260,7 @@
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
     private IReadOnlyList<SwarmUIInstance> _swarmInstances = [];
+    private IReadOnlyList<RandomPlotInstance> _randomPlotInstances = [];
     private IReadOnlyList<LibraryGroup> _groups = [];
     private IReadOnlyList<LibraryGroup>? _expandedGroups;
     private IReadOnlyList<LibraryTypeGroup> _typeGroups = [];
@@ -276,7 +279,12 @@
 
     private int VisibleResultCount => _typeGroups.Sum(group => Math.Min(group.Items.Count, _expandedTypes.Contains(group.Type) ? 25 : 5));
 
-    private static string TypeLabel(LibraryMediaType type) => type == LibraryMediaType.TextEbook ? "Text/Ebook" : type.ToString();
+    private static string TypeLabel(LibraryMediaType type) => type switch
+    {
+        LibraryMediaType.TextEbook => "Text/Ebook",
+        LibraryMediaType.RandomPlotGroup => "Random Plot Generator",
+        _ => type.ToString()
+    };
 
     private static string FormatFileSize(long bytes)
     {
@@ -313,6 +321,7 @@
         LibraryMediaType.Tag => Icons.Material.Outlined.Label,
         LibraryMediaType.Marker => Icons.Material.Outlined.Bookmark,
         LibraryMediaType.Note => Icons.Material.Outlined.Description,
+        LibraryMediaType.RandomPlotGroup => Icons.Material.Outlined.Casino,
         _ => Icons.Material.Outlined.Image
     };
 
@@ -326,6 +335,7 @@
             _hydrusInstances = await HydrusStore.GetAllAsync(_lifetime.Token);
             _localLibraries = await LocalStore.GetAllAsync(_lifetime.Token);
             _swarmInstances = await SwarmStore.GetAllAsync(_lifetime.Token);
+            _randomPlotInstances = await RandomPlotStore.GetAllAsync(_lifetime.Token);
             _comicCompanionCount = (await ComicCompanion.GetAllAsync(_lifetime.Token)).Count;
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UriFormatException or System.Security.Cryptography.CryptographicException or UnauthorizedAccessException or System.Text.Json.JsonException)
@@ -361,7 +371,7 @@
         _submittedQuery = _query.Trim();
         try
         {
-            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries, sort: _sort, swarmInstances: _swarmInstances);
+            _groups = await LibrarySearch.SearchAsync(_instances, _hydrusInstances, _submittedQuery, _lifetime.Token, localLibraries: _localLibraries, sort: _sort, swarmInstances: _swarmInstances, randomPlotInstances: _randomPlotInstances);
             ApplySort();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -440,7 +450,8 @@
             _instances.Where(instance => !unavailable.Contains(("Stash", instance.Id))).ToArray(),
             _hydrusInstances.Where(instance => !unavailable.Contains(("Hydrus", instance.Id))).ToArray(),
             _submittedQuery, _lifetime.Token, limit: limit, localLibraries: _localLibraries, sort: _sort,
-            swarmInstances: _swarmInstances.Where(instance => !unavailable.Contains(("SwarmUI", instance.Id))).ToArray());
+            swarmInstances: _swarmInstances.Where(instance => !unavailable.Contains(("SwarmUI", instance.Id))).ToArray(),
+            randomPlotInstances: _randomPlotInstances.Where(instance => !unavailable.Contains(("Random Plot Generator", instance.Id))).ToArray());
         var refreshed = groups.ToDictionary(group => (group.Provider, group.InstanceId, group.Category));
         return current.Select(original =>
         {
@@ -462,6 +473,7 @@
             "Notes" => _localLibraries.Count(instance => instance.Kind == LocalLibraryKind.Notes),
             "Comic Companion" => _comicCompanionCount,
             "SwarmUI" => _swarmInstances.Count,
+            "Random Plot Generator" => _randomPlotInstances.Count,
             _ => 0
         };
         return instanceCount == 1 && string.Equals(source.Provider, source.InstanceName, StringComparison.OrdinalIgnoreCase)

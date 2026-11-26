@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.RandomPlot;
 using PersonalServerManager.Search;
 using PersonalServerManager.Stash;
 using PersonalServerManager.SwarmUI;
@@ -12,6 +13,117 @@ public sealed class LibrarySearchSwarmUITests
 {
     private static readonly SwarmUIInstance Instance =
         new(Guid.NewGuid(), "Swarm", new Uri("http://swarm.example:7801/"), SwarmUIInstance.DefaultSearchPaths);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SearchAsync_MapsRandomPlotGroupsAndEscapesLinks(bool managed)
+    {
+        var instance = new RandomPlotInstance(Guid.NewGuid(), "Plots", new Uri("https://plots.example/base/"),
+            managed ? "installed" : null);
+        var client = new FakeRandomPlotClient((_, query, _) =>
+        {
+            Assert.Equal("hero & villain", query);
+            return Task.FromResult<IReadOnlyList<RandomPlotGroup>>(
+                [new("A & B/#? ü", [new("Hero"), new("Villain")], true)]);
+        });
+        var service = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), randomPlotClient: client);
+
+        var group = Assert.Single(await service.SearchAsync([], [], "  hero & villain  ", randomPlotInstances: [instance]));
+
+        Assert.Equal("Random Plot Generator", group.Provider);
+        Assert.Equal("Groups", group.Category);
+        Assert.Equal(instance.BrowserUrl, group.SearchUrl!.OriginalString);
+        var item = Assert.Single(group.Items);
+        Assert.Equal(instance.BrowserUrl + "?g=A%20%26%20B%2F%23%3F%20%C3%BC", item.ItemUrl!.OriginalString);
+        Assert.Equal(LibraryMediaType.RandomPlotGroup, item.MediaType);
+        Assert.Equal("Hero\nVillain", item.Description);
+        Assert.Equal(2, item.ContentCount);
+        Assert.True(item.IsFavorite);
+    }
+
+    [Theory]
+    [InlineData(LibrarySort.TitleAscending, 5)]
+    [InlineData(LibrarySort.TitleDescending, 25)]
+    public async Task SearchAsync_SortsRandomPlotGroupsBeforeLimiting(LibrarySort sort, int limit)
+    {
+        var instance = new RandomPlotInstance(Guid.NewGuid(), "Plots", new Uri("https://plots.example/"));
+        var client = new FakeRandomPlotClient((_, _, _) => Task.FromResult<IReadOnlyList<RandomPlotGroup>>(
+            Enumerable.Range(0, 30).Reverse().Select(index => new RandomPlotGroup($"Group {index:00}", [], false)).ToArray()));
+        var service = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), randomPlotClient: client);
+
+        var group = Assert.Single(await service.SearchAsync([], [], "group", limit: limit, sort: sort, randomPlotInstances: [instance]));
+
+        var expected = Enumerable.Range(0, 30).Select(index => $"Group {index:00}");
+        if (sort == LibrarySort.TitleDescending) expected = expected.Reverse();
+        Assert.Equal(expected.Take(limit), group.Items.Select(item => item.Title));
+    }
+
+    [Fact]
+    public async Task SearchAsync_RandomizesRandomPlotGroupsBeforeLimiting()
+    {
+        var instance = new RandomPlotInstance(Guid.NewGuid(), "Plots", new Uri("https://plots.example/"));
+        var client = new FakeRandomPlotClient((_, _, _) => Task.FromResult<IReadOnlyList<RandomPlotGroup>>(
+            Enumerable.Range(0, 30).Select(index => new RandomPlotGroup($"Group {index:00}", [], false)).ToArray()));
+        var service = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), randomPlotClient: client);
+        var selected = new HashSet<string>();
+
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var group = Assert.Single(await service.SearchAsync([], [], "group", sort: LibrarySort.Random, randomPlotInstances: [instance]));
+            Assert.Equal(5, group.Items.Count);
+            selected.UnionWith(group.Items.Select(item => item.Id));
+        }
+
+        Assert.True(selected.Count > 5);
+    }
+
+    [Fact]
+    public async Task SearchAsync_SanitizesRandomPlotSourceErrors()
+    {
+        var instance = new RandomPlotInstance(Guid.NewGuid(), "Plots", new Uri("https://plots.example/"));
+        var client = new FakeRandomPlotClient((_, _, _) => throw new InvalidDataException("secret"));
+        var service = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), randomPlotClient: client);
+
+        var group = Assert.Single(await service.SearchAsync([], [], "query", randomPlotInstances: [instance]));
+
+        Assert.False(group.BackendUnreachable);
+        Assert.Equal("Search failed. Check the instance connection and try again.", group.Error);
+    }
+
+    [Fact]
+    public async Task SearchAsync_IsolatesRandomPlotFailureAndPropagatesCancellation()
+    {
+        var instance = new RandomPlotInstance(Guid.NewGuid(), "Plots", new Uri("https://plots.example/"));
+        var client = new FakeRandomPlotClient((_, _, _) => throw new HttpRequestException("secret", null, null));
+        var service = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), randomPlotClient: client);
+        var stash = new StashInstance(Guid.NewGuid(), "Stash", new Uri("https://stash.example/graphql"), new Uri("https://stash.example/"), null);
+
+        var groups = await service.SearchAsync([stash], [], "query", randomPlotInstances: [instance]);
+
+        var failed = Assert.Single(groups, group => group.Provider == "Random Plot Generator");
+        Assert.True(failed.BackendUnreachable);
+        Assert.Equal("Backend is not reachable.", failed.Error);
+        Assert.Contains(groups, group => group.Provider == "Stash" && group.Items.Count == 1);
+
+        using var cancellation = new CancellationTokenSource();
+        var waitingClient = new FakeRandomPlotClient(async (_, _, token) =>
+        {
+            cancellation.Cancel();
+            await Task.Delay(Timeout.Infinite, token);
+            return [];
+        });
+        var waitingService = new LibrarySearchService(new FakeStashClient(), new FakeHydrusClient(), randomPlotClient: waitingClient);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waitingService.SearchAsync([], [], "query",
+            cancellation.Token, randomPlotInstances: [instance]));
+    }
+
+    private sealed class FakeRandomPlotClient(
+        Func<RandomPlotInstance, string, CancellationToken, Task<IReadOnlyList<RandomPlotGroup>>> search) : IRandomPlotClient
+    {
+        public Task<IReadOnlyList<RandomPlotGroup>> GetGroupsAsync(RandomPlotInstance instance, string query,
+            CancellationToken cancellationToken = default) => search(instance, query, cancellationToken);
+    }
 
     [Fact]
     public async Task SearchAsync_MapsSwarmFilesToLibraryItems()

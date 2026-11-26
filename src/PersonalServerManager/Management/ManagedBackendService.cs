@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using PersonalServerManager.Hydrus;
+using PersonalServerManager.RandomPlot;
 using PersonalServerManager.Stash;
 using PersonalServerManager.SwarmUI;
 using YamlDotNet.Core;
@@ -19,7 +20,9 @@ public sealed class ManagedBackendService(
     IHydrusInstanceStore hydrusStore,
     ILogger<ManagedBackendService> logger,
     ISwarmUIInstanceStore? swarmStore = null,
-    Func<ProcessStartInfo, Process?>? launchProcess = null) : BackgroundService
+    Func<ProcessStartInfo, Process?>? launchProcess = null,
+    IRandomPlotInstanceStore? randomPlotStore = null,
+    string? randomPlotDataRoot = null) : BackgroundService
 {
     private static readonly string SwarmUIExecutable = Path.Combine("src", "bin", "live_release", "SwarmUI.exe");
 
@@ -97,6 +100,9 @@ public sealed class ManagedBackendService(
     public Task UpdateInstanceAsync(SwarmUIInstance instance, CancellationToken cancellationToken = default) =>
         UpdateInstanceLockedAsync(instance.Id, "SwarmUI", () => (swarmStore ?? throw new InvalidDataException("The selected backend instance no longer exists.")).UpdateAsync(instance, cancellationToken), cancellationToken);
 
+    public Task UpdateInstanceAsync(RandomPlotInstance instance, CancellationToken cancellationToken = default) =>
+        UpdateInstanceLockedAsync(instance.Id, "RandomPlotGenerator", () => (randomPlotStore ?? throw new InvalidDataException("The selected backend instance no longer exists.")).UpdateAsync(instance, cancellationToken), cancellationToken);
+
     private async Task UpdateInstanceLockedAsync(Guid instanceId, string backend, Func<Task> update, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
@@ -129,7 +135,9 @@ public sealed class ManagedBackendService(
             var hydrus = (await hydrusStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
             var swarm = swarmStore is null ? null
                 : (await swarmStore.GetAllAsync(cancellationToken)).FirstOrDefault(item => item.Id == instanceId);
-            if ((stash is null ? 0 : 1) + (hydrus is null ? 0 : 1) + (swarm is null ? 0 : 1) > 1)
+            var randomPlot = (await GetRandomPlotInstancesAsync(stash is not null || hydrus is not null || swarm is not null, cancellationToken))
+                .FirstOrDefault(item => item.Id == instanceId);
+            if ((stash is null ? 0 : 1) + (hydrus is null ? 0 : 1) + (swarm is null ? 0 : 1) + (randomPlot is null ? 0 : 1) > 1)
                 throw new InvalidDataException("The instance ID is shared by two backends.");
             string folder;
             string executable;
@@ -157,11 +165,20 @@ public sealed class ManagedBackendService(
                 endpoint = swarm.BaseUrl;
                 arguments = ["--launch_mode", "none", "--host", swarm.ListenOnLocalNetwork ? "0.0.0.0" : "127.0.0.1", "--port", swarm.Port.ToString(CultureInfo.InvariantCulture)];
             }
+            else if (randomPlot is not null && randomPlot.IsManaged)
+            {
+                ValidateFolder(randomPlot.InstallationFolder!, "RandomPlotGenerator.exe");
+                ValidatePort(randomPlot.Port);
+                folder = Path.GetFullPath(randomPlot.InstallationFolder!);
+                executable = Path.Combine(folder, "RandomPlotGenerator.exe");
+                endpoint = new Uri($"http://127.0.0.1:{randomPlot.Port}/");
+                arguments = ["--urls", $"http://127.0.0.1:{randomPlot.Port}"];
+            }
             else
             {
                 throw new InvalidDataException("No managed backend exists for this instance.");
             }
-            EnsureExecutableStopped(executable);
+            if (randomPlot is null) EnsureExecutableStopped(executable);
             EnsureLocalPortAvailable(endpoint);
             cancellationToken.ThrowIfCancellationRequested();
             if (stash is not null)
@@ -173,6 +190,27 @@ public sealed class ManagedBackendService(
             {
                 startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
                 startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+            }
+            if (randomPlot is not null)
+            {
+                if (randomPlot.DataFilePath is not null)
+                {
+                    if (!Path.IsPathFullyQualified(randomPlot.DataFilePath) || !File.Exists(randomPlot.DataFilePath))
+                        throw new InvalidDataException("The existing RandomPlotGenerator data file could not be found.");
+                    startInfo.ArgumentList.Add("--data-file");
+                    startInfo.ArgumentList.Add(randomPlot.DataFilePath);
+                }
+                else
+                {
+                    if (randomPlotDataRoot is null) throw new InvalidDataException("RandomPlotGenerator data directory is not configured.");
+                    var instanceData = Path.Combine(randomPlotDataRoot, randomPlot.Id.ToString("D"));
+                    Directory.CreateDirectory(instanceData);
+                    startInfo.Environment["RANDOMPLOT_DATA_DIRECTORY"] = instanceData;
+                }
+                startInfo.Environment["ASPNETCORE_URLS"] = $"http://127.0.0.1:{randomPlot.Port}";
+                startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
+                startInfo.Environment["AllowedHosts"] = "localhost;127.0.0.1;[::1]";
+                startInfo.Environment["PSM_PATH_BASE"] = randomPlot.PathBase;
             }
             var process = (launchProcess is null ? Process.Start(startInfo) : launchProcess(startInfo))
                 ?? throw new InvalidDataException("The backend process could not be started.");
@@ -224,9 +262,11 @@ public sealed class ManagedBackendService(
             var stash = (await stashStore.GetAllAsync(cancellationToken)).Any(item => item.Id == instanceId);
             var hydrus = (await hydrusStore.GetAllAsync(cancellationToken)).Any(item => item.Id == instanceId);
             var swarm = swarmStore is not null && (await swarmStore.GetAllAsync(cancellationToken)).Any(item => item.Id == instanceId);
-            if ((stash ? 1 : 0) + (hydrus ? 1 : 0) + (swarm ? 1 : 0) > 1)
+            var randomPlot = (await GetRandomPlotInstancesAsync(backend != "RandomPlotGenerator" && (stash || hydrus || swarm), cancellationToken))
+                .Any(item => item.Id == instanceId);
+            if ((stash ? 1 : 0) + (hydrus ? 1 : 0) + (swarm ? 1 : 0) + (randomPlot ? 1 : 0) > 1)
                 throw new InvalidDataException("The instance ID is shared by two backends.");
-            if (!(backend switch { "Stash" => stash, "Hydrus" => hydrus, "SwarmUI" => swarm, _ => false }))
+            if (!(backend switch { "Stash" => stash, "Hydrus" => hydrus, "SwarmUI" => swarm, "RandomPlotGenerator" => randomPlot, _ => false }))
                 throw new InvalidDataException("The selected backend instance no longer exists.");
             await StopOwnedAsync(instanceId);
             if (_owned.ContainsKey(instanceId))
@@ -236,6 +276,7 @@ public sealed class ManagedBackendService(
                 case "Stash": await stashStore.RemoveAsync(instanceId, cancellationToken); break;
                 case "Hydrus": await hydrusStore.RemoveAsync(instanceId, cancellationToken); break;
                 case "SwarmUI": await swarmStore!.RemoveAsync(instanceId, cancellationToken); break;
+                case "RandomPlotGenerator": await randomPlotStore!.RemoveAsync(instanceId, cancellationToken); break;
             }
         }
         finally { _gate.Release(); }
@@ -248,9 +289,11 @@ public sealed class ManagedBackendService(
             var stash = await stashStore.GetAllAsync(stoppingToken);
             var hydrus = await hydrusStore.GetAllAsync(stoppingToken);
             var swarm = await GetSwarmUIInstancesForAutostartAsync(stoppingToken);
+            var randomPlot = await GetRandomPlotInstancesForAutostartAsync(stoppingToken);
             foreach (var id in stash.Where(item => item.IsManaged && item.StartWithApp).Select(item => item.Id)
                 .Concat(hydrus.Where(item => item.IsManaged && item.StartWithApp).Select(item => item.Id))
-                .Concat(swarm.Where(item => item.IsManaged && item.StartWithApp).Select(item => item.Id)).Distinct())
+                .Concat(swarm.Where(item => item.IsManaged && item.StartWithApp).Select(item => item.Id))
+                .Concat(randomPlot.Where(item => item.IsManaged && item.StartWithApp).Select(item => item.Id)).Distinct())
                 await StartInstanceAsync(id, stoppingToken);
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
             while (await timer.WaitForNextTickAsync(stoppingToken))
@@ -334,6 +377,17 @@ public sealed class ManagedBackendService(
 
     private void SetStatus(Guid id, string message, bool running = false) => _statuses[id] = new(message, running);
 
+    private async Task<IReadOnlyList<RandomPlotInstance>> GetRandomPlotInstancesAsync(bool allowUnavailable, CancellationToken cancellationToken)
+    {
+        if (randomPlotStore is null) return [];
+        try { return await randomPlotStore.GetAllAsync(cancellationToken); }
+        catch (Exception exception) when (allowUnavailable && exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning("RandomPlotGenerator configuration unavailable while managing another backend ({ErrorType}).", exception.GetType().Name);
+            return [];
+        }
+    }
+
     private async Task<IReadOnlyList<SwarmUIInstance>> GetSwarmUIInstancesForAutostartAsync(CancellationToken cancellationToken)
     {
         if (swarmStore is null) return [];
@@ -341,6 +395,17 @@ public sealed class ManagedBackendService(
         catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
         {
             logger.LogWarning("SwarmUI autostart skipped ({ErrorType}).", exception.GetType().Name);
+            return [];
+        }
+    }
+
+    private async Task<IReadOnlyList<RandomPlotInstance>> GetRandomPlotInstancesForAutostartAsync(CancellationToken cancellationToken)
+    {
+        if (randomPlotStore is null) return [];
+        try { return await randomPlotStore.GetAllAsync(cancellationToken); }
+        catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning("RandomPlotGenerator autostart skipped ({ErrorType}).", exception.GetType().Name);
             return [];
         }
     }

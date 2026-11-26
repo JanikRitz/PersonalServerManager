@@ -3,12 +3,13 @@ using System.Net;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Management;
+using PersonalServerManager.RandomPlot;
 using PersonalServerManager.Stash;
 using PersonalServerManager.SwarmUI;
 
 namespace PersonalServerManager.Search;
 
-public enum LibraryMediaType { Image, Video, Performer, Collection, TextEbook, Comic, Studio, Tag, Marker, Note }
+public enum LibraryMediaType { Image, Video, Performer, Collection, TextEbook, Comic, Studio, Tag, Marker, Note, RandomPlotGroup }
 
 public enum LibrarySort { Default, TitleAscending, TitleDescending, DateNewest, DateOldest, Random }
 
@@ -47,7 +48,8 @@ public record LibraryTypeGroup(LibraryMediaType Type, IReadOnlyList<LibraryTypeI
 
 public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydrusClient hydrusClient,
     LocalLibraryClient? localClient = null, ComicCompanionService? comicSettings = null,
-    ComicCompanionClient? comicClient = null, ISwarmUIClient? swarmClient = null)
+    ComicCompanionClient? comicClient = null, ISwarmUIClient? swarmClient = null,
+    IRandomPlotClient? randomPlotClient = null)
 {
     private const int MaximumSwarmTitleLength = 120;
     private const int MaximumSwarmDescriptionLength = 4000;
@@ -102,7 +104,8 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
         int limit = 5,
         IReadOnlyList<LocalLibraryInstance>? localLibraries = null,
         LibrarySort sort = LibrarySort.Default,
-        IReadOnlyList<SwarmUIInstance>? swarmInstances = null)
+        IReadOnlyList<SwarmUIInstance>? swarmInstances = null,
+        IReadOnlyList<RandomPlotInstance>? randomPlotInstances = null)
     {
         if (limit is not (5 or 25))
         {
@@ -209,6 +212,29 @@ public sealed class LibrarySearchService(IStashGraphQlClient stashClient, IHydru
                             .SelectMany(kind => kind.Take(limit))
                             .Select(file => SwarmItem(instance, file))
                             .ToArray(), backend)
+                ]));
+            }
+        }
+
+        if (randomPlotClient is not null)
+        {
+            foreach (var instance in randomPlotInstances ?? [])
+            {
+                var browserUrl = new Uri(instance.BrowserUrl, instance.IsManaged ? UriKind.Relative : UriKind.Absolute);
+                tasks.Add(SearchBackendAsync(backend =>
+                [
+                    SearchGroupAsync(instance.Id, instance.Name, "Random Plot Generator", "Groups", browserUrl,
+                        async token => SortItems((await randomPlotClient.GetGroupsAsync(instance, capturedQuery, token))
+                            .Select(group => new LibraryItem(group.Name, group.Name,
+                                $"{group.Values.Count} values",
+                                new Uri(instance.BrowserUrl + "?g=" + Uri.EscapeDataString(group.Name),
+                                    instance.IsManaged ? UriKind.Relative : UriKind.Absolute),
+                                MediaType: LibraryMediaType.RandomPlotGroup,
+                                Description: string.Join('\n', group.Values.Select(value => value.Value)))
+                            {
+                                ContentCount = group.Values.Count,
+                                IsFavorite = group.IsFavorite
+                            }).ToArray(), sort).Take(limit).ToArray(), backend)
                 ]));
             }
         }

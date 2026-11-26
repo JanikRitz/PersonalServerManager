@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using PersonalServerManager.Hydrus;
 using PersonalServerManager.Management;
+using PersonalServerManager.RandomPlot;
 using PersonalServerManager.Stash;
 using PersonalServerManager.SwarmUI;
 using Xunit;
@@ -15,6 +16,199 @@ namespace PersonalServerManager.Tests;
 public sealed class ManagedBackendServiceTests : IDisposable
 {
     private readonly string _folder = Directory.CreateTempSubdirectory("psm-managed-").FullName;
+
+    [Theory]
+    [InlineData("Stash")]
+    [InlineData("Hydrus")]
+    [InlineData("SwarmUI")]
+    public async Task CorruptRandomPlotConfigurationAllowsOtherManagedBackendsToStartAndBeRemoved(string backend)
+    {
+        var path = Path.Combine(_folder, "randomplot.json");
+        await File.WriteAllTextAsync(path, "not json");
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var id = Guid.NewGuid();
+        var stash = CreateStashStore();
+        var hydrus = CreateHydrusStore();
+        var swarm = new JsonSwarmUIInstanceStore(Path.Combine(_folder, "swarmui.json"));
+        if (backend == "Stash")
+        {
+            await File.WriteAllTextAsync(Path.Combine(_folder, "stash-win.exe"), "");
+            await stash.SaveAsync(new(id, "Stash", new Uri($"http://127.0.0.1:{port}/graphql"), new Uri($"http://127.0.0.1:{port}/"), null, _folder, port));
+        }
+        else if (backend == "Hydrus")
+        {
+            await File.WriteAllTextAsync(Path.Combine(_folder, "hydrus_client.exe"), "");
+            await hydrus.SaveAsync(new(id, "Hydrus", new Uri($"http://127.0.0.1:{port}/"), "key", _folder));
+        }
+        else
+        {
+            var binaries = Directory.CreateDirectory(Path.Combine(_folder, "src", "bin", "live_release"));
+            await File.WriteAllTextAsync(Path.Combine(binaries.FullName, "SwarmUI.exe"), "");
+            await swarm.SaveAsync(new(id, "Swarm", new Uri($"http://127.0.0.1:{port}/"), SwarmUIInstance.DefaultSearchPaths, _folder, port));
+        }
+        ProcessStartInfo? launched = null;
+        using var service = new ManagedBackendService(stash, hydrus, NullLogger<ManagedBackendService>.Instance, swarm,
+            info => { launched = info; return null; }, new JsonRandomPlotInstanceStore(path));
+        await service.StartInstanceAsync(id);
+        Assert.NotNull(launched);
+        await service.RemoveInstanceAsync(backend, id);
+        Assert.Equal("not json", await File.ReadAllTextAsync(path));
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveInstanceAsync("RandomPlotGenerator", Guid.NewGuid()));
+    }
+
+    [Fact]
+    public async Task RandomPlotLaunchUsesExistingDataFileWithoutModifyingItAndRejectsMissingFile()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        await File.WriteAllTextAsync(Path.Combine(_folder, "RandomPlotGenerator.exe"), "");
+        var dataFile = Path.Combine(_folder, "existing data.json");
+        const string data = "{\"groups\":[{\"name\":\"existing\"}]}";
+        await File.WriteAllTextAsync(dataFile, data);
+        var store = new JsonRandomPlotInstanceStore(Path.Combine(_folder, "randomplot.json"));
+        var instance = new RandomPlotInstance(Guid.NewGuid(), "Random", new Uri($"http://127.0.0.1:{port}/"), _folder, port, DataFilePath: dataFile);
+        await store.SaveAsync(instance);
+        Assert.Equal(dataFile, Assert.Single(await store.GetAllAsync()).DataFilePath);
+        ProcessStartInfo? launched = null;
+        using var service = new ManagedBackendService(CreateStashStore(), CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance,
+            launchProcess: info => { launched = info; return null; }, randomPlotStore: store);
+        await service.StartInstanceAsync(instance.Id);
+        Assert.NotNull(launched);
+        Assert.Equal(["--urls", $"http://127.0.0.1:{port}", "--data-file", dataFile], launched.ArgumentList);
+        Assert.Equal(data, await File.ReadAllTextAsync(dataFile));
+        File.Delete(dataFile);
+        launched = null;
+        await service.StartInstanceAsync(instance.Id);
+        Assert.Null(launched);
+        Assert.Contains("data file could not be found", service.GetStatus(instance.Id).Message);
+        await File.WriteAllTextAsync(dataFile, data);
+        await service.RemoveInstanceAsync("RandomPlotGenerator", instance.Id);
+        Assert.Equal(data, await File.ReadAllTextAsync(dataFile));
+    }
+
+    [Fact]
+    public async Task ValidRandomPlotConfigurationStillRejectsSharedBackendIds()
+    {
+        var id = Guid.NewGuid();
+        var stash = CreateStashStore();
+        var randomPlot = new JsonRandomPlotInstanceStore(Path.Combine(_folder, "randomplot.json"));
+        await stash.SaveAsync(new(id, "Stash", new Uri("https://example.test/graphql"), new Uri("https://example.test/"), null));
+        await randomPlot.SaveAsync(new(id, "Random", new Uri("https://example.test/")));
+        using var service = new ManagedBackendService(stash, CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance, randomPlotStore: randomPlot);
+        await service.StartInstanceAsync(id);
+        Assert.Contains("shared by two backends", service.GetStatus(id).Message);
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.RemoveInstanceAsync("Stash", id));
+        Assert.Single(await stash.GetAllAsync());
+        Assert.Single(await randomPlot.GetAllAsync());
+    }
+
+    [Fact]
+    public async Task CorruptRandomPlotConfigurationDoesNotBlockOtherBackendOrPortCheck()
+    {
+        var path = Path.Combine(_folder, "randomplot.json");
+        await File.WriteAllTextAsync(path, "not json");
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        await File.WriteAllTextAsync(Path.Combine(_folder, "stash-win.exe"), "");
+        var stash = CreateStashStore();
+        var instance = new StashInstance(Guid.NewGuid(), "Stash", new Uri($"http://127.0.0.1:{port}/graphql"),
+            new Uri($"http://127.0.0.1:{port}/"), null, _folder, port);
+        await stash.SaveAsync(instance);
+        using var service = new ManagedBackendService(stash, CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance,
+            randomPlotStore: new JsonRandomPlotInstanceStore(path));
+
+        await service.StartInstanceAsync(instance.Id);
+        Assert.Contains("already in use", service.GetStatus(instance.Id).Message);
+        await service.RemoveInstanceAsync("Stash", instance.Id);
+        Assert.Empty(await stash.GetAllAsync());
+        Assert.Equal("not json", await File.ReadAllTextAsync(path));
+        var unknownId = Guid.NewGuid();
+        await service.StartInstanceAsync(unknownId);
+        Assert.Contains("configuration file is invalid", service.GetStatus(unknownId).Message);
+    }
+
+    [Fact]
+    public async Task RandomPlotLaunchUsesLoopbackPathBaseAndInstanceDataDirectory()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        await File.WriteAllTextAsync(Path.Combine(_folder, "RandomPlotGenerator.exe"), "");
+        var store = new JsonRandomPlotInstanceStore(Path.Combine(_folder, "randomplot.json"));
+        var instance = new RandomPlotInstance(Guid.NewGuid(), "Random", new Uri($"http://127.0.0.1:{port}/"), _folder, port);
+        await store.SaveAsync(instance);
+        ProcessStartInfo? launched = null;
+        var dataRoot = Path.Combine(_folder, "data");
+        using var service = new ManagedBackendService(CreateStashStore(), CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance,
+            launchProcess: info => { launched = info; return null; }, randomPlotStore: store, randomPlotDataRoot: dataRoot);
+        await service.StartInstanceAsync(instance.Id);
+        Assert.NotNull(launched);
+        Assert.Equal(["--urls", $"http://127.0.0.1:{port}"], launched.ArgumentList);
+        Assert.Equal($"http://127.0.0.1:{port}", launched.Environment["ASPNETCORE_URLS"]);
+        Assert.Equal("localhost;127.0.0.1;[::1]", launched.Environment["AllowedHosts"]);
+        Assert.Equal(instance.PathBase, launched.Environment["PSM_PATH_BASE"]);
+        Assert.Equal(Path.Combine(dataRoot, instance.Id.ToString("D")), launched.Environment["RANDOMPLOT_DATA_DIRECTORY"]);
+        Assert.True(Directory.Exists(launched.Environment["RANDOMPLOT_DATA_DIRECTORY"]));
+        await service.RemoveInstanceAsync("RandomPlotGenerator", instance.Id);
+        Assert.Empty(await store.GetAllAsync());
+        Assert.True(Directory.Exists(Path.Combine(dataRoot, instance.Id.ToString("D"))));
+    }
+
+    [Fact]
+    public async Task RandomPlotAutostartsTwoInstancesFromTheSamePublishedFolder()
+    {
+        var firstListener = new TcpListener(IPAddress.Loopback, 0);
+        var secondListener = new TcpListener(IPAddress.Loopback, 0);
+        firstListener.Start();
+        secondListener.Start();
+        var firstPort = ((IPEndPoint)firstListener.LocalEndpoint).Port;
+        var secondPort = ((IPEndPoint)secondListener.LocalEndpoint).Port;
+        firstListener.Stop();
+        secondListener.Stop();
+        await File.WriteAllTextAsync(Path.Combine(_folder, "RandomPlotGenerator.exe"), "");
+        var store = new JsonRandomPlotInstanceStore(Path.Combine(_folder, "randomplot.json"));
+        var first = new RandomPlotInstance(Guid.NewGuid(), "First", new Uri($"http://127.0.0.1:{firstPort}/"), _folder, firstPort, true);
+        var second = new RandomPlotInstance(Guid.NewGuid(), "Second", new Uri($"http://127.0.0.1:{secondPort}/"), _folder, secondPort, true);
+        await store.SaveAsync(first);
+        await store.SaveAsync(second);
+        var launches = new List<ProcessStartInfo>();
+        var processes = new List<Process>();
+        using var service = new ManagedBackendService(CreateStashStore(), CreateHydrusStore(), NullLogger<ManagedBackendService>.Instance,
+            launchProcess: info =>
+            {
+                launches.Add(info);
+                var process = Process.Start(new ProcessStartInfo("cmd.exe", "/d /c set /p fixture=")
+                    { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true })!;
+                processes.Add(process);
+                return process;
+            }, randomPlotStore: store, randomPlotDataRoot: Path.Combine(_folder, "data"));
+        try
+        {
+            await service.StartAsync(CancellationToken.None);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while (!service.GetStatus(first.Id).IsRunning || !service.GetStatus(second.Id).IsRunning)
+                await Task.Delay(10, timeout.Token);
+            Assert.Equal(2, launches.Count);
+            Assert.NotEqual(launches[0].Environment["RANDOMPLOT_DATA_DIRECTORY"], launches[1].Environment["RANDOMPLOT_DATA_DIRECTORY"]);
+            Assert.Contains(launches, info => info.Environment["PSM_PATH_BASE"] == first.PathBase);
+            Assert.Contains(launches, info => info.Environment["PSM_PATH_BASE"] == second.PathBase);
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(); }
+            }
+            await service.StopAsync(CancellationToken.None);
+        }
+    }
 
     [Fact]
     public void UpdatesOnlyRootYamlPortAndPreservesOtherValues()

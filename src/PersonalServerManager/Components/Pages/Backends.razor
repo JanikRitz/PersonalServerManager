@@ -32,7 +32,7 @@
         <div class="page-heading">
             <h1>Server Management</h1>
             <div class="heading-meta">
-                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count + _swarmInstanceCount + _comicInstanceCount).ToString("00")) <span>INSTANCES</span></span>
+                <span class="instance-count">@((_instances.Count + _hydrusInstances.Count + _localLibraries.Count + _swarmInstanceCount + _comicInstanceCount + _randomPlotInstanceCount).ToString("00")) <span>INSTANCES</span></span>
             </div>
         </div>
         @if (_pageError is not null)
@@ -115,6 +115,7 @@
             <LocalLibraries FilterKind="LocalLibraryKind.Calibre" Changed="ReloadLocalAsync" />
             <LocalLibraries FilterKind="LocalLibraryKind.Notes" Changed="ReloadLocalAsync" />
             <ComicCompanionControls CountChanged="count => _comicInstanceCount = count" />
+            <RandomPlotInstances CountChanged="count => _randomPlotInstanceCount = count" />
             @if (_selection.Type is null)
             {
                 <section class="backend-details empty-details" aria-label="Instance details"><p>Select an instance to view its details.</p></section>
@@ -172,6 +173,7 @@
     private IReadOnlyList<HydrusInstance> _hydrusInstances = [];
     private IReadOnlyList<LocalLibraryInstance> _localLibraries = [];
     private int _comicInstanceCount;
+    private int _randomPlotInstanceCount;
     private int _swarmInstanceCount;
     private DateTimeOffset? _lastRefresh;
     private string _draftName = string.Empty;

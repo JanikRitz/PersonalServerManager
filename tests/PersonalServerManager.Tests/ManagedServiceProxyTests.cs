@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PersonalServerManager.LocalLibraries;
 using PersonalServerManager.Management;
+using PersonalServerManager.RandomPlot;
 using PersonalServerManager.Stash;
 using Xunit;
 
@@ -26,6 +27,8 @@ public sealed class ManagedServiceProxyTests
     public async Task ManagedStashRequiresAuthenticationAndForwardsOnlyManagedInstances()
     {
         var upstreamRequests = 0;
+        string? randomSocketHost = null;
+        string? randomSocketForwardedHost = null;
         var upstreamBuilder = WebApplication.CreateBuilder();
         upstreamBuilder.Logging.ClearProviders();
         upstreamBuilder.WebHost.UseUrls("http://127.0.0.1:0");
@@ -36,6 +39,11 @@ public sealed class ManagedServiceProxyTests
             Interlocked.Increment(ref upstreamRequests);
             if (context.WebSockets.IsWebSocketRequest)
             {
+                if (context.Request.Path.Value!.StartsWith("/managed/randomplot/", StringComparison.Ordinal))
+                {
+                    randomSocketHost = context.Request.Host.Value;
+                    randomSocketForwardedHost = context.Request.Headers["X-Forwarded-Host"].ToString();
+                }
                 using var socket = await context.WebSockets.AcceptWebSocketAsync();
                 var buffer = new byte[1024];
                 var result = await socket.ReceiveAsync(buffer.AsMemory(), context.RequestAborted);
@@ -64,11 +72,19 @@ public sealed class ManagedServiceProxyTests
             upstreamAddress, null, InstallationFolder: "dummy", Port: upstreamAddress.Port);
         var external = managed with { Id = Guid.NewGuid(), Name = "External", InstallationFolder = null };
         var libraries = new FixtureLocalLibraryStore();
+        var randomFolder = Directory.CreateTempSubdirectory("psm-randomplot-proxy-");
+        File.WriteAllText(Path.Combine(randomFolder.FullName, "RandomPlotGenerator.exe"), "");
+        var randomStore = new JsonRandomPlotInstanceStore(Path.Combine(randomFolder.FullName, "instances.json"));
+        var random = new RandomPlotInstance(Guid.NewGuid(), "Random", upstreamAddress, randomFolder.FullName, upstreamAddress.Port);
+        var externalRandom = new RandomPlotInstance(Guid.NewGuid(), "External", upstreamAddress);
+        await randomStore.SaveAsync(random);
+        await randomStore.SaveAsync(externalRandom);
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Services.AddSingleton<IStashInstanceStore>(new FixtureStashStore(managed, external));
         builder.Services.AddSingleton<ILocalLibraryStore>(libraries);
+        builder.Services.AddSingleton<IRandomPlotInstanceStore>(randomStore);
         builder.Services.AddSingleton(serviceProvider => new ManagedCalibreServer(
             Path.Combine(Path.GetTempPath(), $"psm-calibre-{Guid.NewGuid():N}.json"), libraries,
             serviceProvider.GetRequiredService<ILogger<ManagedCalibreServer>>()));
@@ -141,6 +157,32 @@ public sealed class ManagedServiceProxyTests
         await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", cancellation.Token);
         Assert.Equal(2, Volatile.Read(ref upstreamRequests));
 
+        var randomPath = $"/managed/randomplot/{random.Id:D}";
+        http.DefaultRequestHeaders.Remove("X-Fixture-Authorization");
+        using var unauthorizedRandom = await http.GetAsync($"{randomPath}/_framework/blazor.web.js");
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedRandom.StatusCode);
+        http.DefaultRequestHeaders.Add("X-Fixture-Authorization", "yes");
+        using var randomResponse = await http.GetAsync($"{randomPath}/_framework/blazor.web.js?x=y");
+        var randomRequest = await randomResponse.Content.ReadFromJsonAsync<UpstreamRequest>();
+        Assert.Equal(HttpStatusCode.OK, randomResponse.StatusCode);
+        Assert.Equal($"{randomPath}/_framework/blazor.web.js", randomRequest!.Path);
+        Assert.Equal("?x=y", randomRequest.Query);
+        Assert.Equal($"127.0.0.1:{upstreamAddress.Port}", randomRequest.Host);
+        Assert.Equal("public.example:8443", randomRequest.ForwardedHost);
+        Assert.DoesNotContain("PersonalServerManager.Auth", randomRequest.Cookie, StringComparison.OrdinalIgnoreCase);
+        using var externalRandomResponse = await http.GetAsync($"/managed/randomplot/{externalRandom.Id:D}/");
+        Assert.Equal(HttpStatusCode.NotFound, externalRandomResponse.StatusCode);
+        using var randomSocket = new ClientWebSocket();
+        randomSocket.Options.SetRequestHeader("X-Fixture-Authorization", "yes");
+        randomSocket.Options.SetRequestHeader("Host", "public.example:8443");
+        await randomSocket.ConnectAsync(new UriBuilder(http.BaseAddress!) { Scheme = "ws", Path = $"{randomPath}/_blazor" }.Uri, cancellation.Token);
+        await randomSocket.SendAsync(message.AsMemory(), WebSocketMessageType.Text, true, cancellation.Token);
+        var randomEcho = await randomSocket.ReceiveAsync(echo.AsMemory(), cancellation.Token);
+        Assert.Equal("managed stash echo", Encoding.UTF8.GetString(echo, 0, randomEcho.Count));
+        Assert.Equal($"127.0.0.1:{upstreamAddress.Port}", randomSocketHost);
+        Assert.Equal("public.example:8443", randomSocketForwardedHost);
+        await randomSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", cancellation.Token);
+
         var comicFolder = Directory.CreateTempSubdirectory("psm-comic-proxy-");
         try
         {
@@ -162,16 +204,18 @@ public sealed class ManagedServiceProxyTests
             Assert.Equal($"{comicPath}/read/1/2/3", comicRequest.Path);
             Assert.Equal("?x=y", comicRequest.Query);
             Assert.Equal("", comicRequest.ForwardedPrefix);
+            Assert.Equal("public.example:8443", comicRequest.Host);
             Assert.DoesNotContain("PersonalServerManager.Auth", comicRequest.Cookie, StringComparison.OrdinalIgnoreCase);
             using var externalComicResponse = await http.GetAsync($"/managed/comiccompanion/{externalComic.Id:D}/");
             Assert.Equal(HttpStatusCode.NotFound, externalComicResponse.StatusCode);
             using var missingComicResponse = await http.GetAsync($"/managed/comiccompanion/{Guid.NewGuid():D}/");
             Assert.Equal(HttpStatusCode.NotFound, missingComicResponse.StatusCode);
-            Assert.Equal(3, Volatile.Read(ref upstreamRequests));
+            Assert.Equal(5, Volatile.Read(ref upstreamRequests));
         }
         finally
         {
             comicFolder.Delete(recursive: true);
+            randomFolder.Delete(recursive: true);
         }
     }
 

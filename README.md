@@ -1,9 +1,9 @@
 # Personal Server Manager
 
-A Windows-hosted, owner-operated dashboard for Stash, Hydrus, Notes, and local
+A Windows-hosted, owner-operated dashboard for Stash, Hydrus, Notes, RandomPlotGenerator, and local
 or external Calibre libraries, plus Hydrus comics via Comic Companion. Search media, metadata, notes, ebooks, and comics
 together, observe each endpoint independently, and start or stop managed servers.
-GPU policy and MCP management are not implemented. See
+GPU policy and general MCP management are not implemented. See
 [REQUIREMENTS.md](REQUIREMENTS.md) for the broader target.
 
 ## Run Locally
@@ -21,10 +21,11 @@ is shipped or stored in the repository. Sign in uses an HTTP-only, same-site
 cookie, antiforgery protection, and a per-IP request limit.
 
 The main page is a focused library search. Use the gear icon to open **Server
-Management** (`/backends`), where Stash, Hydrus, SwarmUI, Calibre, Notes, and Comic
-Companion instances are grouped by backend. Select an instance to see its details
+Management** (`/backends`), where Stash, Hydrus, SwarmUI, Calibre, Notes, Comic
+Companion, and RandomPlotGenerator
+instances are grouped by backend. Select an instance to see its details
 and settings; managed lifecycle controls are available on its row. Stash,
-Hydrus, SwarmUI, Calibre, and Comic Companion support **External** and **Managed** modes; Notes are local
+Hydrus, SwarmUI, Calibre, Comic Companion, and RandomPlotGenerator support **External** and **Managed** modes; Notes are local
 folders with optional Git sync, not managed servers. Use the search link to return
 to the main page.
 
@@ -63,7 +64,7 @@ schema introspection so unsupported options can be detected before starting a jo
 
 ## Managed Lifecycle
 
-Managed Stash, Hydrus, Comic Companion, and each Calibre library have start/stop controls and an
+Managed Stash, Hydrus, Comic Companion, RandomPlotGenerator, and each Calibre library have start/stop controls and an
 opt-in **Start with Personal Server Manager** setting, applied at app launch.
 The manager only stops processes it launched; it does not adopt existing processes
 or take over occupied ports. On normal app shutdown, Stash and Hydrus receive a
@@ -77,6 +78,42 @@ network** while the instance is stopped to bind all IPv4 interfaces; connect
 directly using the server's network address and configured port. This does not
 route SwarmUI through the manager or its authentication. Configure SwarmUI
 security and firewall rules for the networks allowed to connect.
+
+## RandomPlotGenerator
+
+In **Server Management**, add a RandomPlotGenerator instance. For **Managed**,
+select an absolute published folder containing `RandomPlotGenerator.exe` from a
+build that supports `PSM_PATH_BASE` and `RANDOMPLOT_DATA_DIRECTORY`, and choose a
+port. The manager starts it on loopback; each managed instance needs a distinct
+port. Instances can use the same published folder: each process has its own
+`/managed/randomplot/<instance-id>` path base and, by default, a separate data
+file under the manager's data directory. Removing an instance keeps its data.
+
+Optionally select an absolute path to an existing data file. It is used and
+modified directly, not imported; back it up first and do not share it between
+running processes. Stop a managed instance before editing its configuration.
+Start/stop and optional startup with the manager are available on its row and
+details.
+
+For **External**, enter the service's HTTP(S) base URL, including any path prefix;
+the manager requests `api/groups` relative to that URL. The endpoint must be
+reachable by the manager and return the RandomPlotGenerator group JSON. The
+browser also needs to reach the external URL. The manager does not configure
+credentials for the external service.
+
+Search matches stored group names and values, including templates, not generated
+outputs. Results appear under **Random Plot Generator** and open the matching
+group in the generator. Managed browser links pass through the manager's
+authenticated proxy; external links open the configured service directly.
+
+Select an instance to see its MCP URL and a VS Code HTTP MCP configuration to
+copy into `.vscode/mcp.json`. For managed instances this URL points directly to
+the generator's loopback port and path base, not the manager proxy, so it works
+only for a VS Code MCP client running on the server host. RandomPlotGenerator's
+direct UI, API, and MCP endpoint have no built-in authentication; loopback is
+not protection from other local processes or users. Keep its port private and
+do not expose it to untrusted networks. The manager's login protects only access
+through its proxy; it does not secure direct backend connections.
 
 ## Comic Companion
 

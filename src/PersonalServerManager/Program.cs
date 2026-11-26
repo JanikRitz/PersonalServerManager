@@ -15,6 +15,7 @@ using PersonalServerManager.Management;
 using PersonalServerManager.SwarmUI;
 using PersonalServerManager.Feeds;
 using PersonalServerManager.Covers;
+using PersonalServerManager.RandomPlot;
 using Yarp.ReverseProxy.Forwarder;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -98,7 +99,13 @@ builder.Services.AddSingleton<ILocalLibraryStore>(_ => new JsonLocalLibraryStore
 builder.Services.AddSingleton(services => new ManagedCalibreServer(Path.Combine(dataDirectory, "calibre-server.json"),
     services.GetRequiredService<ILocalLibraryStore>(), services.GetRequiredService<ILogger<ManagedCalibreServer>>()));
 builder.Services.AddHostedService(services => services.GetRequiredService<ManagedCalibreServer>());
-builder.Services.AddSingleton<ManagedBackendService>();
+builder.Services.AddSingleton<IRandomPlotInstanceStore>(_ => new JsonRandomPlotInstanceStore(Path.Combine(dataDirectory, "randomplot-instances.json")));
+builder.Services.AddHttpClient<IRandomPlotClient, RandomPlotClient>(client => client.Timeout = TimeSpan.FromSeconds(15))
+    .ConfigurePrimaryHttpMessageHandler(PreviewService.CreateHttpHandler);
+builder.Services.AddSingleton(services => new ManagedBackendService(
+    services.GetRequiredService<IStashInstanceStore>(), services.GetRequiredService<IHydrusInstanceStore>(),
+    services.GetRequiredService<ILogger<ManagedBackendService>>(), services.GetRequiredService<ISwarmUIInstanceStore>(),
+    randomPlotStore: services.GetRequiredService<IRandomPlotInstanceStore>(), randomPlotDataRoot: Path.Combine(dataDirectory, "randomplot")));
 builder.Services.AddHostedService(services => services.GetRequiredService<ManagedBackendService>());
 builder.Services.AddComicCompanion(dataDirectory);
 builder.Services.AddHttpClient<ComicCompanionClient>(client => client.Timeout = TimeSpan.FromSeconds(8))
