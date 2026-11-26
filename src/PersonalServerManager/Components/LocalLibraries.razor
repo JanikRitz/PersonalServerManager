@@ -47,6 +47,10 @@
                     }
                     </Actions>
                 </BackendInstanceRow>
+                @if (instance.IsManaged && status.Message is not ("Running" or "Stopped"))
+                {
+                    <p class="calibre-process-message" role="status">@status.Message</p>
+                }
             </li>
         }
     </ul>

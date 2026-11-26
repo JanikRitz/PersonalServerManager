@@ -36,6 +36,7 @@ h3 { font-size: 20px; }
 .icon-button:hover { border-color: var(--line, #d7dfd9); background: var(--paper, #edf5f2); }
 .remove-button { color: var(--coral, #a63e32); }
 .library-list { margin: 0; padding: 0; list-style: none; }
+.calibre-process-message { margin: 0 0 12px; color: var(--coral, #a63e32); font-size: 12px; overflow-wrap: anywhere; }
 .library-row { gap: var(--backend-row-gap, 10px); padding: var(--backend-row-padding, 14px) 0; border-bottom: 1px solid var(--line, #d7dfd9); }
 .status-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; }
 .status-dot.online { background: var(--teal, #176d62); }
